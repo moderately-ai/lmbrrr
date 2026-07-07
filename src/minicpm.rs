@@ -476,6 +476,18 @@ impl MiniCpmForConditionalGeneration {
         offset: usize,
     ) -> Result<Tensor> {
         let (_, seq_len) = input_ids.dims2()?;
+        self.forward_all_logits(input_ids, images, downsample_mode, offset)?
+            .narrow(1, seq_len - 1, 1)?
+            .squeeze(1)
+    }
+
+    pub fn forward_all_logits(
+        &mut self,
+        input_ids: &Tensor,
+        images: Option<&ProcessedImages>,
+        downsample_mode: &str,
+        offset: usize,
+    ) -> Result<Tensor> {
         let hidden = if let Some(images) = images {
             if offset != 0 {
                 candle::bail!("image features can only be supplied during prefill");
@@ -489,10 +501,7 @@ impl MiniCpmForConditionalGeneration {
         } else {
             self.model.language_model.forward_ids(input_ids, offset)?
         };
-        hidden
-            .narrow(1, seq_len - 1, 1)?
-            .apply(&self.lm_head)?
-            .squeeze(1)
+        hidden.apply(&self.lm_head)
     }
 
     fn replace_image_embeddings(

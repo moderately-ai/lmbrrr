@@ -55,6 +55,7 @@ enum Command {
     Bench(BenchArgs),
     Logits(LogitsArgs),
     Profile(ProfileArgs),
+    SpecVerify(SpecVerifyArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -202,6 +203,33 @@ struct ProfileArgs {
 
     #[arg(long)]
     output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct SpecVerifyArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long)]
+    prompt: String,
+
+    #[arg(long)]
+    enable_thinking: bool,
+
+    #[arg(long = "draft-token", value_delimiter = ',')]
+    draft_tokens: Vec<u32>,
+
+    #[arg(long)]
+    baseline_draft_tokens: Option<usize>,
+
+    #[arg(long)]
+    corrupt_draft_at: Option<usize>,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+
+    #[arg(long)]
+    fail_on_mismatch: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -387,6 +415,64 @@ struct TopLogit {
     token_id: u32,
     token: String,
     logit: f32,
+}
+
+#[derive(Clone, Debug)]
+struct SpecVerifyPosition {
+    index: usize,
+    draft_token_id: u32,
+    target_token_id: u32,
+    token_match: bool,
+    accepted: bool,
+    first_rejected: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SpecVerifyAnalysis {
+    positions: Vec<SpecVerifyPosition>,
+    accepted_tokens: usize,
+    first_rejected_index: Option<usize>,
+    bonus_token_id: u32,
+    reconstructed_token_ids: Vec<u32>,
+}
+
+impl SpecVerifyAnalysis {
+    fn verified_tokens(&self) -> usize {
+        self.positions.len()
+    }
+
+    fn bonus_tokens(&self) -> usize {
+        1
+    }
+
+    fn accepted_length(&self) -> usize {
+        self.accepted_tokens + self.bonus_tokens()
+    }
+
+    fn acceptance_rate(&self) -> Option<f64> {
+        let verified = self.verified_tokens();
+        (verified > 0).then(|| self.accepted_tokens as f64 / verified as f64)
+    }
+
+    fn verifier_waste_tokens(&self) -> usize {
+        self.first_rejected_index
+            .map(|idx| self.verified_tokens().saturating_sub(idx + 1))
+            .unwrap_or(0)
+    }
+
+    fn verifier_waste_share(&self) -> Option<f64> {
+        let verified = self.verified_tokens();
+        (verified > 0).then(|| self.verifier_waste_tokens() as f64 / verified as f64)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SpecVerifyStats {
+    analysis: SpecVerifyAnalysis,
+    target_token_ids: Vec<u32>,
+    prefill_elapsed: Duration,
+    verify_elapsed: Duration,
+    argmax_elapsed: Duration,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -694,6 +780,7 @@ fn main() -> Result<()> {
         Command::Bench(args) => bench(args),
         Command::Logits(args) => logits(args),
         Command::Profile(args) => profile_decode(args),
+        Command::SpecVerify(args) => spec_verify(args),
     }
 }
 
@@ -1191,6 +1278,171 @@ fn profile_decode(args: ProfileArgs) -> Result<()> {
     write_json_report(args.output.as_ref(), &report)
 }
 
+fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
+    if args.baseline_draft_tokens.is_some() && !args.draft_tokens.is_empty() {
+        anyhow::bail!("use either --draft-token or --baseline-draft-tokens, not both");
+    }
+    if let Some(count) = args.baseline_draft_tokens {
+        if count == 0 {
+            anyhow::bail!("--baseline-draft-tokens must be greater than zero");
+        }
+    } else if args.draft_tokens.is_empty() {
+        anyhow::bail!("provide at least one --draft-token or use --baseline-draft-tokens");
+    }
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+
+    let (mut draft_tokens, draft_source, baseline_tokens) =
+        if let Some(count) = args.baseline_draft_tokens {
+            let baseline_generation = greedy_generation_args(count + 1, args.enable_thinking);
+            let baseline = generate_tokens(
+                &mut model,
+                &device,
+                &baseline_generation,
+                &prompt_tokens,
+                None::<&ProcessedImages>,
+                &args.model.downsample_mode,
+                &eos_ids,
+                |_, _, _, _| Ok(()),
+            )?;
+            if baseline.generated_token_ids.len() < count + 1 {
+                anyhow::bail!(
+                    "baseline generation produced {} tokens before EOS; need {}",
+                    baseline.generated_token_ids.len(),
+                    count + 1
+                );
+            }
+            (
+                baseline.generated_token_ids[..count].to_vec(),
+                "baseline".to_string(),
+                Some(baseline.generated_token_ids),
+            )
+        } else {
+            (args.draft_tokens.clone(), "explicit".to_string(), None)
+        };
+
+    let corruption = if let Some(index) = args.corrupt_draft_at {
+        Some(corrupt_draft_token(
+            &mut draft_tokens,
+            index,
+            bundle.config.text_config.vocab_size,
+        )?)
+    } else {
+        None
+    };
+
+    let stats = verify_greedy_draft(
+        &mut model,
+        &device,
+        &prompt_tokens,
+        &draft_tokens,
+        &args.model.downsample_mode,
+    )?;
+    let analysis = &stats.analysis;
+    let accepted_token_ids = draft_tokens[..analysis.accepted_tokens].to_vec();
+    let rejected_token_ids = analysis
+        .first_rejected_index
+        .map(|idx| draft_tokens[idx..].to_vec())
+        .unwrap_or_default();
+    let baseline_prefix_match = baseline_tokens.as_ref().map(|tokens| {
+        tokens
+            .get(..analysis.reconstructed_token_ids.len())
+            .map(|prefix| prefix == analysis.reconstructed_token_ids.as_slice())
+            .unwrap_or(false)
+    });
+    let expected_rejection_index = corruption
+        .as_ref()
+        .and_then(|corruption| (draft_source == "baseline").then_some(corruption.index));
+    let rejection_matched_expectation =
+        expected_rejection_index.map(|expected| analysis.first_rejected_index == Some(expected));
+
+    let positions = analysis
+        .positions
+        .iter()
+        .map(|position| {
+            serde_json::json!({
+                "index": position.index,
+                "draft_token_id": position.draft_token_id,
+                "target_token_id": position.target_token_id,
+                "draft_token": decode_token_lossy(&tokenizer, position.draft_token_id),
+                "target_token": decode_token_lossy(&tokenizer, position.target_token_id),
+                "token_match": position.token_match,
+                "accepted": position.accepted,
+                "first_rejected": position.first_rejected,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_greedy_spec_verify",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "downsample_mode": args.model.downsample_mode.as_str(),
+        "enable_thinking": args.enable_thinking,
+        "artifact_seconds": secs(bundle.elapsed),
+        "load_seconds": secs(load_elapsed),
+        "draft_source": draft_source,
+        "prompt": args.prompt.as_str(),
+        "prompt_tokens": prompt_tokens.len(),
+        "draft_tokens": draft_tokens.len(),
+        "verified_tokens": analysis.verified_tokens(),
+        "accepted_tokens": analysis.accepted_tokens,
+        "bonus_tokens": analysis.bonus_tokens(),
+        "accepted_length": analysis.accepted_length(),
+        "acceptance_rate": analysis.acceptance_rate(),
+        "first_rejected_index": analysis.first_rejected_index,
+        "verifier_waste_tokens": analysis.verifier_waste_tokens(),
+        "verifier_waste_share": analysis.verifier_waste_share(),
+        "prefill_seconds": secs(stats.prefill_elapsed),
+        "prefill_tokens_per_second": tokens_per_second(prompt_tokens.len(), stats.prefill_elapsed),
+        "verify_seconds": secs(stats.verify_elapsed),
+        "verify_tokens_per_second": tokens_per_second(draft_tokens.len(), stats.verify_elapsed),
+        "argmax_seconds": secs(stats.argmax_elapsed),
+        "round_seconds": secs(stats.prefill_elapsed + stats.verify_elapsed + stats.argmax_elapsed),
+        "draft_token_ids": &draft_tokens,
+        "target_token_ids": &stats.target_token_ids,
+        "accepted_token_ids": &accepted_token_ids,
+        "rejected_token_ids": rejected_token_ids,
+        "bonus_token_id": analysis.bonus_token_id,
+        "bonus_token": decode_token_lossy(&tokenizer, analysis.bonus_token_id),
+        "reconstructed_token_ids": &analysis.reconstructed_token_ids,
+        "draft_text": decode_tokens(&tokenizer, &draft_tokens)?,
+        "accepted_text": decode_tokens(&tokenizer, &accepted_token_ids)?,
+        "reconstructed_text": decode_tokens(&tokenizer, &analysis.reconstructed_token_ids)?,
+        "baseline_token_ids": baseline_tokens,
+        "baseline_prefix_match": baseline_prefix_match,
+        "expected_rejection_index": expected_rejection_index,
+        "rejection_matched_expectation": rejection_matched_expectation,
+        "corruption": corruption.map(|corruption| serde_json::json!({
+            "index": corruption.index,
+            "original_token_id": corruption.original_token_id,
+            "corrupted_token_id": corruption.corrupted_token_id,
+            "original_token": decode_token_lossy(&tokenizer, corruption.original_token_id),
+            "corrupted_token": decode_token_lossy(&tokenizer, corruption.corrupted_token_id),
+        })),
+        "positions": positions,
+    });
+
+    let failed_expectation = baseline_prefix_match == Some(false)
+        || rejection_matched_expectation == Some(false)
+        || (args.fail_on_mismatch && analysis.first_rejected_index.is_some());
+    write_json_report(args.output.as_ref(), &report)?;
+    if failed_expectation {
+        anyhow::bail!("speculative verifier expectation failed");
+    }
+    Ok(())
+}
+
 fn resolve_artifacts(model: &ModelArgs) -> Result<ArtifactBundle> {
     let started = Instant::now();
     let artifacts = resolve_model_artifacts(
@@ -1253,6 +1505,176 @@ fn decode_tokens(tokenizer: &Tokenizer, tokens: &[u32]) -> Result<String> {
     tokenizer
         .decode(tokens, true)
         .map_err(|err| anyhow::anyhow!("decode generated tokens: {err}"))
+}
+
+fn decode_token_lossy(tokenizer: &Tokenizer, token_id: u32) -> String {
+    tokenizer
+        .decode(&[token_id], false)
+        .unwrap_or_else(|_| format!("<token:{token_id}>"))
+}
+
+fn greedy_generation_args(max_new_tokens: usize, enable_thinking: bool) -> GenerationArgs {
+    GenerationArgs {
+        max_new_tokens,
+        temperature: 0.0,
+        top_p: None,
+        top_k: None,
+        seed: 299792458,
+        repeat_penalty: 1.0,
+        repeat_last_n: 64,
+        enable_thinking,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DraftCorruption {
+    index: usize,
+    original_token_id: u32,
+    corrupted_token_id: u32,
+}
+
+fn corrupt_draft_token(
+    draft_tokens: &mut [u32],
+    index: usize,
+    vocab_size: usize,
+) -> Result<DraftCorruption> {
+    let token = draft_tokens
+        .get_mut(index)
+        .with_context(|| format!("--corrupt-draft-at {index} is outside the draft sequence"))?;
+    let original = *token;
+    let corrupted = if (original as usize) + 1 < vocab_size {
+        original + 1
+    } else {
+        original.saturating_sub(1)
+    };
+    if corrupted == original {
+        anyhow::bail!("cannot corrupt draft token {original} with vocab size {vocab_size}");
+    }
+    *token = corrupted;
+    Ok(DraftCorruption {
+        index,
+        original_token_id: original,
+        corrupted_token_id: corrupted,
+    })
+}
+
+fn verify_greedy_draft(
+    model: &mut MiniCpmForConditionalGeneration,
+    device: &Device,
+    prompt_tokens: &[u32],
+    draft_tokens: &[u32],
+    downsample_mode: &str,
+) -> Result<SpecVerifyStats> {
+    model.clear_cache();
+    let prompt_input = Tensor::from_slice(prompt_tokens, (1, prompt_tokens.len()), device)?;
+    let prefill_start = Instant::now();
+    let prompt_logits =
+        model.forward(&prompt_input, None::<&ProcessedImages>, downsample_mode, 0)?;
+    device.synchronize()?;
+    let prefill_elapsed = prefill_start.elapsed();
+
+    let (first_target_token, first_argmax_elapsed) = argmax_token(&prompt_logits, device)?;
+    let mut argmax_elapsed = first_argmax_elapsed;
+    let mut target_token_ids = Vec::with_capacity(draft_tokens.len());
+    if draft_tokens.is_empty() {
+        let analysis = analyze_verification(draft_tokens, &target_token_ids, first_target_token)?;
+        return Ok(SpecVerifyStats {
+            analysis,
+            target_token_ids,
+            prefill_elapsed,
+            verify_elapsed: Duration::ZERO,
+            argmax_elapsed,
+        });
+    }
+    target_token_ids.push(first_target_token);
+
+    let draft_input = Tensor::from_slice(draft_tokens, (1, draft_tokens.len()), device)?;
+    let verify_start = Instant::now();
+    let draft_logits = model.forward_all_logits(
+        &draft_input,
+        None::<&ProcessedImages>,
+        downsample_mode,
+        prompt_tokens.len(),
+    )?;
+    device.synchronize()?;
+    let verify_elapsed = verify_start.elapsed();
+    let (chunk_target_tokens, chunk_argmax_elapsed) = argmax_tokens(&draft_logits, device)?;
+    argmax_elapsed += chunk_argmax_elapsed;
+
+    if chunk_target_tokens.len() != draft_tokens.len() {
+        anyhow::bail!(
+            "verifier chunk returned {} target tokens for {} draft tokens",
+            chunk_target_tokens.len(),
+            draft_tokens.len()
+        );
+    }
+    target_token_ids.extend(
+        chunk_target_tokens
+            .iter()
+            .take(draft_tokens.len().saturating_sub(1))
+            .copied(),
+    );
+    let bonus_after_all = chunk_target_tokens
+        .last()
+        .copied()
+        .context("missing bonus token after draft chunk")?;
+    let analysis = analyze_verification(draft_tokens, &target_token_ids, bonus_after_all)?;
+
+    Ok(SpecVerifyStats {
+        analysis,
+        target_token_ids,
+        prefill_elapsed,
+        verify_elapsed,
+        argmax_elapsed,
+    })
+}
+
+fn analyze_verification(
+    draft_tokens: &[u32],
+    target_token_ids: &[u32],
+    bonus_after_all: u32,
+) -> Result<SpecVerifyAnalysis> {
+    if draft_tokens.len() != target_token_ids.len() {
+        anyhow::bail!(
+            "draft length {} does not match target token length {}",
+            draft_tokens.len(),
+            target_token_ids.len()
+        );
+    }
+
+    let accepted_tokens = draft_tokens
+        .iter()
+        .zip(target_token_ids.iter())
+        .take_while(|(draft, target)| draft == target)
+        .count();
+    let first_rejected_index = (accepted_tokens < draft_tokens.len()).then_some(accepted_tokens);
+    let bonus_token_id = first_rejected_index
+        .map(|idx| target_token_ids[idx])
+        .unwrap_or(bonus_after_all);
+    let mut reconstructed_token_ids = draft_tokens[..accepted_tokens].to_vec();
+    reconstructed_token_ids.push(bonus_token_id);
+
+    let positions = draft_tokens
+        .iter()
+        .zip(target_token_ids.iter())
+        .enumerate()
+        .map(|(index, (draft, target))| SpecVerifyPosition {
+            index,
+            draft_token_id: *draft,
+            target_token_id: *target,
+            token_match: draft == target,
+            accepted: index < accepted_tokens,
+            first_rejected: first_rejected_index == Some(index),
+        })
+        .collect();
+
+    Ok(SpecVerifyAnalysis {
+        positions,
+        accepted_tokens,
+        first_rejected_index,
+        bonus_token_id,
+        reconstructed_token_ids,
+    })
 }
 
 fn is_greedy_generation(generation: &GenerationArgs) -> bool {
@@ -1593,6 +2015,18 @@ fn argmax_token(logits: &Tensor, device: &Device) -> Result<(u32, Duration)> {
     Ok((token, started.elapsed()))
 }
 
+fn argmax_tokens(logits: &Tensor, device: &Device) -> Result<(Vec<u32>, Duration)> {
+    device.synchronize()?;
+    let started = Instant::now();
+    let tokens = logits
+        .squeeze(0)?
+        .argmax(D::Minus1)?
+        .to_device(&Device::Cpu)?
+        .to_vec1::<u32>()?;
+    device.synchronize()?;
+    Ok((tokens, started.elapsed()))
+}
+
 fn aggregate_profile_events(events: &[Qwen35ProfileEvent]) -> Vec<serde_json::Value> {
     let mut groups = HashMap::<String, (usize, f64)>::new();
     for event in events {
@@ -1788,6 +2222,43 @@ mod tests {
             stats.decode_bookkeeping_elapsed(),
             Duration::from_millis(10)
         );
+    }
+
+    #[test]
+    fn verifier_analysis_accepts_full_draft_and_bonus() {
+        let analysis = analyze_verification(&[10, 11, 12], &[10, 11, 12], 13).unwrap();
+
+        assert_eq!(analysis.accepted_tokens, 3);
+        assert_eq!(analysis.first_rejected_index, None);
+        assert_eq!(analysis.bonus_token_id, 13);
+        assert_eq!(analysis.reconstructed_token_ids, [10, 11, 12, 13]);
+        assert_eq!(analysis.verifier_waste_tokens(), 0);
+        assert_eq!(analysis.acceptance_rate(), Some(1.0));
+    }
+
+    #[test]
+    fn verifier_analysis_rejects_at_first_mismatch() {
+        let analysis = analyze_verification(&[10, 99, 12, 13], &[10, 11, 55, 56], 57).unwrap();
+
+        assert_eq!(analysis.accepted_tokens, 1);
+        assert_eq!(analysis.first_rejected_index, Some(1));
+        assert_eq!(analysis.bonus_token_id, 11);
+        assert_eq!(analysis.reconstructed_token_ids, [10, 11]);
+        assert_eq!(analysis.verifier_waste_tokens(), 2);
+        assert_eq!(analysis.verifier_waste_share(), Some(0.5));
+        assert!(analysis.positions[1].first_rejected);
+        assert!(!analysis.positions[2].accepted);
+    }
+
+    #[test]
+    fn draft_corruption_changes_selected_token() {
+        let mut draft = vec![7, 8, 9];
+        let corruption = corrupt_draft_token(&mut draft, 1, 16).unwrap();
+
+        assert_eq!(corruption.index, 1);
+        assert_eq!(corruption.original_token_id, 8);
+        assert_eq!(corruption.corrupted_token_id, 9);
+        assert_eq!(draft, [7, 9, 9]);
     }
 
     #[test]
