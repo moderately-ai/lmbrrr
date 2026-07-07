@@ -1,13 +1,13 @@
 ---
 id: implement-naive-text-inference-runner
 title: Implement initial MiniCPM Qwen3.5 inference runner
-status: in-progress
+status: done
 priority: p1
 dependencies: [scaffold-baseline-harness, port-qwen35-text-decoder]
 related: []
 scopes: [runtime/candle, model/qwen, model/minicpm]
 shared_scopes: []
-paths: []
+paths: [src/main.rs, src/minicpm.rs, src/qwen35.rs, src/weights.rs, src/prompt.rs, tests/minicpm_v46_text_parity.rs, docs/research/minicpm-v46-transformers-parity-oracle.md, docs/research/minicpm-v46-text-logits-parity.md]
 tags: [implementation, inference, minicpm]
 ---
 ## Goal

@@ -1,13 +1,13 @@
 ---
 id: port-qwen35-text-decoder
 title: Port Qwen3.5 text decoder path
-status: in-progress
+status: done
 priority: p1
 dependencies: [audit-candle-support, scaffold-baseline-harness]
 related: []
 scopes: [model/qwen, runtime/candle]
 shared_scopes: []
-paths: []
+paths: [src/qwen35.rs, src/config.rs, src/main.rs, tests/minicpm_v46_text_parity.rs, docs/research/minicpm-v46-text-logits-parity.md]
 tags: [implementation, qwen]
 ---
 ## Goal
