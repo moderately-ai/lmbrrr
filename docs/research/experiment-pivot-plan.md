@@ -18,8 +18,8 @@ should not be used as evidence until image parity is stronger.
 | --- | --- | --- | --- |
 | Text prompt/token parity | Passed | `evals/fixtures/minicpm_v46_text_prompts.json` and `tests/minicpm_v46_text_parity.rs` match the MiniCPM chat template and tokenizer. | Nothing for prompt/token formatting. |
 | Text logits parity | Passed | `evals/fixtures/minicpm_v46_transformers_text_logits.json` records live Transformers top-10 next-token logits for three text prompts; `lmbrrr logits --fail-on-mismatch` passed on Metal with top-1 agreement, top-10 overlaps of 9/10, 9/10, and 10/10, and max shared logit delta 0.25. | Nothing for initial text logits coverage. |
-| Multimodal prompt expansion | Partial | `evals/fixtures/minicpm_v46_transformers_image_expansion.json` records the model-card refract image expanding from 19 template tokens to 211 processor tokens at `16x`; Rust expansion shape is covered synthetically. | Pixel/target-size parity, representative aspect ratios, visual feature insertion, and multimodal next-token or hidden-state comparison. |
-| Measurement harness | Partial | `lmbrrr bench` records JSONL rows with prefill rate, TTFT, decode/output rate, token counts, device, dtype, revision, and generation settings. | Release-mode baseline matrix, variance policy, and generation-loop overhead isolation. |
+| Multimodal prompt/image processor | Partial | `evals/fixtures/minicpm_v46_transformers_image_expansion.json` records image-token expansion; `evals/fixtures/minicpm_v46_transformers_image_processor.json` covers unsliced, landscape-sliced, and portrait-sliced image processor outputs with exact shapes/grids/target sizes and sampled pixel values. | Visual feature insertion plus multimodal next-token or hidden-state comparison. |
+| Measurement harness | Passed for text benchmarking | `lmbrrr bench` records JSONL rows with synchronized prefill/decode-model timing, TTFT, output rate, steady-state rate, token counts, device, dtype, revision, generation settings, sampling/input/callback overhead, and model/non-model decode split. | Wider release-mode baseline matrix is still useful, but loop overhead is now isolated. |
 | Profiling | Passed for initial text decode | `docs/research/metal-decode-hot-path-profile.md` ranks the Metal decode path: linear-attention/DeltaNet layers are ~81% of synchronized component time, DeltaNet recurrent rule is ~35%, full-attention matmul/softmax is ~1.7%, and argmax/scalar transfer is below 1%. | Exact Metal kernel launch counts still require Xcode/Metal capture or lower-level Candle tracing. |
 
 ## Pivot Rule
@@ -126,11 +126,9 @@ the local hardware.
 
 ### Before Text-Only Experimental Claims
 
-1. Remove or isolate generation-loop overhead from `bench`, especially greedy
-   argmax and avoidable host/device transfers.
-2. Record a release-mode Metal baseline matrix for short, medium, and long
+1. Record a release-mode Metal baseline matrix for short, medium, and long
    prompts.
-3. Choose the first optimization based on the profile:
+2. Choose the first optimization based on the profile:
    - if generation-loop overhead dominates, optimize the runner first;
    - if DeltaNet dominates, optimize recurrent decode;
    - if full attention dominates, consider attention/kernel work;
@@ -139,10 +137,9 @@ the local hardware.
 
 ### Before Multimodal Experimental Claims
 
-1. Validate processor parity for representative image shapes.
-2. Compare visual feature counts and insertion positions.
-3. Add one multimodal next-token or hidden-state oracle comparison.
-4. Add image/video benchmark profiles only after the above pass.
+1. Compare visual feature counts and insertion positions.
+2. Add one multimodal next-token or hidden-state oracle comparison.
+3. Add image/video benchmark profiles only after the above pass.
 
 ### After Gates Close
 
@@ -158,9 +155,10 @@ paper novelty. The current text decode profile points to DeltaNet first:
 
 ## Immediate Next Tickets
 
-1. Continue `optimize-generation-loop-overhead` now that text logits are
-   comparable.
-2. Run `profile-metal-decode-hot-path` once loop overhead is isolated enough
-   that the profile reflects model execution.
-3. Run `validate-minicpm-image-parity` before using multimodal behavior as
-   evidence for optimization work.
+1. Use `docs/research/speculative-decoding-lab.md` to split verifier and MTP
+   audit implementation tickets before attempting EAGLE/DFlash/DSpark work.
+2. Use `docs/research/deltanet-decode-optimization.md` and
+   `docs/research/generation-loop-overhead.md` as the current text performance
+   baseline notes.
+3. Continue multimodal parity with visual feature insertion and hidden-state or
+   next-token checks before using image prompts for optimization claims.

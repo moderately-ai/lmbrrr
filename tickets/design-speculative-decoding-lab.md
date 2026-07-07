@@ -1,13 +1,13 @@
 ---
 id: design-speculative-decoding-lab
 title: Design MTP EAGLE DFlash DSpark experiment lab
-status: todo
+status: done
 priority: p2
 dependencies: [research-minicpm-surface, define-experiment-pivot-gates]
 related: []
 scopes: [docs/research, inference/speculative]
 shared_scopes: []
-paths: []
+paths: [docs/research/speculative-decoding-lab.md, docs/research/experiment-pivot-plan.md]
 tags: [research, speculative]
 ---
 ## Goal
