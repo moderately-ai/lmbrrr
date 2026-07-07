@@ -538,23 +538,6 @@ impl GatedDeltaNet {
         if c != self.conv_dim {
             candle::bail!("DeltaNet conv input dim {c} != {}", self.conv_dim);
         }
-        if l == 1 {
-            if let Some(state) = &self.conv_state {
-                if state.dim(2)? == self.conv_kernel_size {
-                    let previous = state.narrow(2, 1, self.conv_kernel_size - 1)?;
-                    let window = Tensor::cat(&[&previous, xs], 2)?;
-                    let weight = self.conv_weight.squeeze(1)?.unsqueeze(0)?;
-                    let out = window
-                        .broadcast_mul(&weight)?
-                        .sum(2)?
-                        .silu()?
-                        .unsqueeze(2)?;
-                    self.conv_state = Some(window.copy()?);
-                    return Ok(out);
-                }
-            }
-        }
-
         let full = match &self.conv_state {
             Some(state) => Tensor::cat(&[state, xs], 2)?,
             None => xs.clone(),
@@ -635,7 +618,7 @@ impl GatedDeltaNet {
             let out = state.broadcast_mul(&q_t.unsqueeze(3)?)?.sum(2)?;
             outs.push(out.unsqueeze(1)?);
         }
-        self.recurrent_state = Some(state);
+        self.recurrent_state = Some(state.to_dtype(dtype)?);
         let out_refs = outs.iter().collect::<Vec<_>>();
         Tensor::cat(&out_refs, 1)?.to_dtype(dtype)
     }
@@ -673,7 +656,7 @@ impl GatedDeltaNet {
         let delta = (value - kv_mem)?.broadcast_mul(&beta)?;
         state = (state + key.unsqueeze(3)?.broadcast_mul(&delta.unsqueeze(2)?)?)?;
         let out = state.broadcast_mul(&query.unsqueeze(3)?)?.sum(2)?;
-        self.recurrent_state = Some(state);
+        self.recurrent_state = Some(state.to_dtype(dtype)?);
         out.unsqueeze(1)?.to_dtype(dtype)
     }
 }

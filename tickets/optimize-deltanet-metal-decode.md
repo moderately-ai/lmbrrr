@@ -1,7 +1,7 @@
 ---
 id: optimize-deltanet-metal-decode
 title: Optimize Qwen3.5 DeltaNet decode on Metal
-status: in-progress
+status: done
 priority: p1
 dependencies: [build-transformers-parity-oracle, profile-metal-decode-hot-path]
 related: [port-qwen35-text-decoder]
