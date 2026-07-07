@@ -496,6 +496,9 @@ struct QuantizedLoadStats {
     manifest: PathBuf,
     quantized_tensors: usize,
     replaced_text_linears: usize,
+    backend: String,
+    quantized_data_bytes: u64,
+    dense_equivalent_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -2952,6 +2955,9 @@ fn load_model_with_optional_quantization(
     };
     let artifact = QuantizedTextArtifact::from_manifest(manifest, device, dtype)?;
     let quantized_tensors = artifact.quantized_tensor_count();
+    let backend = artifact.backend().to_string();
+    let quantized_data_bytes = artifact.quantized_data_bytes();
+    let dense_equivalent_bytes = artifact.dense_equivalent_bytes();
     let replaced_text_linears = model.apply_quantized_text_artifact(&artifact)?;
     Ok((
         model,
@@ -2960,6 +2966,9 @@ fn load_model_with_optional_quantization(
             manifest: artifact.manifest_path().to_path_buf(),
             quantized_tensors,
             replaced_text_linears,
+            backend,
+            quantized_data_bytes,
+            dense_equivalent_bytes,
         }),
     ))
 }
@@ -3475,7 +3484,10 @@ fn quantized_load_json(load: &Option<QuantizedLoadStats>) -> serde_json::Value {
             "manifest": load.manifest,
             "quantized_tensors": load.quantized_tensors,
             "replaced_text_linears": load.replaced_text_linears,
-            "backend": "dequantized_qmatmul_tensor",
+            "backend": load.backend,
+            "quantized_data_bytes": load.quantized_data_bytes,
+            "dense_equivalent_bytes": load.dense_equivalent_bytes,
+            "approx_dense_bytes_avoided": load.dense_equivalent_bytes.saturating_sub(load.quantized_data_bytes as usize),
         }),
         None => serde_json::Value::Null,
     }

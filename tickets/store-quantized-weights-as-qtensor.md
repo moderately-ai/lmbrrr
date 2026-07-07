@@ -1,7 +1,7 @@
 ---
 id: store-quantized-weights-as-qtensor
 title: Store MiniCPM quantized linears as Candle QTensor
-status: todo
+status: done
 priority: p1
 dependencies: [load-minicpm-quantized-linear-weights, benchmark-metal-quantized-matmul-kernels]
 related: []

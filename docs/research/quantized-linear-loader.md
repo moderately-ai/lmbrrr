@@ -2,7 +2,8 @@
 
 Date: 2026-07-07
 
-Ticket: `load-minicpm-quantized-linear-weights`
+Tickets: `load-minicpm-quantized-linear-weights`,
+`store-quantized-weights-as-qtensor`
 
 ## Command Usage
 
@@ -47,9 +48,23 @@ Still protected on the source path:
 - multimodal merger.
 
 The abstraction is `MixedLinear`: dense Candle `Linear` or Candle `QMatMul`.
-For this first loader, packed q8/q4k artifact values are dequantized back into a
-normal tensor and wrapped as `QMatMul::Tensor`. This validates manifest loading,
-replacement, and logits/bench integration, but it is not yet a speed path.
+The first loader used a dequantized correctness fallback. The current loader
+keeps replaced linears as Candle `QTensor` weights:
+
+1. read the custom `weights.lmbq` tensor bytes;
+2. dequantize transiently on CPU into F32 values;
+3. re-quantize into Candle's native GGML layout on the target device with
+   `QTensor::quantize_onto`;
+4. store `QMatMul::from_qtensor` in the model.
+
+The transient CPU tensor is dropped after replacement. This is not zero-copy
+from the custom artifact, because the artifact's simple symmetric q8/q4k bytes
+are not Candle/GGML block layouts. It does avoid keeping the replaced model
+weights as dense runtime tensors.
+
+Activation inputs are cast to F32 for quantized `QMatMul` and cast back to the
+original activation dtype afterward. This matches the Metal quantized matmul
+benchmark finding that Candle's current quantized path expects F32 activations.
 
 JSON reports include:
 
@@ -58,7 +73,10 @@ JSON reports include:
   "manifest": ".../manifest.json",
   "quantized_tensors": 2,
   "replaced_text_linears": 2,
-  "backend": "dequantized_qmatmul_tensor"
+  "backend": "candle_qtensor_requantized",
+  "quantized_data_bytes": 32776,
+  "dense_equivalent_bytes": 65536,
+  "approx_dense_bytes_avoided": 32760
 }
 ```
 
@@ -67,9 +85,12 @@ JSON reports include:
 Q8 smoke artifact:
 
 - `logits` with `target/minicpm-v46-q8-smoke/manifest.json` replaced 2 text
-  linears and passed the existing text logits parity fixture.
+  linears with `candle_qtensor_requantized` and passed the existing text logits
+  parity fixture.
 - `bench --profile short --max-new-tokens 8` ran generation with the same
-  artifact and recorded token-rate metrics plus quantized-load metadata.
+  artifact and recorded token-rate metrics plus quantized-load metadata:
+  prefill `130.46 tok/s`, decode `10.57 tok/s`.
 
-The next step is benchmarking real quantized matmul kernels instead of this
-dequantized correctness fallback.
+The next step is a full quantized inference benchmark, not a two-tensor smoke,
+so we can see whether native QTensor storage and matmul speedups survive
+end-to-end model overhead.

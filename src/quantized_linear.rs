@@ -8,14 +8,20 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle::{quantized::QMatMul, DType, Device, Module, Tensor};
+use candle::{
+    quantized::{GgmlDType, QMatMul, QTensor},
+    DType, Device, Module, Tensor,
+};
 use candle_nn::Linear;
 use serde::Deserialize;
 
 #[derive(Clone)]
 pub enum MixedLinear {
     Dense(Linear),
-    QMatMul(Arc<QMatMul>),
+    QMatMul {
+        matmul: Arc<QMatMul>,
+        force_f32_input: bool,
+    },
 }
 
 impl MixedLinear {
@@ -24,13 +30,34 @@ impl MixedLinear {
     }
 
     pub fn from_dequantized_weight(weight: Tensor) -> Self {
-        Self::QMatMul(Arc::new(QMatMul::Tensor(weight)))
+        Self::QMatMul {
+            matmul: Arc::new(QMatMul::Tensor(weight)),
+            force_f32_input: false,
+        }
+    }
+
+    pub fn from_qtensor(weight: QTensor) -> candle::Result<Self> {
+        Ok(Self::QMatMul {
+            matmul: Arc::new(QMatMul::from_qtensor(weight)?),
+            force_f32_input: true,
+        })
     }
 
     pub fn forward(&self, xs: &Tensor) -> candle::Result<Tensor> {
         match self {
             Self::Dense(linear) => linear.forward(xs),
-            Self::QMatMul(qmatmul) => qmatmul.forward(xs),
+            Self::QMatMul {
+                matmul,
+                force_f32_input,
+            } => {
+                if *force_f32_input && xs.dtype() != DType::F32 {
+                    matmul
+                        .forward(&xs.to_dtype(DType::F32)?)?
+                        .to_dtype(xs.dtype())
+                } else {
+                    matmul.forward(xs)
+                }
+            }
         }
     }
 }
@@ -39,7 +66,12 @@ impl fmt::Debug for MixedLinear {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dense(_) => f.write_str("MixedLinear::Dense"),
-            Self::QMatMul(_) => f.write_str("MixedLinear::QMatMul"),
+            Self::QMatMul {
+                force_f32_input, ..
+            } => f
+                .debug_struct("MixedLinear::QMatMul")
+                .field("force_f32_input", force_f32_input)
+                .finish(),
         }
     }
 }
@@ -110,14 +142,36 @@ impl QuantizedTextArtifact {
         self.tensors.len()
     }
 
+    pub fn backend(&self) -> &'static str {
+        "candle_qtensor_requantized"
+    }
+
+    pub fn quantized_data_bytes(&self) -> u64 {
+        self.tensors
+            .values()
+            .map(|tensor| tensor.data.length)
+            .sum::<u64>()
+    }
+
+    pub fn dense_equivalent_bytes(&self) -> usize {
+        self.tensors
+            .values()
+            .map(|tensor| tensor.num_elements * dtype_size_bytes(self.dtype))
+            .sum()
+    }
+
     pub fn load_linear(&self, name: &str) -> Result<Option<MixedLinear>> {
         let Some(tensor) = self.tensors.get(name) else {
             return Ok(None);
         };
         let values = self.load_values(name, tensor)?;
-        let weight =
-            Tensor::from_vec(values, tensor.shape.clone(), &self.device)?.to_dtype(self.dtype)?;
-        Ok(Some(MixedLinear::from_dequantized_weight(weight)))
+        let cpu_weight = Tensor::from_vec(values, tensor.shape.clone(), &Device::Cpu)?;
+        let dtype = tensor
+            .ggml_dtype()
+            .with_context(|| format!("map quantized tensor format for {name}"))?;
+        let qweight = QTensor::quantize_onto(&cpu_weight, dtype, &self.device)
+            .with_context(|| format!("requantize {name} into Candle {dtype:?} QTensor"))?;
+        Ok(Some(MixedLinear::from_qtensor(qweight)?))
     }
 
     fn load_values(&self, name: &str, tensor: &QuantizedTensor) -> Result<Vec<f32>> {
@@ -146,6 +200,16 @@ struct QuantizedTensor {
     shape: Vec<usize>,
     num_elements: usize,
     data: QuantizedData,
+}
+
+impl QuantizedTensor {
+    fn ggml_dtype(&self) -> Result<GgmlDType> {
+        match self.format.as_str() {
+            "q8_symmetric" => Ok(GgmlDType::Q8_0),
+            "q4k_block64_symmetric" => Ok(GgmlDType::Q4K),
+            other => anyhow::bail!("unsupported quantized tensor format {other}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -224,9 +288,20 @@ fn decode_q4_block64(name: &str, bytes: &[u8], num_elements: usize) -> Result<Ve
     Ok(out)
 }
 
+fn dtype_size_bytes(dtype: DType) -> usize {
+    match dtype {
+        DType::U8 => 1,
+        DType::U32 | DType::F32 => 4,
+        DType::I64 | DType::F64 => 8,
+        DType::F16 | DType::BF16 => 2,
+        _ => 4,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn decodes_q8_values() {
@@ -235,5 +310,48 @@ mod tests {
         bytes.extend_from_slice(&[254u8, 0u8, 2u8]);
         let values = decode_q8("test", &bytes, 3).unwrap();
         assert_eq!(values, vec![-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn loads_q8_as_qtensor() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let data_path = tempdir.path().join("weights.lmbq");
+        let manifest_path = tempdir.path().join("manifest.json");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0.5f32.to_le_bytes());
+        bytes.extend(std::iter::repeat(2u8).take(32));
+        let mut data_file = std::fs::File::create(&data_path).unwrap();
+        data_file.write_all(&bytes).unwrap();
+
+        std::fs::write(
+            &manifest_path,
+            r#"{
+  "kind": "lmbrrr_mixed_precision_weights",
+  "output": {"data_file": "weights.lmbq"},
+  "tensors": [{
+    "name": "linear.weight",
+    "format": "q8_symmetric",
+    "shape": [1, 32],
+    "num_elements": 32,
+    "data": {"offset": 0, "length": 36}
+  }]
+}"#,
+        )
+        .unwrap();
+
+        let artifact =
+            QuantizedTextArtifact::from_manifest(&manifest_path, &Device::Cpu, DType::F32).unwrap();
+        let linear = artifact.load_linear("linear.weight").unwrap().unwrap();
+        assert_eq!(artifact.backend(), "candle_qtensor_requantized");
+        assert_eq!(artifact.quantized_data_bytes(), 36);
+        assert_eq!(artifact.dense_equivalent_bytes(), 32 * 4);
+        assert!(matches!(
+            linear,
+            MixedLinear::QMatMul {
+                force_f32_input: true,
+                ..
+            }
+        ));
     }
 }
