@@ -11,7 +11,9 @@ draft head. It is a training-pipeline smoke, not a speedup claim.
 
 The trainer consumes `lmbrrr trace` JSON, concatenates the selected hidden-state
 vectors in layer order, standardizes the fused feature vector, and trains a
-small MLP classifier over the token ids observed in the trace set.
+small MLP classifier over the token ids observed in the trace set. The MLP uses
+tanh-approx GELU so the Rust live probe can reproduce the activation without an
+extra numeric dependency.
 
 ## Commands
 
@@ -69,6 +71,7 @@ Dataset:
 - input dimension: `3072`
 - hidden dimension: `128`
 - output token ids: `26`
+- activation: `gelu_tanh`
 
 Metrics with the deterministic random split:
 

@@ -4,13 +4,14 @@ use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
     io::{BufWriter, IsTerminal, Stdout, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
 use candle::{
     quantized::{GgmlDType, QMatMul, QTensor},
+    safetensors::Load,
     DType, Device, Module, Tensor, D,
 };
 use candle_nn::VarBuilder;
@@ -36,7 +37,7 @@ use lmbrrr::{
         QuantFormat,
     },
     quantized_linear::QuantizedTextArtifact,
-    qwen35::{Qwen35ProfileEvent, Qwen35Profiler, Qwen35TraceRecorder},
+    qwen35::{Qwen35HiddenStateTrace, Qwen35ProfileEvent, Qwen35Profiler, Qwen35TraceRecorder},
     token_stream::TokenOutputStream,
     weights::{validate_minicpm_header, WeightReport},
 };
@@ -70,6 +71,7 @@ enum Command {
     QuantConvert(QuantConvertArgs),
     QuantMatmulBench(QuantMatmulBenchArgs),
     EagleChainDraft(EagleChainDraftArgs),
+    EagleLiveProbe(EagleLiveProbeArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -358,6 +360,30 @@ struct EagleChainDraftArgs {
 
     #[arg(long, default_value_t = 4)]
     draft_width: usize,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct EagleLiveProbeArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long)]
+    prompt: String,
+
+    #[arg(long)]
+    draft_head_manifest: PathBuf,
+
+    #[arg(long, default_value_t = 8)]
+    max_new_tokens: usize,
+
+    #[arg(long, default_value_t = 4)]
+    draft_width: usize,
+
+    #[arg(long)]
+    enable_thinking: bool,
 
     #[arg(long)]
     output: Option<PathBuf>,
@@ -969,6 +995,7 @@ fn main() -> Result<()> {
         Command::QuantConvert(args) => quant_convert(args),
         Command::QuantMatmulBench(args) => quant_matmul_bench(args),
         Command::EagleChainDraft(args) => eagle_chain_draft(args),
+        Command::EagleLiveProbe(args) => eagle_live_probe(args),
     }
 }
 
@@ -2353,6 +2380,448 @@ fn eagle_chain_draft(args: EagleChainDraftArgs) -> Result<()> {
         "note": "Offline EAGLE-style chain probe over trace top-1 tokens. This validates accepted-length accounting over hidden-state features but is not a trained drafter or speedup claim.",
     });
     write_json_report(args.output.as_ref(), &report)
+}
+
+fn eagle_live_probe(args: EagleLiveProbeArgs) -> Result<()> {
+    if args.max_new_tokens == 0 {
+        anyhow::bail!("--max-new-tokens must be greater than zero");
+    }
+    if args.draft_width == 0 {
+        anyhow::bail!("--draft-width must be greater than zero");
+    }
+
+    let draft_head = EagleDraftHead::from_manifest(&args.draft_head_manifest)?;
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+    let trace_recorder = Qwen35TraceRecorder::new(draft_head.capture_layers.clone());
+    model.set_text_trace_recorder(Some(trace_recorder.clone()));
+    model.clear_cache();
+
+    let mut generated_token_ids = Vec::with_capacity(args.max_new_tokens);
+    let mut draft_token_ids = Vec::with_capacity(args.max_new_tokens);
+    let mut confidences = Vec::with_capacity(args.max_new_tokens);
+    let mut steps = Vec::with_capacity(args.max_new_tokens);
+    let mut total_forward_elapsed = Duration::ZERO;
+    let mut total_argmax_elapsed = Duration::ZERO;
+    let mut total_draft_elapsed = Duration::ZERO;
+    let mut eos_reached = false;
+
+    trace_recorder.clear();
+    let prompt_input = Tensor::from_slice(&prompt_tokens, (1, prompt_tokens.len()), &device)?;
+    let mut forward_start = Instant::now();
+    let mut logits = model.forward(
+        &prompt_input,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        0,
+    )?;
+    device.synchronize()?;
+    let mut forward_elapsed = forward_start.elapsed();
+    let mut hidden_states = trace_recorder.take();
+    let mut phase = "prefill";
+    let mut context_position = prompt_tokens.len() - 1;
+    let mut offset = 0usize;
+    let mut seq_len = prompt_tokens.len();
+
+    for step_index in 0..args.max_new_tokens {
+        total_forward_elapsed += forward_elapsed;
+        let (target_token, argmax_elapsed) = argmax_token(&logits, &device)?;
+        total_argmax_elapsed += argmax_elapsed;
+
+        let feature = eagle_feature_from_hidden_states(
+            &hidden_states,
+            &draft_head.capture_layers,
+            draft_head.input_dim,
+        )?;
+        let draft_start = Instant::now();
+        let prediction = draft_head.predict(&feature)?;
+        let draft_elapsed = draft_start.elapsed();
+        total_draft_elapsed += draft_elapsed;
+
+        let step_eos = eos_ids.contains(&target_token);
+        generated_token_ids.push(target_token);
+        draft_token_ids.push(prediction.token_id);
+        confidences.push(prediction.confidence);
+        steps.push(serde_json::json!({
+            "step": step_index,
+            "phase": phase,
+            "context_position": context_position,
+            "offset": offset,
+            "seq_len": seq_len,
+            "target_token_id": target_token,
+            "target_token": decode_token_lossy(&tokenizer, target_token),
+            "draft_token_id": prediction.token_id,
+            "draft_token": decode_token_lossy(&tokenizer, prediction.token_id),
+            "token_match": prediction.token_id == target_token,
+            "draft_confidence": prediction.confidence,
+            "draft_head_seconds": secs(draft_elapsed),
+            "target_forward_seconds": secs(forward_elapsed),
+            "argmax_seconds": secs(argmax_elapsed),
+            "hidden_state_count": hidden_states.len(),
+            "top_draft_logits": prediction.top_logits.iter().map(|item| {
+                serde_json::json!({
+                    "token_id": item.token_id,
+                    "token": decode_token_lossy(&tokenizer, item.token_id),
+                    "logit": item.logit,
+                    "confidence": item.confidence,
+                })
+            }).collect::<Vec<_>>(),
+        }));
+
+        if step_eos {
+            eos_reached = true;
+            break;
+        }
+        if generated_token_ids.len() == args.max_new_tokens {
+            break;
+        }
+
+        phase = "decode";
+        context_position = prompt_tokens.len() + generated_token_ids.len() - 1;
+        offset = context_position;
+        seq_len = 1;
+        trace_recorder.clear();
+        let input = Tensor::from_slice(&[target_token], (1, 1), &device)?;
+        forward_start = Instant::now();
+        logits = model.forward(
+            &input,
+            None::<&ProcessedImages>,
+            &args.model.downsample_mode,
+            offset,
+        )?;
+        device.synchronize()?;
+        forward_elapsed = forward_start.elapsed();
+        hidden_states = trace_recorder.take();
+    }
+    model.set_text_trace_recorder(None);
+
+    let scheduled_width = args
+        .draft_width
+        .min(draft_token_ids.len())
+        .min(generated_token_ids.len());
+    let draft_chain = draft_token_ids[..scheduled_width].to_vec();
+    let target_chain = generated_token_ids[..scheduled_width].to_vec();
+    let bonus_token_id = generated_token_ids
+        .get(scheduled_width)
+        .copied()
+        .or_else(|| generated_token_ids.last().copied())
+        .context("live probe generated no target tokens")?;
+    let analysis = analyze_verification(&draft_chain, &target_chain, bonus_token_id)?;
+    let exact_greedy_prefix_match = generated_token_ids
+        .get(..analysis.reconstructed_token_ids.len())
+        .map(|prefix| prefix == analysis.reconstructed_token_ids.as_slice())
+        .unwrap_or(false);
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_eagle_live_probe",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "downsample_mode": args.model.downsample_mode.as_str(),
+        "enable_thinking": args.enable_thinking,
+        "artifact_seconds": secs(bundle.elapsed),
+        "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
+        "draft_head_manifest": args.draft_head_manifest,
+        "draft_head": draft_head.manifest_json(),
+        "prompt": args.prompt.as_str(),
+        "prompt_tokens": prompt_tokens.len(),
+        "generated_tokens": generated_token_ids.len(),
+        "generated_token_ids": &generated_token_ids,
+        "generated_text": decode_tokens(&tokenizer, &generated_token_ids)?,
+        "eos_reached": eos_reached,
+        "requested_draft_width": args.draft_width,
+        "scheduled_draft_width": scheduled_width,
+        "draft_token_ids": &draft_token_ids,
+        "draft_text": decode_tokens(&tokenizer, &draft_chain)?,
+        "draft_confidences": &confidences,
+        "target_token_ids": target_chain,
+        "accepted_tokens": analysis.accepted_tokens,
+        "accepted_length": analysis.accepted_length(),
+        "acceptance_rate": analysis.acceptance_rate(),
+        "first_rejected_index": analysis.first_rejected_index,
+        "verifier_waste_tokens": analysis.verifier_waste_tokens(),
+        "verifier_waste_share": analysis.verifier_waste_share(),
+        "bonus_token_id": analysis.bonus_token_id,
+        "bonus_token": decode_token_lossy(&tokenizer, analysis.bonus_token_id),
+        "reconstructed_token_ids": &analysis.reconstructed_token_ids,
+        "reconstructed_text": decode_tokens(&tokenizer, &analysis.reconstructed_token_ids)?,
+        "exact_greedy_prefix_match": exact_greedy_prefix_match,
+        "target_forward_seconds": secs(total_forward_elapsed),
+        "target_forward_tokens_per_second": tokens_per_second(generated_token_ids.len(), total_forward_elapsed),
+        "argmax_seconds": secs(total_argmax_elapsed),
+        "draft_head_seconds": secs(total_draft_elapsed),
+        "draft_head_tokens_per_second": tokens_per_second(draft_token_ids.len(), total_draft_elapsed),
+        "draft_overhead_share_vs_target_forward": if total_forward_elapsed.as_secs_f64() > 0.0 {
+            Some(total_draft_elapsed.as_secs_f64() / total_forward_elapsed.as_secs_f64())
+        } else {
+            None
+        },
+        "steps": steps,
+        "note": "Live target-model probe: the draft head runs on captured target hidden states during greedy generation. This measures draft-head overhead and proposal quality, not an accelerated EAGLE decode yet.",
+    });
+
+    write_json_report(args.output.as_ref(), &report)
+}
+
+#[derive(Debug)]
+struct EagleDraftHead {
+    capture_layers: Vec<usize>,
+    input_dim: usize,
+    hidden_dim: usize,
+    output_dim: usize,
+    token_ids: Vec<u32>,
+    feature_mean: Vec<f32>,
+    feature_std: Vec<f32>,
+    w0: Vec<f32>,
+    b0: Vec<f32>,
+    w2: Vec<f32>,
+    b2: Vec<f32>,
+    source_manifest: EagleDraftHeadManifest,
+}
+
+impl EagleDraftHead {
+    fn from_manifest(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("read draft head manifest {}", path.display()))?;
+        let manifest: EagleDraftHeadManifest = serde_json::from_str(&text)
+            .with_context(|| format!("parse draft head manifest {}", path.display()))?;
+        if manifest.kind != "lmbrrr_eagle_draft_head" {
+            anyhow::bail!("unsupported draft head kind {}", manifest.kind);
+        }
+        if manifest.draft_head_type != "observed-vocabulary-mlp" {
+            anyhow::bail!("unsupported draft head type {}", manifest.draft_head_type);
+        }
+        if manifest.activation != "gelu_tanh" {
+            anyhow::bail!("unsupported draft head activation {}", manifest.activation);
+        }
+        if manifest.output_dim != manifest.token_ids.len() {
+            anyhow::bail!(
+                "draft head output_dim {} does not match {} token ids",
+                manifest.output_dim,
+                manifest.token_ids.len()
+            );
+        }
+        let weights_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&manifest.weights);
+        let bytes = fs::read(&weights_path)
+            .with_context(|| format!("read draft head weights {}", weights_path.display()))?;
+        let safetensors = safetensors::SafeTensors::deserialize(&bytes)
+            .with_context(|| format!("parse draft head weights {}", weights_path.display()))?;
+        let feature_mean = load_safetensor_f32(&safetensors, "feature_mean")?;
+        let feature_std = load_safetensor_f32(&safetensors, "feature_std")?;
+        let w0 = load_safetensor_f32(&safetensors, "net.0.weight")?;
+        let b0 = load_safetensor_f32(&safetensors, "net.0.bias")?;
+        let w2 = load_safetensor_f32(&safetensors, "net.2.weight")?;
+        let b2 = load_safetensor_f32(&safetensors, "net.2.bias")?;
+
+        ensure_len("feature_mean", &feature_mean, manifest.input_dim)?;
+        ensure_len("feature_std", &feature_std, manifest.input_dim)?;
+        ensure_len(
+            "net.0.weight",
+            &w0,
+            manifest.input_dim * manifest.hidden_dim,
+        )?;
+        ensure_len("net.0.bias", &b0, manifest.hidden_dim)?;
+        ensure_len(
+            "net.2.weight",
+            &w2,
+            manifest.hidden_dim * manifest.output_dim,
+        )?;
+        ensure_len("net.2.bias", &b2, manifest.output_dim)?;
+
+        Ok(Self {
+            capture_layers: manifest.capture_layers.clone(),
+            input_dim: manifest.input_dim,
+            hidden_dim: manifest.hidden_dim,
+            output_dim: manifest.output_dim,
+            token_ids: manifest.token_ids.clone(),
+            feature_mean,
+            feature_std,
+            w0,
+            b0,
+            w2,
+            b2,
+            source_manifest: manifest,
+        })
+    }
+
+    fn predict(&self, feature: &[f32]) -> Result<EagleDraftPrediction> {
+        ensure_len("live feature", feature, self.input_dim)?;
+        let mut hidden = vec![0f32; self.hidden_dim];
+        for (row, hidden_value) in hidden.iter_mut().enumerate() {
+            let mut acc = self.b0[row];
+            let row_offset = row * self.input_dim;
+            for (col, value) in feature.iter().enumerate() {
+                let normalized = (*value - self.feature_mean[col]) / self.feature_std[col];
+                acc += self.w0[row_offset + col] * normalized;
+            }
+            *hidden_value = gelu_tanh(acc);
+        }
+
+        let mut logits = vec![0f32; self.output_dim];
+        for (row, logit) in logits.iter_mut().enumerate() {
+            let mut acc = self.b2[row];
+            let row_offset = row * self.hidden_dim;
+            for (col, value) in hidden.iter().enumerate() {
+                acc += self.w2[row_offset + col] * value;
+            }
+            *logit = acc;
+        }
+        let top_logits = top_draft_logits(&logits, &self.token_ids, 5)?;
+        let best = top_logits
+            .first()
+            .context("draft head produced no logits")?
+            .clone();
+        Ok(EagleDraftPrediction {
+            token_id: best.token_id,
+            confidence: best.confidence,
+            top_logits,
+        })
+    }
+
+    fn manifest_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "draft_head_type": self.source_manifest.draft_head_type,
+            "activation": self.source_manifest.activation,
+            "capture_layers": self.capture_layers,
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "output_dim": self.output_dim,
+            "feature_normalization": self.source_manifest.feature_normalization,
+            "training": self.source_manifest.training,
+            "metrics": self.source_manifest.metrics,
+            "limits": self.source_manifest.limits,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EagleDraftPrediction {
+    token_id: u32,
+    confidence: f64,
+    top_logits: Vec<EagleDraftLogit>,
+}
+
+#[derive(Clone, Debug)]
+struct EagleDraftLogit {
+    token_id: u32,
+    logit: f32,
+    confidence: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct EagleDraftHeadManifest {
+    kind: String,
+    draft_head_type: String,
+    activation: String,
+    weights: String,
+    capture_layers: Vec<usize>,
+    input_dim: usize,
+    hidden_dim: usize,
+    output_dim: usize,
+    token_ids: Vec<u32>,
+    feature_normalization: String,
+    #[serde(default)]
+    training: serde_json::Value,
+    #[serde(default)]
+    metrics: serde_json::Value,
+    #[serde(default)]
+    limits: Vec<String>,
+}
+
+fn eagle_feature_from_hidden_states(
+    hidden_states: &[Qwen35HiddenStateTrace],
+    capture_layers: &[usize],
+    input_dim: usize,
+) -> Result<Vec<f32>> {
+    let mut states = hidden_states.to_vec();
+    states.sort_by_key(|state| state.layer_index);
+    let layers = states
+        .iter()
+        .map(|state| state.layer_index)
+        .collect::<Vec<_>>();
+    if layers != capture_layers {
+        anyhow::bail!(
+            "captured hidden layers {:?}, expected {:?}",
+            layers,
+            capture_layers
+        );
+    }
+    let mut feature = Vec::with_capacity(input_dim);
+    for state in &states {
+        feature.extend_from_slice(&state.values);
+    }
+    ensure_len("fused hidden-state feature", &feature, input_dim)?;
+    Ok(feature)
+}
+
+fn load_safetensor_f32(safetensors: &safetensors::SafeTensors<'_>, name: &str) -> Result<Vec<f32>> {
+    let view = safetensors
+        .tensor(name)
+        .with_context(|| format!("missing draft head tensor {name}"))?;
+    let tensor = view.load(&Device::Cpu)?;
+    Ok(tensor
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?)
+}
+
+fn ensure_len(name: &str, values: &[f32], expected: usize) -> Result<()> {
+    if values.len() != expected {
+        anyhow::bail!("{name} has {} values, expected {expected}", values.len());
+    }
+    Ok(())
+}
+
+fn gelu_tanh(value: f32) -> f32 {
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
+    0.5 * value * (1.0 + (SQRT_2_OVER_PI * (value + 0.044_715 * value.powi(3))).tanh())
+}
+
+fn top_draft_logits(
+    logits: &[f32],
+    token_ids: &[u32],
+    top_k: usize,
+) -> Result<Vec<EagleDraftLogit>> {
+    if logits.len() != token_ids.len() {
+        anyhow::bail!(
+            "draft logits length {} does not match token id count {}",
+            logits.len(),
+            token_ids.len()
+        );
+    }
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let denom = logits
+        .iter()
+        .map(|logit| ((*logit - max_logit) as f64).exp())
+        .sum::<f64>();
+    let mut indices = (0..logits.len()).collect::<Vec<_>>();
+    indices.sort_by(|left, right| logits[*right].total_cmp(&logits[*left]));
+    Ok(indices
+        .into_iter()
+        .take(top_k.min(logits.len()))
+        .map(|idx| EagleDraftLogit {
+            token_id: token_ids[idx],
+            logit: logits[idx],
+            confidence: (((logits[idx] - max_logit) as f64).exp()) / denom,
+        })
+        .collect())
 }
 
 #[derive(Debug, Deserialize)]

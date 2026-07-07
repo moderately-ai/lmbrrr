@@ -33,7 +33,7 @@ class EagleDraftHead(torch.nn.Module):
         super().__init__()
         self.net = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
-            torch.nn.GELU(),
+            torch.nn.GELU(approximate="tanh"),
             torch.nn.Linear(hidden_dim, output_dim),
         )
 
@@ -249,6 +249,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "kind": "lmbrrr_eagle_draft_head",
         "schema_version": 1,
         "draft_head_type": "observed-vocabulary-mlp",
+        "activation": "gelu_tanh",
         "weights": weights_path.name,
         "capture_layers": capture_layers,
         "input_dim": int(x.shape[1]),
