@@ -69,6 +69,7 @@ enum Command {
     QuantSensitivity(QuantSensitivityArgs),
     QuantConvert(QuantConvertArgs),
     QuantMatmulBench(QuantMatmulBenchArgs),
+    EagleChainDraft(EagleChainDraftArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -345,6 +346,18 @@ struct QuantMatmulBenchArgs {
 
     #[arg(long)]
     include_lm_head: bool,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct EagleChainDraftArgs {
+    #[arg(long)]
+    trace: PathBuf,
+
+    #[arg(long, default_value_t = 4)]
+    draft_width: usize,
 
     #[arg(long)]
     output: Option<PathBuf>,
@@ -955,6 +968,7 @@ fn main() -> Result<()> {
         Command::QuantSensitivity(args) => quant_sensitivity(args),
         Command::QuantConvert(args) => quant_convert(args),
         Command::QuantMatmulBench(args) => quant_matmul_bench(args),
+        Command::EagleChainDraft(args) => eagle_chain_draft(args),
     }
 }
 
@@ -2235,6 +2249,139 @@ fn deterministic_values(len: usize, scale: f32) -> Vec<f32> {
             (a * 0.007 + b * 0.003).sin() * scale
         })
         .collect()
+}
+
+fn eagle_chain_draft(args: EagleChainDraftArgs) -> Result<()> {
+    if args.draft_width == 0 {
+        anyhow::bail!("--draft-width must be greater than zero");
+    }
+    let started = Instant::now();
+    let file = fs::File::open(&args.trace)
+        .with_context(|| format!("open trace {}", args.trace.display()))?;
+    let trace: EagleTraceReport = serde_json::from_reader(file)
+        .with_context(|| format!("parse trace {}", args.trace.display()))?;
+    if trace.steps.is_empty() {
+        anyhow::bail!("trace contains no steps");
+    }
+    let width = args.draft_width.min(trace.steps.len());
+    let draft_tokens = trace
+        .steps
+        .iter()
+        .take(width)
+        .map(|step| {
+            step.top_logits
+                .first()
+                .map(|logit| logit.token_id)
+                .unwrap_or(step.target_token_id)
+        })
+        .collect::<Vec<_>>();
+    let target_tokens = trace
+        .generated_token_ids
+        .iter()
+        .take(width)
+        .copied()
+        .collect::<Vec<_>>();
+    let accepted_tokens = draft_tokens
+        .iter()
+        .zip(target_tokens.iter())
+        .take_while(|(draft, target)| draft == target)
+        .count();
+    let first_rejected_index = (accepted_tokens < draft_tokens.len()).then_some(accepted_tokens);
+    let bonus_token_id = trace
+        .generated_token_ids
+        .get(accepted_tokens)
+        .copied()
+        .or_else(|| trace.generated_token_ids.last().copied());
+    let mut reconstructed = draft_tokens[..accepted_tokens].to_vec();
+    if let Some(bonus) = bonus_token_id {
+        reconstructed.push(bonus);
+    }
+    let feature_summary = trace
+        .steps
+        .iter()
+        .take(width)
+        .map(|step| {
+            let hidden_state_count = step.hidden_states.len();
+            let hidden_size = step
+                .hidden_states
+                .first()
+                .map(|state| state.hidden_size)
+                .unwrap_or(0);
+            let fused_feature_l2 = step
+                .hidden_states
+                .iter()
+                .flat_map(|state| state.values.iter())
+                .map(|value| (*value as f64) * (*value as f64))
+                .sum::<f64>()
+                .sqrt();
+            serde_json::json!({
+                "step": step.step,
+                "context_position": step.context_position,
+                "target_token_id": step.target_token_id,
+                "draft_token_id": step.top_logits.first().map(|logit| logit.token_id),
+                "hidden_state_count": hidden_state_count,
+                "hidden_size": hidden_size,
+                "fused_feature_l2": fused_feature_l2,
+            })
+        })
+        .collect::<Vec<_>>();
+    let draft_elapsed = started.elapsed();
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_eagle_chain_draft_probe",
+        "schema_version": 1,
+        "trace": args.trace,
+        "draft_source": "trace_top1_oracle_probe",
+        "draft_width": args.draft_width,
+        "scheduled_width": width,
+        "prompt_tokens": trace.prompt_tokens,
+        "generated_tokens": trace.generated_tokens,
+        "capture_layers": trace.capture_layers,
+        "draft_seconds": secs(draft_elapsed),
+        "draft_token_ids": draft_tokens,
+        "target_token_ids": target_tokens,
+        "accepted_tokens": accepted_tokens,
+        "bonus_token_id": bonus_token_id,
+        "bonus_tokens": usize::from(bonus_token_id.is_some()),
+        "accepted_length": accepted_tokens + usize::from(bonus_token_id.is_some()),
+        "acceptance_rate": if width > 0 { Some(accepted_tokens as f64 / width as f64) } else { None },
+        "first_rejected_index": first_rejected_index,
+        "verifier_waste_tokens": first_rejected_index.map(|idx| width.saturating_sub(idx + 1)).unwrap_or(0),
+        "reconstructed_token_ids": reconstructed,
+        "exact_greedy_prefix_match": first_rejected_index.is_none(),
+        "feature_summary": feature_summary,
+        "note": "Offline EAGLE-style chain probe over trace top-1 tokens. This validates accepted-length accounting over hidden-state features but is not a trained drafter or speedup claim.",
+    });
+    write_json_report(args.output.as_ref(), &report)
+}
+
+#[derive(Debug, Deserialize)]
+struct EagleTraceReport {
+    prompt_tokens: usize,
+    generated_tokens: usize,
+    generated_token_ids: Vec<u32>,
+    capture_layers: Vec<usize>,
+    steps: Vec<EagleTraceStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EagleTraceStep {
+    step: usize,
+    context_position: usize,
+    target_token_id: u32,
+    top_logits: Vec<EagleTraceTopLogit>,
+    hidden_states: Vec<EagleTraceHiddenState>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EagleTraceTopLogit {
+    token_id: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct EagleTraceHiddenState {
+    hidden_size: usize,
+    values: Vec<f32>,
 }
 
 fn run_quant_baseline_case(
