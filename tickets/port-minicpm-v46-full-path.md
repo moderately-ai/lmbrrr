@@ -1,7 +1,7 @@
 ---
 id: port-minicpm-v46-full-path
 title: Port full MiniCPM-V-4.6 multimodal path
-status: todo
+status: done
 priority: p1
 dependencies: [port-qwen35-text-decoder]
 related: []

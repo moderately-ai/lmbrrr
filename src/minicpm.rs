@@ -128,12 +128,14 @@ impl VisionAttention {
             if len == 0 {
                 continue;
             }
-            let q = q.narrow(2, start, len)?;
-            let k = k.narrow(2, start, len)?;
-            let v = v.narrow(2, start, len)?;
-            let attn = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
+            let q = q.narrow(2, start, len)?.contiguous()?;
+            let k = k.narrow(2, start, len)?.contiguous()?;
+            let v = v.narrow(2, start, len)?.contiguous()?;
+            let k_t = k.transpose(2, 3)?.contiguous()?;
+            let attn = (q.matmul(&k_t)? * scale)?;
             let attn = candle_nn::ops::softmax_last_dim(&attn.to_dtype(DType::F32)?)?
-                .to_dtype(xs.dtype())?;
+                .to_dtype(xs.dtype())?
+                .contiguous()?;
             chunks.push(attn.matmul(&v)?.transpose(1, 2)?.reshape((b, len, dim))?);
         }
         let refs = chunks.iter().collect::<Vec<_>>();
@@ -422,13 +424,13 @@ impl MiniCpmModel {
         &self,
         images: &ProcessedImages,
         downsample_mode: &str,
+        dtype: DType,
     ) -> Result<Vec<Tensor>> {
         let use_vit_merger = downsample_mode != "4x";
-        let (hidden, target_sizes) = self.vision_tower.forward(
-            &images.pixel_values,
-            &images.target_sizes,
-            use_vit_merger,
-        )?;
+        let pixel_values = images.pixel_values.to_dtype(dtype)?;
+        let (hidden, target_sizes) =
+            self.vision_tower
+                .forward(&pixel_values, &images.target_sizes, use_vit_merger)?;
         self.merger.forward(&hidden, &target_sizes)
     }
 
@@ -509,7 +511,9 @@ impl MiniCpmForConditionalGeneration {
                 candle::bail!("image features can only be supplied during prefill");
             }
             let mut embeds = self.model.language_model.embed(input_ids)?;
-            let image_features = self.model.get_image_features(images, downsample_mode)?;
+            let image_features =
+                self.model
+                    .get_image_features(images, downsample_mode, embeds.dtype())?;
             let refs = image_features.iter().collect::<Vec<_>>();
             let image_features = Tensor::cat(&refs, 0)?;
             embeds = self.replace_image_embeddings(input_ids, &embeds, &image_features)?;
