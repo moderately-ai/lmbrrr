@@ -70,6 +70,7 @@ enum Command {
     QuantSensitivity(QuantSensitivityArgs),
     QuantConvert(QuantConvertArgs),
     QuantMatmulBench(QuantMatmulBenchArgs),
+    QuantQuality(QuantQualityArgs),
     EagleChainDraft(EagleChainDraftArgs),
     EagleLiveProbe(EagleLiveProbeArgs),
 }
@@ -354,6 +355,57 @@ struct QuantMatmulBenchArgs {
 }
 
 #[derive(Parser, Debug)]
+struct QuantQualityArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[command(flatten)]
+    generation: GenerationArgs,
+
+    #[arg(
+        long,
+        default_value = "evals/calibration/minicpm_v46_quant_calibration.jsonl"
+    )]
+    calibration: PathBuf,
+
+    #[arg(long = "case-id")]
+    case_ids: Vec<String>,
+
+    #[arg(long)]
+    max_cases: Option<usize>,
+
+    #[arg(long, default_value = "target/minicpm-v46-q8-full/manifest.json")]
+    q8_manifest: PathBuf,
+
+    #[arg(long, default_value = "target/minicpm-v46-q4k-mlp-full/manifest.json")]
+    q4_mlp_manifest: PathBuf,
+
+    #[arg(
+        long,
+        default_value = "target/minicpm-v46-q4k-text-safe-full/manifest.json"
+    )]
+    q4_text_safe_manifest: PathBuf,
+
+    #[arg(long, default_value_t = 0.25)]
+    min_prefix_ratio: f64,
+
+    #[arg(long, default_value_t = 0.50)]
+    min_token_jaccard: f64,
+
+    #[arg(long, default_value_t = 0.50)]
+    min_lexical_jaccard: f64,
+
+    #[arg(long, default_value_t = 0.50)]
+    max_length_ratio_delta: f64,
+
+    #[arg(long)]
+    fail_on_gate: bool,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
 struct EagleChainDraftArgs {
     #[arg(long)]
     trace: PathBuf,
@@ -517,6 +569,45 @@ struct GenerationStats {
     next_input_elapsed: Duration,
     callback_elapsed: Duration,
     first_token_after_prefill: Option<Duration>,
+}
+
+#[derive(Clone, Debug)]
+struct QuantQualityGeneration {
+    stats: GenerationStats,
+    raw_text: String,
+    reasoning_text: String,
+    answer_text: String,
+}
+
+#[derive(Clone, Debug)]
+struct QuantQualityPolicyRun {
+    label: String,
+    manifest: Option<PathBuf>,
+    load_elapsed: Duration,
+    run_elapsed: Duration,
+    quantized_load: Option<QuantizedLoadStats>,
+    generations: Vec<QuantQualityGeneration>,
+}
+
+#[derive(Clone, Debug)]
+struct QualityThresholds {
+    min_prefix_ratio: f64,
+    min_token_jaccard: f64,
+    min_lexical_jaccard: f64,
+    max_length_ratio_delta: f64,
+}
+
+#[derive(Clone, Debug)]
+struct QualityComparison {
+    exact_token_match: bool,
+    common_prefix_tokens: usize,
+    divergence_index: Option<usize>,
+    prefix_ratio: f64,
+    token_jaccard: f64,
+    lexical_jaccard: f64,
+    length_ratio: f64,
+    length_ratio_delta: f64,
+    passed_gate: bool,
 }
 
 impl GenerationStats {
@@ -1000,6 +1091,7 @@ fn main() -> Result<()> {
         Command::QuantSensitivity(args) => quant_sensitivity(args),
         Command::QuantConvert(args) => quant_convert(args),
         Command::QuantMatmulBench(args) => quant_matmul_bench(args),
+        Command::QuantQuality(args) => quant_quality(args),
         Command::EagleChainDraft(args) => eagle_chain_draft(args),
         Command::EagleLiveProbe(args) => eagle_live_probe(args),
     }
@@ -2051,6 +2143,448 @@ fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
         "note": "Dense baselines use generated weights with Candle matmul. Quantized rows use Candle QTensor::quantize_onto and QMatMul::forward; failures are recorded because activation dtype support is part of the measurement.",
     });
     write_json_report(args.output.as_ref(), &report)
+}
+
+fn quant_quality(args: QuantQualityArgs) -> Result<()> {
+    if !is_greedy_generation(&args.generation) {
+        anyhow::bail!("quant-quality requires greedy generation; leave --temperature at 0");
+    }
+    validate_quality_threshold("min-prefix-ratio", args.min_prefix_ratio, 0.0, 1.0)?;
+    validate_quality_threshold("min-token-jaccard", args.min_token_jaccard, 0.0, 1.0)?;
+    validate_quality_threshold("min-lexical-jaccard", args.min_lexical_jaccard, 0.0, 1.0)?;
+    validate_quality_threshold(
+        "max-length-ratio-delta",
+        args.max_length_ratio_delta,
+        0.0,
+        10.0,
+    )?;
+
+    let thresholds = QualityThresholds {
+        min_prefix_ratio: args.min_prefix_ratio,
+        min_token_jaccard: args.min_token_jaccard,
+        min_lexical_jaccard: args.min_lexical_jaccard,
+        max_length_ratio_delta: args.max_length_ratio_delta,
+    };
+    let calibration_rows = read_calibration_jsonl(&args.calibration)?;
+    let mut text_rows = calibration_rows
+        .iter()
+        .filter(|row| row.modality == "text")
+        .filter(|row| args.case_ids.is_empty() || args.case_ids.contains(&row.id))
+        .collect::<Vec<_>>();
+    if let Some(max_cases) = args.max_cases {
+        text_rows.truncate(max_cases);
+    }
+    if text_rows.is_empty() {
+        anyhow::bail!(
+            "calibration file {} contains no selected text rows",
+            args.calibration.display()
+        );
+    }
+
+    for manifest in [
+        &args.q8_manifest,
+        &args.q4_mlp_manifest,
+        &args.q4_text_safe_manifest,
+    ] {
+        if !manifest.exists() {
+            anyhow::bail!(
+                "quantized manifest {} does not exist; run quant-convert for this policy first",
+                manifest.display()
+            );
+        }
+    }
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+    let policy_specs = [
+        ("dense", None::<&PathBuf>),
+        ("q8-text-linears", Some(&args.q8_manifest)),
+        ("q4k-mlp-only", Some(&args.q4_mlp_manifest)),
+        ("q4k-text-safe", Some(&args.q4_text_safe_manifest)),
+    ];
+
+    let mut policy_runs = Vec::new();
+    for (label, manifest) in policy_specs {
+        eprintln!("running quant-quality policy {label}");
+        let started = Instant::now();
+        let (generations, load_elapsed, quantized_load) = run_quant_quality_policy(
+            &bundle, &device, dtype, manifest, &text_rows, &tokenizer, &eos_ids, &args,
+        )
+        .with_context(|| format!("run quant-quality policy {label}"))?;
+        policy_runs.push(QuantQualityPolicyRun {
+            label: label.to_string(),
+            manifest: manifest.cloned(),
+            load_elapsed,
+            run_elapsed: started.elapsed(),
+            quantized_load,
+            generations,
+        });
+    }
+
+    let dense_generations = policy_runs
+        .first()
+        .context("missing dense quant-quality generations")?;
+    let mut cases = Vec::new();
+    let mut summaries = HashMap::<String, Vec<QualityComparison>>::new();
+    for (case_index, row) in text_rows.iter().enumerate() {
+        let dense_generation = dense_generations
+            .generations
+            .get(case_index)
+            .context("dense generation count did not match selected rows")?;
+        let mut candidates = Vec::new();
+        for policy_run in policy_runs.iter().skip(1) {
+            let candidate_generation = policy_run
+                .generations
+                .get(case_index)
+                .context("candidate generation count did not match selected rows")?;
+            let comparison = compare_quality_outputs(
+                &dense_generation.stats.generated_token_ids,
+                &dense_generation.raw_text,
+                &candidate_generation.stats.generated_token_ids,
+                &candidate_generation.raw_text,
+                &thresholds,
+            );
+            summaries
+                .entry(policy_run.label.clone())
+                .or_default()
+                .push(comparison.clone());
+            candidates.push(serde_json::json!({
+                "policy": policy_run.label,
+                "generation": quant_quality_generation_json(candidate_generation),
+                "comparison": quality_comparison_json(&comparison),
+            }));
+        }
+        cases.push(serde_json::json!({
+            "id": row.id,
+            "category": row.category,
+            "expected_behavior": row.expected_behavior,
+            "enable_thinking": row.enable_thinking,
+            "prompt_tokens": row.token_ids.len(),
+            "max_new_tokens": quality_generation_args(&args.generation, row).max_new_tokens,
+            "dense": quant_quality_generation_json(dense_generation),
+            "candidates": candidates,
+        }));
+    }
+
+    let mut policy_summaries = summaries
+        .iter()
+        .map(|(policy, comparisons)| quality_summary_json(policy, comparisons))
+        .collect::<Vec<_>>();
+    policy_summaries.sort_by(|left, right| {
+        left["policy"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["policy"].as_str().unwrap_or_default())
+    });
+    let passed = policy_summaries
+        .iter()
+        .all(|summary| summary["passed"].as_bool().unwrap_or(false));
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_quantization_quality_eval",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "downsample_mode": args.model.downsample_mode.as_str(),
+        "calibration_set": args.calibration,
+        "selected_cases": text_rows.len(),
+        "artifact_seconds": secs(bundle.elapsed),
+        "thresholds": {
+            "min_prefix_ratio": thresholds.min_prefix_ratio,
+            "min_token_jaccard": thresholds.min_token_jaccard,
+            "min_lexical_jaccard": thresholds.min_lexical_jaccard,
+            "max_length_ratio_delta": thresholds.max_length_ratio_delta,
+        },
+        "generation": {
+            "max_new_tokens_cap": args.generation.max_new_tokens,
+            "temperature": args.generation.temperature,
+            "top_p": args.generation.top_p,
+            "top_k": args.generation.top_k,
+            "seed": args.generation.seed,
+            "repeat_penalty": args.generation.repeat_penalty,
+            "repeat_last_n": args.generation.repeat_last_n,
+        },
+        "policy_runs": policy_runs.iter().map(|run| {
+            serde_json::json!({
+                "label": run.label,
+                "manifest": run.manifest,
+                "load_seconds": secs(run.load_elapsed),
+                "run_seconds": secs(run.run_elapsed),
+                "load": quantized_load_json(&run.quantized_load),
+            })
+        }).collect::<Vec<_>>(),
+        "policy_summaries": policy_summaries,
+        "passed": passed,
+        "cases": cases,
+        "gate_note": "A candidate passes a case when it exactly matches dense tokens or meets every configured prefix, token-overlap, lexical-overlap, and length-delta threshold.",
+    });
+    if args.fail_on_gate && !passed {
+        write_json_report(args.output.as_ref(), &report)?;
+        anyhow::bail!("one or more quantization quality gates failed");
+    }
+    write_json_report(args.output.as_ref(), &report)
+}
+
+fn run_quant_quality_policy(
+    bundle: &ArtifactBundle,
+    device: &Device,
+    dtype: DType,
+    quantized_manifest: Option<&PathBuf>,
+    rows: &[&CalibrationRow],
+    tokenizer: &Tokenizer,
+    eos_ids: &[u32],
+    args: &QuantQualityArgs,
+) -> Result<(
+    Vec<QuantQualityGeneration>,
+    Duration,
+    Option<QuantizedLoadStats>,
+)> {
+    let (mut model, load_elapsed, quantized_load) =
+        load_model_with_optional_quantization(bundle, dtype, device, quantized_manifest)?;
+    let mut generations = Vec::with_capacity(rows.len());
+    for row in rows {
+        let generation = quality_generation_args(&args.generation, row);
+        let stats = generate_tokens(
+            &mut model,
+            device,
+            &generation,
+            &row.token_ids,
+            None::<&ProcessedImages>,
+            &args.model.downsample_mode,
+            eos_ids,
+            |_, _, _, _| Ok(()),
+        )?;
+        let raw_text = decode_tokens(tokenizer, &stats.generated_token_ids)?;
+        let parts = split_reasoning_text(&raw_text, row.enable_thinking);
+        generations.push(QuantQualityGeneration {
+            stats,
+            raw_text,
+            reasoning_text: parts.reasoning_text,
+            answer_text: parts.answer_text,
+        });
+    }
+    Ok((generations, load_elapsed, quantized_load))
+}
+
+fn quality_generation_args(base: &GenerationArgs, row: &CalibrationRow) -> GenerationArgs {
+    let mut generation = base.clone();
+    generation.enable_thinking = row.enable_thinking;
+    if let Some(row_max_new_tokens) = row.max_new_tokens {
+        generation.max_new_tokens = generation.max_new_tokens.min(row_max_new_tokens);
+    }
+    generation
+}
+
+fn quant_quality_generation_json(generation: &QuantQualityGeneration) -> serde_json::Value {
+    serde_json::json!({
+        "generated_tokens": generation.stats.generated_tokens,
+        "generated_token_ids": generation.stats.generated_token_ids,
+        "eos_reached": generation.stats.eos_reached,
+        "prefill_seconds": secs(generation.stats.prefill_elapsed),
+        "prefill_tokens_per_second": generation.stats.prefill_tokens_per_second(),
+        "decode_seconds": secs(generation.stats.decode_elapsed),
+        "decode_model_seconds": secs(generation.stats.decode_model_elapsed),
+        "decode_tokens_per_second": generation.stats.decode_tokens_per_second(),
+        "steady_state_tokens_per_second": generation.stats.steady_state_tokens_per_second(),
+        "text": {
+            "raw": generation.raw_text,
+            "reasoning": generation.reasoning_text,
+            "answer": generation.answer_text,
+        },
+    })
+}
+
+fn compare_quality_outputs(
+    dense_token_ids: &[u32],
+    dense_text: &str,
+    candidate_token_ids: &[u32],
+    candidate_text: &str,
+    thresholds: &QualityThresholds,
+) -> QualityComparison {
+    let exact_token_match = dense_token_ids == candidate_token_ids;
+    let common_prefix_tokens = common_prefix_len(dense_token_ids, candidate_token_ids);
+    let divergence_index = (!exact_token_match).then_some(common_prefix_tokens);
+    let dense_len = dense_token_ids.len().max(1);
+    let prefix_ratio = common_prefix_tokens as f64 / dense_len as f64;
+    let token_jaccard = token_multiset_jaccard(dense_token_ids, candidate_token_ids);
+    let lexical_jaccard = lexical_multiset_jaccard(dense_text, candidate_text);
+    let length_ratio = if dense_token_ids.is_empty() {
+        if candidate_token_ids.is_empty() {
+            1.0
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        candidate_token_ids.len() as f64 / dense_token_ids.len() as f64
+    };
+    let length_ratio_delta = (length_ratio - 1.0).abs();
+    let passed_gate = exact_token_match
+        || (prefix_ratio >= thresholds.min_prefix_ratio
+            && token_jaccard >= thresholds.min_token_jaccard
+            && lexical_jaccard >= thresholds.min_lexical_jaccard
+            && length_ratio_delta <= thresholds.max_length_ratio_delta);
+    QualityComparison {
+        exact_token_match,
+        common_prefix_tokens,
+        divergence_index,
+        prefix_ratio,
+        token_jaccard,
+        lexical_jaccard,
+        length_ratio,
+        length_ratio_delta,
+        passed_gate,
+    }
+}
+
+fn quality_comparison_json(comparison: &QualityComparison) -> serde_json::Value {
+    serde_json::json!({
+        "exact_token_match": comparison.exact_token_match,
+        "common_prefix_tokens": comparison.common_prefix_tokens,
+        "divergence_index": comparison.divergence_index,
+        "prefix_ratio": comparison.prefix_ratio,
+        "token_jaccard": comparison.token_jaccard,
+        "lexical_jaccard": comparison.lexical_jaccard,
+        "length_ratio": comparison.length_ratio,
+        "length_ratio_delta": comparison.length_ratio_delta,
+        "passed_gate": comparison.passed_gate,
+    })
+}
+
+fn quality_summary_json(policy: &str, comparisons: &[QualityComparison]) -> serde_json::Value {
+    let cases = comparisons.len();
+    let exact_token_matches = comparisons
+        .iter()
+        .filter(|comparison| comparison.exact_token_match)
+        .count();
+    let passed_cases = comparisons
+        .iter()
+        .filter(|comparison| comparison.passed_gate)
+        .count();
+    serde_json::json!({
+        "policy": policy,
+        "cases": cases,
+        "exact_token_matches": exact_token_matches,
+        "passed_cases": passed_cases,
+        "failed_cases": cases.saturating_sub(passed_cases),
+        "mean_prefix_ratio": mean(comparisons.iter().map(|comparison| comparison.prefix_ratio)),
+        "mean_token_jaccard": mean(comparisons.iter().map(|comparison| comparison.token_jaccard)),
+        "mean_lexical_jaccard": mean(comparisons.iter().map(|comparison| comparison.lexical_jaccard)),
+        "mean_length_ratio_delta": mean(comparisons.iter().map(|comparison| comparison.length_ratio_delta)),
+        "passed": cases > 0 && passed_cases == cases,
+    })
+}
+
+fn validate_quality_threshold(name: &str, value: f64, min: f64, max: f64) -> Result<()> {
+    if !value.is_finite() || value < min || value > max {
+        anyhow::bail!("{name} must be finite and within [{min}, {max}], got {value}");
+    }
+    Ok(())
+}
+
+fn common_prefix_len<T: Eq>(left: &[T], right: &[T]) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn token_multiset_jaccard(left: &[u32], right: &[u32]) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 1.0;
+    }
+    let mut left_counts = HashMap::<u32, usize>::new();
+    let mut right_counts = HashMap::<u32, usize>::new();
+    for token in left {
+        *left_counts.entry(*token).or_default() += 1;
+    }
+    for token in right {
+        *right_counts.entry(*token).or_default() += 1;
+    }
+    let mut intersection = 0usize;
+    let mut union = 0usize;
+    for (token, left_count) in &left_counts {
+        let right_count = right_counts.get(token).copied().unwrap_or(0);
+        intersection += (*left_count).min(right_count);
+        union += (*left_count).max(right_count);
+    }
+    for (token, right_count) in &right_counts {
+        if !left_counts.contains_key(token) {
+            union += *right_count;
+        }
+    }
+    if union == 0 {
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+fn lexical_multiset_jaccard(left: &str, right: &str) -> f64 {
+    let left_terms = lexical_terms(left);
+    let right_terms = lexical_terms(right);
+    if left_terms.is_empty() && right_terms.is_empty() {
+        return 1.0;
+    }
+    let mut left_counts = HashMap::<String, usize>::new();
+    let mut right_counts = HashMap::<String, usize>::new();
+    for term in left_terms {
+        *left_counts.entry(term).or_default() += 1;
+    }
+    for term in right_terms {
+        *right_counts.entry(term).or_default() += 1;
+    }
+    let mut intersection = 0usize;
+    let mut union = 0usize;
+    for (term, left_count) in &left_counts {
+        let right_count = right_counts.get(term).copied().unwrap_or(0);
+        intersection += (*left_count).min(right_count);
+        union += (*left_count).max(right_count);
+    }
+    for (term, right_count) in &right_counts {
+        if !left_counts.contains_key(term) {
+            union += *right_count;
+        }
+    }
+    if union == 0 {
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+fn lexical_terms(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            current.extend(ch.to_lowercase());
+        } else if !current.is_empty() {
+            terms.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        terms.push(current);
+    }
+    terms
+}
+
+fn mean(values: impl Iterator<Item = f64>) -> f64 {
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for value in values {
+        total += value;
+        count += 1;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -3846,6 +4380,52 @@ mod tests {
             stats.decode_bookkeeping_elapsed(),
             Duration::from_millis(10)
         );
+    }
+
+    #[test]
+    fn quality_comparison_accepts_exact_token_match() {
+        let thresholds = QualityThresholds {
+            min_prefix_ratio: 0.9,
+            min_token_jaccard: 0.9,
+            min_lexical_jaccard: 0.9,
+            max_length_ratio_delta: 0.0,
+        };
+        let comparison = compare_quality_outputs(
+            &[1, 2, 3],
+            "Paris is the capital.",
+            &[1, 2, 3],
+            "Paris is the capital.",
+            &thresholds,
+        );
+
+        assert!(comparison.exact_token_match);
+        assert_eq!(comparison.common_prefix_tokens, 3);
+        assert_eq!(comparison.divergence_index, None);
+        assert!(comparison.passed_gate);
+    }
+
+    #[test]
+    fn quality_comparison_reports_divergence_and_overlap() {
+        let thresholds = QualityThresholds {
+            min_prefix_ratio: 0.25,
+            min_token_jaccard: 0.25,
+            min_lexical_jaccard: 0.25,
+            max_length_ratio_delta: 1.0,
+        };
+        let comparison = compare_quality_outputs(
+            &[10, 11, 12, 13],
+            "the answer is paris",
+            &[10, 99, 12],
+            "the answer is london",
+            &thresholds,
+        );
+
+        assert!(!comparison.exact_token_match);
+        assert_eq!(comparison.common_prefix_tokens, 1);
+        assert_eq!(comparison.divergence_index, Some(1));
+        assert!(comparison.token_jaccard > 0.0);
+        assert!(comparison.lexical_jaccard > 0.0);
+        assert!(comparison.passed_gate);
     }
 
     #[test]

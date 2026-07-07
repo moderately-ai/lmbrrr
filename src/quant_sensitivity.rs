@@ -18,6 +18,10 @@ pub struct CalibrationRow {
     pub category: String,
     pub modality: String,
     pub enable_thinking: bool,
+    #[serde(default)]
+    pub max_new_tokens: Option<usize>,
+    #[serde(default)]
+    pub expected_behavior: Option<String>,
     pub prompt_token_count: usize,
     pub token_ids: Vec<u32>,
     #[serde(default)]
@@ -590,6 +594,8 @@ mod tests {
                 category: "short".to_string(),
                 modality: "text".to_string(),
                 enable_thinking: false,
+                max_new_tokens: None,
+                expected_behavior: None,
                 prompt_token_count: 3,
                 token_ids: vec![1, 2, 3],
                 sensitivity_focus: vec![],
@@ -600,6 +606,8 @@ mod tests {
                 category: "ocr".to_string(),
                 modality: "image".to_string(),
                 enable_thinking: true,
+                max_new_tokens: None,
+                expected_behavior: None,
                 prompt_token_count: 4,
                 token_ids: vec![1, 2, 3, 4],
                 sensitivity_focus: vec![],
