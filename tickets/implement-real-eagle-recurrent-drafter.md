@@ -1,7 +1,7 @@
 ---
 id: implement-real-eagle-recurrent-drafter
 title: Implement real EAGLE recurrent drafter
-status: todo
+status: done
 priority: p1
 dependencies: [integrate-dspark-adaptive-scheduler]
 related: []

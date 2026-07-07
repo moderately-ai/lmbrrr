@@ -73,6 +73,7 @@ enum Command {
     QuantQuality(QuantQualityArgs),
     EagleChainDraft(EagleChainDraftArgs),
     EagleLiveProbe(EagleLiveProbeArgs),
+    EagleRecurrentDraft(EagleRecurrentDraftArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -436,6 +437,30 @@ struct EagleLiveProbeArgs {
 
     #[arg(long, default_value_t = 8)]
     max_new_tokens: usize,
+
+    #[arg(long, default_value_t = 4)]
+    draft_width: usize,
+
+    #[arg(long)]
+    schedule_confidence_threshold: Option<f64>,
+
+    #[arg(long)]
+    enable_thinking: bool,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct EagleRecurrentDraftArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long)]
+    prompt: String,
+
+    #[arg(long)]
+    drafter_manifest: PathBuf,
 
     #[arg(long, default_value_t = 4)]
     draft_width: usize,
@@ -1102,6 +1127,7 @@ fn main() -> Result<()> {
         Command::QuantQuality(args) => quant_quality(args),
         Command::EagleChainDraft(args) => eagle_chain_draft(args),
         Command::EagleLiveProbe(args) => eagle_live_probe(args),
+        Command::EagleRecurrentDraft(args) => eagle_recurrent_draft(args),
     }
 }
 
@@ -3139,6 +3165,439 @@ fn eagle_live_probe(args: EagleLiveProbeArgs) -> Result<()> {
     });
 
     write_json_report(args.output.as_ref(), &report)
+}
+
+fn eagle_recurrent_draft(args: EagleRecurrentDraftArgs) -> Result<()> {
+    if args.draft_width == 0 {
+        anyhow::bail!("--draft-width must be greater than zero");
+    }
+
+    let drafter = EagleRecurrentDrafter::from_manifest(&args.drafter_manifest)?;
+    let draft_width = args.draft_width.min(drafter.max_draft_width);
+    if draft_width == 0 {
+        anyhow::bail!("drafter max draft width is zero");
+    }
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
+
+    let trace_recorder = Qwen35TraceRecorder::new(drafter.capture_layers.clone());
+    model.set_text_trace_recorder(Some(trace_recorder.clone()));
+    model.clear_cache();
+    trace_recorder.clear();
+
+    let prompt_input = Tensor::from_slice(&prompt_tokens, (1, prompt_tokens.len()), &device)?;
+    let prefill_start = Instant::now();
+    let prompt_logits = model.forward(
+        &prompt_input,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        0,
+    )?;
+    device.synchronize()?;
+    let prefill_elapsed = prefill_start.elapsed();
+    let hidden_states = trace_recorder.take();
+    let anchor_feature = eagle_feature_from_hidden_states(
+        &hidden_states,
+        &drafter.capture_layers,
+        drafter.feature_dim,
+    )?;
+
+    let mut draft_chain = Vec::with_capacity(draft_width);
+    let mut draft_confidences = Vec::with_capacity(draft_width);
+    let mut draft_steps = Vec::with_capacity(draft_width);
+    let mut previous_token = *prompt_tokens
+        .last()
+        .context("prompt tokenization produced no tokens")?;
+    let draft_start = Instant::now();
+    for draft_position in 0..draft_width {
+        let prediction = drafter.predict(&anchor_feature, previous_token, draft_position)?;
+        draft_steps.push(serde_json::json!({
+            "draft_position": draft_position,
+            "previous_token_id": previous_token,
+            "previous_token": decode_token_lossy(&tokenizer, previous_token),
+            "previous_token_seen_by_drafter": drafter.prev_token_ids.contains(&previous_token),
+            "draft_token_id": prediction.token_id,
+            "draft_token": decode_token_lossy(&tokenizer, prediction.token_id),
+            "draft_confidence": prediction.confidence,
+            "top_draft_logits": prediction.top_logits.iter().map(|item| {
+                serde_json::json!({
+                    "token_id": item.token_id,
+                    "token": decode_token_lossy(&tokenizer, item.token_id),
+                    "logit": item.logit,
+                    "confidence": item.confidence,
+                })
+            }).collect::<Vec<_>>(),
+        }));
+        previous_token = prediction.token_id;
+        draft_confidences.push(prediction.confidence);
+        draft_chain.push(prediction.token_id);
+    }
+    let draft_elapsed = draft_start.elapsed();
+
+    let confidence_schedule = if args.schedule_confidence_threshold.is_some() {
+        let candidate_width = draft_chain.len();
+        let scheduled_confidences = draft_confidences[..candidate_width].to_vec();
+        apply_confidence_schedule(
+            &mut draft_chain,
+            &scheduled_confidences,
+            args.schedule_confidence_threshold,
+        )?
+    } else {
+        None
+    };
+
+    let (first_target_token, first_argmax_elapsed) = argmax_token(&prompt_logits, &device)?;
+    let mut target_token_ids = Vec::with_capacity(draft_chain.len());
+    let mut verify_elapsed = Duration::ZERO;
+    let mut verify_argmax_elapsed = first_argmax_elapsed;
+    let bonus_after_all = if draft_chain.is_empty() {
+        first_target_token
+    } else {
+        target_token_ids.push(first_target_token);
+        let draft_input = Tensor::from_slice(&draft_chain, (1, draft_chain.len()), &device)?;
+        let verify_start = Instant::now();
+        let draft_logits = model.forward_all_logits(
+            &draft_input,
+            None::<&ProcessedImages>,
+            &args.model.downsample_mode,
+            prompt_tokens.len(),
+        )?;
+        device.synchronize()?;
+        verify_elapsed = verify_start.elapsed();
+        let (chunk_target_tokens, chunk_argmax_elapsed) = argmax_tokens(&draft_logits, &device)?;
+        verify_argmax_elapsed += chunk_argmax_elapsed;
+        if chunk_target_tokens.len() != draft_chain.len() {
+            anyhow::bail!(
+                "verifier chunk returned {} target tokens for {} draft tokens",
+                chunk_target_tokens.len(),
+                draft_chain.len()
+            );
+        }
+        target_token_ids.extend(
+            chunk_target_tokens
+                .iter()
+                .take(draft_chain.len().saturating_sub(1))
+                .copied(),
+        );
+        chunk_target_tokens
+            .last()
+            .copied()
+            .context("missing verifier bonus token")?
+    };
+    model.set_text_trace_recorder(None);
+
+    let analysis = analyze_verification(&draft_chain, &target_token_ids, bonus_after_all)?;
+    let greedy_cap = analysis.accepted_length().max(1);
+    let baseline_generation = GenerationArgs {
+        max_new_tokens: greedy_cap,
+        temperature: 0.0,
+        top_p: None,
+        top_k: None,
+        seed: 299792458,
+        repeat_penalty: 1.0,
+        repeat_last_n: 64,
+        enable_thinking: args.enable_thinking,
+    };
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+    let baseline_started = Instant::now();
+    let baseline_stats = generate_tokens(
+        &mut model,
+        &device,
+        &baseline_generation,
+        &prompt_tokens,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        &eos_ids,
+        |_, _, _, _| Ok(()),
+    )?;
+    let baseline_elapsed = baseline_started.elapsed();
+    let exact_greedy_prefix_match = baseline_stats
+        .generated_token_ids
+        .get(..analysis.reconstructed_token_ids.len())
+        .map(|prefix| prefix == analysis.reconstructed_token_ids.as_slice())
+        .unwrap_or(false);
+
+    let speculative_elapsed =
+        prefill_elapsed + draft_elapsed + verify_elapsed + verify_argmax_elapsed;
+    let baseline_model_elapsed =
+        baseline_stats.prefill_elapsed + baseline_stats.decode_model_elapsed;
+    let speedup_estimate = if speculative_elapsed.is_zero() {
+        None
+    } else {
+        Some(baseline_model_elapsed.as_secs_f64() / speculative_elapsed.as_secs_f64())
+    };
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_eagle_recurrent_draft",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "downsample_mode": args.model.downsample_mode.as_str(),
+        "enable_thinking": args.enable_thinking,
+        "artifact_seconds": secs(bundle.elapsed),
+        "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
+        "drafter_manifest": args.drafter_manifest,
+        "drafter": drafter.manifest_json(),
+        "prompt": args.prompt.as_str(),
+        "prompt_tokens": prompt_tokens.len(),
+        "requested_draft_width": args.draft_width,
+        "draft_width": draft_width,
+        "scheduled_draft_width": draft_chain.len(),
+        "confidence_schedule": confidence_schedule_json(&confidence_schedule),
+        "draft_token_ids": &draft_chain,
+        "draft_text": decode_tokens(&tokenizer, &draft_chain)?,
+        "draft_confidences": &draft_confidences,
+        "target_token_ids": &target_token_ids,
+        "accepted_tokens": analysis.accepted_tokens,
+        "accepted_length": analysis.accepted_length(),
+        "acceptance_rate": analysis.acceptance_rate(),
+        "first_rejected_index": analysis.first_rejected_index,
+        "verifier_waste_tokens": analysis.verifier_waste_tokens(),
+        "verifier_waste_share": analysis.verifier_waste_share(),
+        "target_decode_steps_covered_estimate": analysis.accepted_length(),
+        "target_forward_calls_saved_estimate": analysis.accepted_length().saturating_sub(1),
+        "bonus_token_id": analysis.bonus_token_id,
+        "bonus_token": decode_token_lossy(&tokenizer, analysis.bonus_token_id),
+        "reconstructed_token_ids": &analysis.reconstructed_token_ids,
+        "reconstructed_text": decode_tokens(&tokenizer, &analysis.reconstructed_token_ids)?,
+        "baseline_greedy_token_ids": &baseline_stats.generated_token_ids,
+        "baseline_greedy_text": decode_tokens(&tokenizer, &baseline_stats.generated_token_ids)?,
+        "exact_greedy_prefix_match": exact_greedy_prefix_match,
+        "prefill_seconds": secs(prefill_elapsed),
+        "draft_seconds": secs(draft_elapsed),
+        "verify_seconds": secs(verify_elapsed),
+        "argmax_seconds": secs(verify_argmax_elapsed),
+        "speculative_model_seconds": secs(speculative_elapsed),
+        "baseline_model_seconds_for_same_window": secs(baseline_model_elapsed),
+        "baseline_wall_seconds_for_same_window": secs(baseline_elapsed),
+        "end_to_end_model_speedup_estimate": speedup_estimate,
+        "draft_tokens_per_second": tokens_per_second(draft_width, draft_elapsed),
+        "hidden_state_count": hidden_states.len(),
+        "steps": draft_steps,
+        "note": "Recurrent smoke drafter: one target anchor feature is computed, then the drafter proposes a block before target chunk verification. The observed-vocabulary head is a smoke artifact, not a production EAGLE model.",
+    });
+    write_json_report(args.output.as_ref(), &report)
+}
+
+#[derive(Debug)]
+struct EagleRecurrentDrafter {
+    capture_layers: Vec<usize>,
+    feature_dim: usize,
+    input_dim: usize,
+    hidden_dim: usize,
+    output_dim: usize,
+    target_token_ids: Vec<u32>,
+    prev_token_ids: Vec<u32>,
+    max_draft_width: usize,
+    feature_mean: Vec<f32>,
+    feature_std: Vec<f32>,
+    w0: Vec<f32>,
+    b0: Vec<f32>,
+    w2: Vec<f32>,
+    b2: Vec<f32>,
+    source_manifest: EagleRecurrentDrafterManifest,
+}
+
+impl EagleRecurrentDrafter {
+    fn from_manifest(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("read recurrent drafter manifest {}", path.display()))?;
+        let manifest: EagleRecurrentDrafterManifest = serde_json::from_str(&text)
+            .with_context(|| format!("parse recurrent drafter manifest {}", path.display()))?;
+        if manifest.kind != "lmbrrr_eagle_recurrent_drafter" {
+            anyhow::bail!("unsupported recurrent drafter kind {}", manifest.kind);
+        }
+        if manifest.draft_head_type != "observed-vocabulary-recurrent-mlp" {
+            anyhow::bail!(
+                "unsupported recurrent drafter type {}",
+                manifest.draft_head_type
+            );
+        }
+        if manifest.activation != "gelu_tanh" {
+            anyhow::bail!(
+                "unsupported recurrent drafter activation {}",
+                manifest.activation
+            );
+        }
+        if manifest.output_dim != manifest.target_token_ids.len() {
+            anyhow::bail!(
+                "recurrent drafter output_dim {} does not match {} target token ids",
+                manifest.output_dim,
+                manifest.target_token_ids.len()
+            );
+        }
+        let expected_input_dim = manifest.feature_dim + manifest.prev_token_ids.len() + 1;
+        if manifest.input_dim != expected_input_dim {
+            anyhow::bail!(
+                "recurrent drafter input_dim {} does not match feature {} + prev vocab {} + position",
+                manifest.input_dim,
+                manifest.feature_dim,
+                manifest.prev_token_ids.len()
+            );
+        }
+        let weights_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&manifest.weights);
+        let bytes = fs::read(&weights_path).with_context(|| {
+            format!("read recurrent drafter weights {}", weights_path.display())
+        })?;
+        let safetensors = safetensors::SafeTensors::deserialize(&bytes).with_context(|| {
+            format!("parse recurrent drafter weights {}", weights_path.display())
+        })?;
+        let feature_mean = load_safetensor_f32(&safetensors, "feature_mean")?;
+        let feature_std = load_safetensor_f32(&safetensors, "feature_std")?;
+        let w0 = load_safetensor_f32(&safetensors, "net.0.weight")?;
+        let b0 = load_safetensor_f32(&safetensors, "net.0.bias")?;
+        let w2 = load_safetensor_f32(&safetensors, "net.2.weight")?;
+        let b2 = load_safetensor_f32(&safetensors, "net.2.bias")?;
+
+        ensure_len("feature_mean", &feature_mean, manifest.feature_dim)?;
+        ensure_len("feature_std", &feature_std, manifest.feature_dim)?;
+        ensure_len(
+            "net.0.weight",
+            &w0,
+            manifest.input_dim * manifest.hidden_dim,
+        )?;
+        ensure_len("net.0.bias", &b0, manifest.hidden_dim)?;
+        ensure_len(
+            "net.2.weight",
+            &w2,
+            manifest.hidden_dim * manifest.output_dim,
+        )?;
+        ensure_len("net.2.bias", &b2, manifest.output_dim)?;
+
+        Ok(Self {
+            capture_layers: manifest.capture_layers.clone(),
+            feature_dim: manifest.feature_dim,
+            input_dim: manifest.input_dim,
+            hidden_dim: manifest.hidden_dim,
+            output_dim: manifest.output_dim,
+            target_token_ids: manifest.target_token_ids.clone(),
+            prev_token_ids: manifest.prev_token_ids.clone(),
+            max_draft_width: manifest.max_draft_width,
+            feature_mean,
+            feature_std,
+            w0,
+            b0,
+            w2,
+            b2,
+            source_manifest: manifest,
+        })
+    }
+
+    fn predict(
+        &self,
+        anchor_feature: &[f32],
+        previous_token: u32,
+        draft_position: usize,
+    ) -> Result<EagleDraftPrediction> {
+        ensure_len("anchor feature", anchor_feature, self.feature_dim)?;
+        let prev_index = self
+            .prev_token_ids
+            .iter()
+            .position(|token_id| *token_id == previous_token);
+        let mut input = Vec::with_capacity(self.input_dim);
+        for (idx, value) in anchor_feature.iter().enumerate() {
+            input.push((*value - self.feature_mean[idx]) / self.feature_std[idx]);
+        }
+        input.extend((0..self.prev_token_ids.len()).map(|idx| f32::from(prev_index == Some(idx))));
+        let position = if self.max_draft_width <= 1 {
+            0.0
+        } else {
+            draft_position as f32 / (self.max_draft_width - 1) as f32
+        };
+        input.push(position);
+        ensure_len("recurrent drafter input", &input, self.input_dim)?;
+
+        let mut hidden = vec![0f32; self.hidden_dim];
+        for (row, hidden_value) in hidden.iter_mut().enumerate() {
+            let mut acc = self.b0[row];
+            let row_offset = row * self.input_dim;
+            for (col, value) in input.iter().enumerate() {
+                acc += self.w0[row_offset + col] * value;
+            }
+            *hidden_value = gelu_tanh(acc);
+        }
+
+        let mut logits = vec![0f32; self.output_dim];
+        for (row, logit) in logits.iter_mut().enumerate() {
+            let mut acc = self.b2[row];
+            let row_offset = row * self.hidden_dim;
+            for (col, value) in hidden.iter().enumerate() {
+                acc += self.w2[row_offset + col] * value;
+            }
+            *logit = acc;
+        }
+        let top_logits = top_draft_logits(&logits, &self.target_token_ids, 5)?;
+        let best = top_logits
+            .first()
+            .context("recurrent drafter produced no logits")?
+            .clone();
+        Ok(EagleDraftPrediction {
+            token_id: best.token_id,
+            confidence: best.confidence,
+            top_logits,
+        })
+    }
+
+    fn manifest_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "draft_head_type": self.source_manifest.draft_head_type,
+            "activation": self.source_manifest.activation,
+            "capture_layers": self.capture_layers,
+            "feature_dim": self.feature_dim,
+            "input_dim": self.input_dim,
+            "hidden_dim": self.hidden_dim,
+            "output_dim": self.output_dim,
+            "target_vocab_size": self.target_token_ids.len(),
+            "prev_vocab_size": self.prev_token_ids.len(),
+            "max_draft_width": self.max_draft_width,
+            "feature_normalization": self.source_manifest.feature_normalization,
+            "recurrent_state": self.source_manifest.recurrent_state,
+            "training": self.source_manifest.training,
+            "metrics": self.source_manifest.metrics,
+            "limits": self.source_manifest.limits,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EagleRecurrentDrafterManifest {
+    kind: String,
+    draft_head_type: String,
+    activation: String,
+    weights: String,
+    capture_layers: Vec<usize>,
+    feature_dim: usize,
+    input_dim: usize,
+    hidden_dim: usize,
+    output_dim: usize,
+    target_token_ids: Vec<u32>,
+    prev_token_ids: Vec<u32>,
+    max_draft_width: usize,
+    feature_normalization: String,
+    recurrent_state: String,
+    #[serde(default)]
+    training: serde_json::Value,
+    #[serde(default)]
+    metrics: serde_json::Value,
+    #[serde(default)]
+    limits: Vec<String>,
 }
 
 #[derive(Debug)]
