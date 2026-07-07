@@ -79,13 +79,29 @@ Important fields:
   limit.
 - `max_generated_tokens`: configured output-token cap.
 - `max_total_tokens`: `prompt_tokens + max_generated_tokens`.
-- `prefill_seconds`: wall time for the prefill forward pass.
+- `prefill_seconds`: synchronized wall time for the prefill forward pass.
 - `prefill_tokens_per_second`: prompt tokens divided by prefill seconds.
 - `time_to_first_token_seconds`: prefill plus first decode step.
 - `decode_seconds`: output-token generation time.
 - `output_tokens_per_second`: generated output tokens divided by decode seconds.
 - `steady_state_tokens_per_second`: output rate excluding the first decoded
   token when available.
+- `decode_model_input_tokens`: number of one-token decode forwards. This is
+  usually `generated_tokens - 1` because the first output token is sampled from
+  prefill logits.
+- `decode_model_seconds`: synchronized wall time spent in one-token decode
+  model forwards.
+- `decode_model_tokens_per_second`: `decode_model_input_tokens` divided by
+  `decode_model_seconds`.
+- `decode_non_model_seconds`: decode wall time outside synchronized model
+  forwards.
+- `decode_non_model_share`: non-model decode time divided by `decode_seconds`.
+- `sampling_seconds`: time spent applying repeat penalty and selecting next
+  tokens.
+- `next_input_seconds`: time spent creating one-token input tensors.
+- `callback_seconds`: time spent in the per-token output callback.
+- `decode_bookkeeping_seconds`: residual measured loop overhead not covered by
+  the other timing buckets.
 - `text.raw`: decoded generated text.
 - `text.reasoning`: text found inside `<think>...</think>` spans.
 - `text.answer`: text outside reasoning spans.
@@ -103,9 +119,12 @@ jq -r '[.profile, .iteration, .prefill_tokens_per_second, .output_tokens_per_sec
   target/lmbrrr-bench.jsonl
 ```
 
-For performance claims, prefer the `bench` command over interactive `run`.
-Interactive TUI updates are throttled, but any live display still adds some
-overhead that benchmark mode intentionally avoids.
+For hardware-oriented performance claims, prefer
+`decode_model_tokens_per_second` and `prefill_tokens_per_second`. For
+user-visible throughput, prefer `output_tokens_per_second` or
+`steady_state_tokens_per_second`. Interactive TUI updates are throttled, but
+any live display still adds some overhead that benchmark mode intentionally
+avoids.
 
 ## Decode Profiling
 

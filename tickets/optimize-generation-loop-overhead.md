@@ -1,13 +1,13 @@
 ---
 id: optimize-generation-loop-overhead
 title: Remove generation-loop overhead from token-rate measurements
-status: todo
+status: done
 priority: p1
 dependencies: [benchmark-runner-token-rate]
 related: [implement-naive-text-inference-runner]
 scopes: [runtime/candle]
 shared_scopes: []
-paths: []
+paths: [src/main.rs, docs/research/benchmark-runner.md, docs/research/generation-loop-overhead.md]
 tags: [performance, generation]
 ---
 ## Goal

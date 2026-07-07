@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
@@ -278,6 +280,10 @@ struct GenerationStats {
     eos_reached: bool,
     prefill_elapsed: Duration,
     decode_elapsed: Duration,
+    decode_model_elapsed: Duration,
+    sampling_elapsed: Duration,
+    next_input_elapsed: Duration,
+    callback_elapsed: Duration,
     first_token_after_prefill: Option<Duration>,
 }
 
@@ -297,6 +303,41 @@ impl GenerationStats {
 
     fn decode_tokens_per_second(&self) -> f64 {
         tokens_per_second(self.generated_tokens, self.decode_elapsed)
+    }
+
+    fn decode_model_tokens(&self) -> usize {
+        self.generated_tokens.saturating_sub(1)
+    }
+
+    fn decode_model_tokens_per_second(&self) -> Option<f64> {
+        let tokens = self.decode_model_tokens();
+        (tokens > 0).then(|| tokens_per_second(tokens, self.decode_model_elapsed))
+    }
+
+    fn sampling_tokens_per_second(&self) -> f64 {
+        tokens_per_second(self.generated_tokens, self.sampling_elapsed)
+    }
+
+    fn decode_non_model_elapsed(&self) -> Duration {
+        self.decode_elapsed
+            .saturating_sub(self.decode_model_elapsed)
+    }
+
+    fn decode_non_model_share(&self) -> f64 {
+        if self.decode_elapsed.is_zero() {
+            0.0
+        } else {
+            self.decode_non_model_elapsed().as_secs_f64() / self.decode_elapsed.as_secs_f64()
+        }
+    }
+
+    fn decode_bookkeeping_elapsed(&self) -> Duration {
+        self.decode_elapsed.saturating_sub(
+            self.decode_model_elapsed
+                + self.sampling_elapsed
+                + self.next_input_elapsed
+                + self.callback_elapsed,
+        )
     }
 
     fn steady_state_tokens_per_second(&self) -> Option<f64> {
@@ -776,6 +817,16 @@ fn run(args: RunArgs) -> Result<()> {
             "time_to_first_token_seconds": stats.time_to_first_token().map(secs),
             "decode_time_to_first_token_seconds": stats.first_token_after_prefill.map(secs),
             "decode_seconds": secs(stats.decode_elapsed),
+            "decode_model_input_tokens": stats.decode_model_tokens(),
+            "decode_model_seconds": secs(stats.decode_model_elapsed),
+            "decode_model_tokens_per_second": stats.decode_model_tokens_per_second(),
+            "decode_non_model_seconds": secs(stats.decode_non_model_elapsed()),
+            "decode_non_model_share": stats.decode_non_model_share(),
+            "sampling_seconds": secs(stats.sampling_elapsed),
+            "sampling_tokens_per_second": stats.sampling_tokens_per_second(),
+            "next_input_seconds": secs(stats.next_input_elapsed),
+            "callback_seconds": secs(stats.callback_elapsed),
+            "decode_bookkeeping_seconds": secs(stats.decode_bookkeeping_elapsed()),
             "prompt_tokens": stats.prompt_tokens,
             "generated_tokens": stats.generated_tokens,
             "total_tokens": stats.total_generated_tokens(),
@@ -869,6 +920,16 @@ fn bench(args: BenchArgs) -> Result<()> {
                     "time_to_first_token_seconds": stats.time_to_first_token().map(secs),
                     "decode_time_to_first_token_seconds": stats.first_token_after_prefill.map(secs),
                     "decode_seconds": secs(stats.decode_elapsed),
+                    "decode_model_input_tokens": stats.decode_model_tokens(),
+                    "decode_model_seconds": secs(stats.decode_model_elapsed),
+                    "decode_model_tokens_per_second": stats.decode_model_tokens_per_second(),
+                    "decode_non_model_seconds": secs(stats.decode_non_model_elapsed()),
+                    "decode_non_model_share": stats.decode_non_model_share(),
+                    "sampling_seconds": secs(stats.sampling_elapsed),
+                    "sampling_tokens_per_second": stats.sampling_tokens_per_second(),
+                    "next_input_seconds": secs(stats.next_input_elapsed),
+                    "callback_seconds": secs(stats.callback_elapsed),
+                    "decode_bookkeeping_seconds": secs(stats.decode_bookkeeping_elapsed()),
                     "output_tokens_per_second": stats.decode_tokens_per_second(),
                     "decode_tokens_per_second": stats.decode_tokens_per_second(),
                     "steady_state_tokens_per_second": stats.steady_state_tokens_per_second(),
@@ -1194,6 +1255,25 @@ fn decode_tokens(tokenizer: &Tokenizer, tokens: &[u32]) -> Result<String> {
         .map_err(|err| anyhow::anyhow!("decode generated tokens: {err}"))
 }
 
+fn is_greedy_generation(generation: &GenerationArgs) -> bool {
+    generation.temperature <= 0.0
+}
+
+fn sample_next_token(
+    logits_processor: &mut Option<LogitsProcessor>,
+    generation: &GenerationArgs,
+    logits: &Tensor,
+) -> Result<u32> {
+    if is_greedy_generation(generation) {
+        Ok(logits.argmax(D::Minus1)?.to_scalar::<u32>()?)
+    } else {
+        Ok(logits_processor
+            .as_mut()
+            .context("non-greedy generation requires a logits processor")?
+            .sample(logits)?)
+    }
+}
+
 fn generate_tokens(
     model: &mut MiniCpmForConditionalGeneration,
     device: &Device,
@@ -1206,14 +1286,17 @@ fn generate_tokens(
 ) -> Result<GenerationStats> {
     model.clear_cache();
     let mut tokens = input_tokens.to_vec();
-    let mut logits_processor = LogitsProcessor::from_sampling(
-        generation.seed,
-        sampling(generation.temperature, generation.top_k, generation.top_p),
-    );
+    let mut logits_processor = (!is_greedy_generation(generation)).then(|| {
+        LogitsProcessor::from_sampling(
+            generation.seed,
+            sampling(generation.temperature, generation.top_k, generation.top_p),
+        )
+    });
 
-    let prefill_start = Instant::now();
     let input = Tensor::from_slice(&tokens, (1, tokens.len()), device)?;
+    let prefill_start = Instant::now();
     let mut logits = model.forward(&input, images, downsample_mode, 0)?;
+    device.synchronize()?;
     let prefill_elapsed = prefill_start.elapsed();
     let mut position = tokens.len();
     let decode_start = Instant::now();
@@ -1221,8 +1304,13 @@ fn generate_tokens(
     let mut generated = 0usize;
     let mut generated_token_ids = Vec::with_capacity(generation.max_new_tokens);
     let mut eos_reached = false;
+    let mut decode_model_elapsed = Duration::ZERO;
+    let mut sampling_elapsed = Duration::ZERO;
+    let mut next_input_elapsed = Duration::ZERO;
+    let mut callback_elapsed = Duration::ZERO;
 
     for _ in 0..generation.max_new_tokens {
+        let sampling_start = Instant::now();
         let logits_1d = logits.squeeze(0)?;
         let logits_1d = if (generation.repeat_penalty - 1.0).abs() < f32::EPSILON {
             logits_1d
@@ -1230,7 +1318,9 @@ fn generate_tokens(
             let start_at = tokens.len().saturating_sub(generation.repeat_last_n);
             apply_repeat_penalty(&logits_1d, generation.repeat_penalty, &tokens[start_at..])?
         };
-        let next_token = logits_processor.sample(&logits_1d)?;
+        let next_token = sample_next_token(&mut logits_processor, generation, &logits_1d)?;
+        sampling_elapsed += sampling_start.elapsed();
+
         if eos_ids.contains(&next_token) {
             eos_reached = true;
             break;
@@ -1242,19 +1332,26 @@ fn generate_tokens(
         tokens.push(next_token);
         generated_token_ids.push(next_token);
         generated += 1;
+        let callback_start = Instant::now();
         on_token(
             next_token,
             generated,
             decode_start.elapsed(),
             prefill_elapsed,
         )?;
+        callback_elapsed += callback_start.elapsed();
 
         if generated == generation.max_new_tokens {
             break;
         }
 
+        let input_start = Instant::now();
         let input = Tensor::from_slice(&[next_token], (1, 1), device)?;
+        next_input_elapsed += input_start.elapsed();
+        let decode_model_start = Instant::now();
         logits = model.forward(&input, None::<&ProcessedImages>, downsample_mode, position)?;
+        device.synchronize()?;
+        decode_model_elapsed += decode_model_start.elapsed();
         position += 1;
     }
 
@@ -1265,6 +1362,10 @@ fn generate_tokens(
         eos_reached,
         prefill_elapsed,
         decode_elapsed: decode_start.elapsed(),
+        decode_model_elapsed,
+        sampling_elapsed,
+        next_input_elapsed,
+        callback_elapsed,
         first_token_after_prefill,
     })
 }
@@ -1650,6 +1751,43 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].name, "custom-1");
         assert_eq!(prompts[0].text, "hello");
+    }
+
+    #[test]
+    fn greedy_generation_is_temperature_driven() {
+        let mut args = bench_args(Vec::new(), Vec::new()).generation;
+        args.temperature = 0.0;
+        args.top_k = Some(4);
+        args.top_p = Some(0.8);
+        assert!(is_greedy_generation(&args));
+
+        args.temperature = 0.7;
+        assert!(!is_greedy_generation(&args));
+    }
+
+    #[test]
+    fn generation_stats_separates_model_and_non_model_decode_time() {
+        let stats = GenerationStats {
+            prompt_tokens: 10,
+            generated_tokens: 4,
+            generated_token_ids: vec![1, 2, 3, 4],
+            eos_reached: false,
+            prefill_elapsed: Duration::from_millis(20),
+            decode_elapsed: Duration::from_millis(100),
+            decode_model_elapsed: Duration::from_millis(70),
+            sampling_elapsed: Duration::from_millis(12),
+            next_input_elapsed: Duration::from_millis(3),
+            callback_elapsed: Duration::from_millis(5),
+            first_token_after_prefill: Some(Duration::from_millis(10)),
+        };
+
+        assert_eq!(stats.decode_model_tokens(), 3);
+        assert_eq!(stats.decode_model_tokens_per_second(), Some(3000.0 / 70.0));
+        assert_eq!(stats.decode_non_model_elapsed(), Duration::from_millis(30));
+        assert_eq!(
+            stats.decode_bookkeeping_elapsed(),
+            Duration::from_millis(10)
+        );
     }
 
     #[test]
