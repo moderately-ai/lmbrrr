@@ -27,6 +27,7 @@ use lmbrrr::{
     image_processor::{preprocess_paths, ProcessedImages},
     minicpm::MiniCpmForConditionalGeneration,
     prompt::{chat_prompt, expand_image_placeholders},
+    quant_convert::{convert_mixed_precision, ConversionOptions, MixedPrecisionPolicy},
     quant_sensitivity::{
         aggregate_calibration, read_calibration_jsonl, score_weight_sensitivity, CalibrationRow,
         QuantFormat,
@@ -62,6 +63,7 @@ enum Command {
     SpecVerify(SpecVerifyArgs),
     Trace(TraceArgs),
     QuantSensitivity(QuantSensitivityArgs),
+    QuantConvert(QuantConvertArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -292,6 +294,27 @@ struct QuantSensitivityArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Parser, Debug)]
+struct QuantConvertArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long, default_value = "target/minicpm-v46-quant-sensitivity.json")]
+    sensitivity: PathBuf,
+
+    #[arg(long, value_enum, default_value_t = MixedPrecisionPolicyArg::Q8TextLinears)]
+    policy: MixedPrecisionPolicyArg,
+
+    #[arg(long, default_value = "target/minicpm-v46-mixed-precision")]
+    output_dir: PathBuf,
+
+    #[arg(long)]
+    max_tensors: Option<usize>,
+
+    #[arg(long)]
+    manifest_only: bool,
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum DTypeArg {
     Auto,
@@ -305,6 +328,23 @@ enum QuantFormatArg {
     Q4Symmetric,
     Q5Symmetric,
     Q8Symmetric,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum MixedPrecisionPolicyArg {
+    Q8TextLinears,
+    Q4kMlpOnly,
+    Q4kTextSafe,
+}
+
+impl MixedPrecisionPolicyArg {
+    fn resolve(self) -> MixedPrecisionPolicy {
+        match self {
+            Self::Q8TextLinears => MixedPrecisionPolicy::Q8TextLinears,
+            Self::Q4kMlpOnly => MixedPrecisionPolicy::Q4KMlpOnly,
+            Self::Q4kTextSafe => MixedPrecisionPolicy::Q4KTextSafe,
+        }
+    }
 }
 
 impl QuantFormatArg {
@@ -860,6 +900,7 @@ fn main() -> Result<()> {
         Command::SpecVerify(args) => spec_verify(args),
         Command::Trace(args) => trace_hidden_states(args),
         Command::QuantSensitivity(args) => quant_sensitivity(args),
+        Command::QuantConvert(args) => quant_convert(args),
     }
 }
 
@@ -1751,6 +1792,33 @@ fn quant_sensitivity(args: QuantSensitivityArgs) -> Result<()> {
     });
 
     write_json_report(args.output.as_ref(), &report)
+}
+
+fn quant_convert(args: QuantConvertArgs) -> Result<()> {
+    let bundle = resolve_artifacts(&args.model)?;
+    let manifest = convert_mixed_precision(ConversionOptions {
+        model_id: args.model.model_id.clone(),
+        revision: args.model.revision.clone(),
+        policy: args.policy.resolve(),
+        source_weights: bundle.artifacts.weights.clone(),
+        sensitivity_artifact: args.sensitivity.clone(),
+        output_dir: args.output_dir.clone(),
+        max_tensors: args.max_tensors,
+        manifest_only: args.manifest_only,
+    })?;
+    let manifest_path = args.output_dir.join("manifest.json");
+    let summary = serde_json::json!({
+        "kind": "lmbrrr_quant_convert_complete",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "policy": args.policy.resolve().name(),
+        "manifest": manifest_path,
+        "artifact_seconds": secs(bundle.elapsed),
+        "manifest_only": args.manifest_only,
+        "summary": manifest["summary"].clone(),
+    });
+    write_json_report(None, &summary)
 }
 
 fn run_quant_baseline_case(

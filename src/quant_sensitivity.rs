@@ -285,31 +285,31 @@ fn candidate_reason(name: &str, shape: &[usize]) -> CandidateReason {
     if shape.len() < 2 {
         return CandidateReason {
             quantizable: false,
-            protected: protected_tensor(name),
+            protected: is_protected_tensor(name),
             reason: "rank_lt_2".to_string(),
         };
     }
     if !name.ends_with(".weight") {
         return CandidateReason {
             quantizable: false,
-            protected: protected_tensor(name),
+            protected: is_protected_tensor(name),
             reason: "non_weight_tensor".to_string(),
         };
     }
     CandidateReason {
         quantizable: true,
-        protected: protected_tensor(name),
-        reason: protection_reason(name)
+        protected: is_protected_tensor(name),
+        reason: tensor_protection_reason(name)
             .unwrap_or("candidate_weight")
             .to_string(),
     }
 }
 
-fn protected_tensor(name: &str) -> bool {
-    protection_reason(name).is_some()
+pub fn is_protected_tensor(name: &str) -> bool {
+    tensor_protection_reason(name).is_some()
 }
 
-fn protection_reason(name: &str) -> Option<&'static str> {
+pub fn tensor_protection_reason(name: &str) -> Option<&'static str> {
     if name.contains("embed_tokens") {
         Some("token_embedding_protected")
     } else if name == "lm_head.weight" {

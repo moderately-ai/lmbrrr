@@ -1,13 +1,13 @@
 ---
 id: convert-minicpm-mixed-precision-weights
 title: Convert MiniCPM mixed precision weights
-status: todo
+status: done
 priority: p2
 dependencies: [score-minicpm-quantization-sensitivity]
 related: []
 scopes: [quantization, runtime/candle]
 shared_scopes: [docs/research]
-paths: []
+paths: [Cargo.toml, Cargo.lock, src/main.rs, src/lib.rs, src/quant_sensitivity.rs, src/quant_convert.rs, docs/research/mixed-precision-weight-artifact.md]
 tags: [quantization, conversion, implementation]
 ---
 Convert native MiniCPM-V-4.6 safetensors into a mixed-precision artifact using a policy manifest.
