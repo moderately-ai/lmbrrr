@@ -25,14 +25,28 @@ pub fn preprocess_paths(
     cfg: &PreprocessorConfig,
     device: &Device,
 ) -> Result<ProcessedImages> {
+    let images = paths
+        .iter()
+        .map(|path| {
+            let image = image::open(path)
+                .with_context(|| format!("open image {}", path.display()))?
+                .to_rgb8();
+            Ok((path.clone(), image))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    preprocess_rgb_images(&images, cfg, device)
+}
+
+pub fn preprocess_rgb_images(
+    inputs: &[(PathBuf, RgbImage)],
+    cfg: &PreprocessorConfig,
+    device: &Device,
+) -> Result<ProcessedImages> {
     let mut all_patch_values = Vec::new();
     let mut all_target_sizes = Vec::new();
     let mut images = Vec::new();
 
-    for path in paths {
-        let image = image::open(path)
-            .with_context(|| format!("open image {}", path.display()))?
-            .to_rgb8();
+    for (path, image) in inputs {
         let image_size = (image.height() as usize, image.width() as usize);
         let best_grid = if cfg.slice_mode {
             get_sliced_grid(image_size, cfg.max_slice_nums, cfg.scale_resolution)
