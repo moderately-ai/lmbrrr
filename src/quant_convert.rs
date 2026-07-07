@@ -19,6 +19,7 @@ pub enum MixedPrecisionPolicy {
     Q8TextLinears,
     Q4KMlpOnly,
     Q4KTextSafe,
+    Q4KMlpQ8Text,
 }
 
 impl MixedPrecisionPolicy {
@@ -27,6 +28,7 @@ impl MixedPrecisionPolicy {
             Self::Q8TextLinears => "q8-text-linears",
             Self::Q4KMlpOnly => "q4k-mlp-only",
             Self::Q4KTextSafe => "q4k-text-safe",
+            Self::Q4KMlpQ8Text => "q4k-mlp-q8-text",
         }
     }
 }
@@ -397,6 +399,15 @@ fn planned_tensor_format(
                 TensorFormat::PreserveSource
             }
         }
+        MixedPrecisionPolicy::Q4KMlpQ8Text => {
+            if family == "text.mlp" {
+                TensorFormat::Q4KBlock64
+            } else if matches!(family, "text.full_attention" | "text.deltanet") {
+                TensorFormat::Q8Symmetric
+            } else {
+                TensorFormat::PreserveSource
+            }
+        }
     }
 }
 
@@ -562,6 +573,49 @@ mod tests {
                 &sensitivity,
             ),
             TensorFormat::Q4KBlock64
+        );
+    }
+
+    #[test]
+    fn mixed_policy_uses_q4_mlp_and_q8_attention_deltanet() {
+        let mut sensitivity = BTreeSet::new();
+        sensitivity.insert("model.language_model.layers.0.mlp.gate_proj.weight".to_string());
+        sensitivity
+            .insert("model.language_model.layers.0.linear_attn.in_proj_qkv.weight".to_string());
+        sensitivity.insert("model.language_model.layers.11.self_attn.q_proj.weight".to_string());
+
+        assert_eq!(
+            planned_tensor_format(
+                MixedPrecisionPolicy::Q4KMlpQ8Text,
+                "model.language_model.layers.0.mlp.gate_proj.weight",
+                "text.mlp",
+                &[64, 64],
+                false,
+                &sensitivity,
+            ),
+            TensorFormat::Q4KBlock64
+        );
+        assert_eq!(
+            planned_tensor_format(
+                MixedPrecisionPolicy::Q4KMlpQ8Text,
+                "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+                "text.deltanet",
+                &[64, 64],
+                false,
+                &sensitivity,
+            ),
+            TensorFormat::Q8Symmetric
+        );
+        assert_eq!(
+            planned_tensor_format(
+                MixedPrecisionPolicy::Q4KMlpQ8Text,
+                "model.language_model.layers.11.self_attn.q_proj.weight",
+                "text.full_attention",
+                &[64, 64],
+                false,
+                &sensitivity,
+            ),
+            TensorFormat::Q8Symmetric
         );
     }
 }

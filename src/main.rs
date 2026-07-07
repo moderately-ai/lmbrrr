@@ -386,6 +386,12 @@ struct QuantQualityArgs {
     )]
     q4_text_safe_manifest: PathBuf,
 
+    #[arg(
+        long,
+        default_value = "target/minicpm-v46-q4k-mlp-q8-text-full/manifest.json"
+    )]
+    mixed_manifest: PathBuf,
+
     #[arg(long, default_value_t = 0.25)]
     min_prefix_ratio: f64,
 
@@ -464,6 +470,7 @@ enum MixedPrecisionPolicyArg {
     Q8TextLinears,
     Q4kMlpOnly,
     Q4kTextSafe,
+    Q4kMlpQ8Text,
 }
 
 impl MixedPrecisionPolicyArg {
@@ -472,6 +479,7 @@ impl MixedPrecisionPolicyArg {
             Self::Q8TextLinears => MixedPrecisionPolicy::Q8TextLinears,
             Self::Q4kMlpOnly => MixedPrecisionPolicy::Q4KMlpOnly,
             Self::Q4kTextSafe => MixedPrecisionPolicy::Q4KTextSafe,
+            Self::Q4kMlpQ8Text => MixedPrecisionPolicy::Q4KMlpQ8Text,
         }
     }
 }
@@ -2185,6 +2193,7 @@ fn quant_quality(args: QuantQualityArgs) -> Result<()> {
         &args.q8_manifest,
         &args.q4_mlp_manifest,
         &args.q4_text_safe_manifest,
+        &args.mixed_manifest,
     ] {
         if !manifest.exists() {
             anyhow::bail!(
@@ -2204,6 +2213,7 @@ fn quant_quality(args: QuantQualityArgs) -> Result<()> {
         ("q8-text-linears", Some(&args.q8_manifest)),
         ("q4k-mlp-only", Some(&args.q4_mlp_manifest)),
         ("q4k-text-safe", Some(&args.q4_text_safe_manifest)),
+        ("q4k-mlp-q8-text", Some(&args.mixed_manifest)),
     ];
 
     let mut policy_runs = Vec::new();

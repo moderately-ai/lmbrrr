@@ -1,7 +1,7 @@
 ---
 id: benchmark-mixed-q4-q8-quant-policy
 title: Benchmark mixed q4 q8 quantization policy
-status: todo
+status: done
 priority: p1
 dependencies: [calibrate-q4-quantization-quality-gates]
 related: []

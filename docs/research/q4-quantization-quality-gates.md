@@ -17,6 +17,7 @@ The command runs these policies over the same tokenized prompts:
 - `q8-text-linears`;
 - `q4k-mlp-only`;
 - `q4k-text-safe`.
+- `q4k-mlp-q8-text`, when `--mixed-manifest` points at an existing artifact.
 
 For each candidate, the report includes:
 
@@ -65,6 +66,7 @@ The default manifest paths are:
 - `target/minicpm-v46-q8-full/manifest.json`
 - `target/minicpm-v46-q4k-mlp-full/manifest.json`
 - `target/minicpm-v46-q4k-text-safe-full/manifest.json`
+- `target/minicpm-v46-q4k-mlp-q8-text-full/manifest.json`
 
 ## Local Result
 
@@ -82,6 +84,10 @@ The full text matrix did not pass:
 | `q8-text-linears` | `7` | `2` | `3` | `4` | `0.415` | `0.825` | `0.814` |
 | `q4k-mlp-only` | `7` | `2` | `4` | `3` | `0.504` | `0.770` | `0.736` |
 | `q4k-text-safe` | `7` | `2` | `4` | `3` | `0.446` | `0.706` | `0.691` |
+
+After `q4k-mlp-q8-text` was added, the same matrix still did not pass. The
+mixed policy passed `3/7` cases, with mean prefix ratio `0.353`, mean token
+Jaccard `0.623`, and mean lexical Jaccard `0.600`.
 
 Notable failures:
 
@@ -106,4 +112,3 @@ quantization ticket should test a mixed policy rather than broadening q4:
 - rerun this generation gate beside decode/pre-fill benchmarks;
 - require all short factual and thinking-control cases to pass before treating
   the policy as usable for interactive runs.
-
