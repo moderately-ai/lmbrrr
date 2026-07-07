@@ -1,0 +1,82 @@
+[
+  {
+    "name": "__init__.py",
+    "path": "src/transformers/models/qwen3_5/__init__.py",
+    "sha": "f3917b12515e7352e897519f2804f1d9fdc570a2",
+    "size": 1035,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/__init__.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/__init__.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/f3917b12515e7352e897519f2804f1d9fdc570a2",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/qwen3_5/__init__.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/__init__.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/f3917b12515e7352e897519f2804f1d9fdc570a2",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/__init__.py"
+    }
+  },
+  {
+    "name": "configuration_qwen3_5.py",
+    "path": "src/transformers/models/qwen3_5/configuration_qwen3_5.py",
+    "sha": "c33663287cea1daf8f652a1e8e447cf08fecd4ef",
+    "size": 8266,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/configuration_qwen3_5.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/configuration_qwen3_5.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/c33663287cea1daf8f652a1e8e447cf08fecd4ef",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/qwen3_5/configuration_qwen3_5.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/configuration_qwen3_5.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/c33663287cea1daf8f652a1e8e447cf08fecd4ef",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/configuration_qwen3_5.py"
+    }
+  },
+  {
+    "name": "modeling_qwen3_5.py",
+    "path": "src/transformers/models/qwen3_5/modeling_qwen3_5.py",
+    "sha": "1f695935030cd7f34b4c729e5880e712876b7f8e",
+    "size": 93133,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/modeling_qwen3_5.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modeling_qwen3_5.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/1f695935030cd7f34b4c729e5880e712876b7f8e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/qwen3_5/modeling_qwen3_5.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/modeling_qwen3_5.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/1f695935030cd7f34b4c729e5880e712876b7f8e",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modeling_qwen3_5.py"
+    }
+  },
+  {
+    "name": "modular_qwen3_5.py",
+    "path": "src/transformers/models/qwen3_5/modular_qwen3_5.py",
+    "sha": "2b88938d533de506bbecf875a165dd1776582e1b",
+    "size": 29693,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/modular_qwen3_5.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modular_qwen3_5.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/2b88938d533de506bbecf875a165dd1776582e1b",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/qwen3_5/modular_qwen3_5.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/modular_qwen3_5.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/2b88938d533de506bbecf875a165dd1776582e1b",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modular_qwen3_5.py"
+    }
+  },
+  {
+    "name": "tokenization_qwen3_5.py",
+    "path": "src/transformers/models/qwen3_5/tokenization_qwen3_5.py",
+    "sha": "28049a4deb4c5fa42f00bc2e5c4a56ca2a689aef",
+    "size": 3127,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/tokenization_qwen3_5.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/tokenization_qwen3_5.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/28049a4deb4c5fa42f00bc2e5c4a56ca2a689aef",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/qwen3_5/tokenization_qwen3_5.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/qwen3_5/tokenization_qwen3_5.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/28049a4deb4c5fa42f00bc2e5c4a56ca2a689aef",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/tokenization_qwen3_5.py"
+    }
+  }
+]

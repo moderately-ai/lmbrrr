@@ -1,0 +1,130 @@
+[
+  {
+    "name": "__init__.py",
+    "path": "src/transformers/models/minicpmv4_6/__init__.py",
+    "sha": "858ef93043e8b52a2eb56b4cd6a751c7b35cf111",
+    "size": 1212,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/__init__.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/__init__.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/858ef93043e8b52a2eb56b4cd6a751c7b35cf111",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/__init__.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/__init__.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/858ef93043e8b52a2eb56b4cd6a751c7b35cf111",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/__init__.py"
+    }
+  },
+  {
+    "name": "configuration_minicpmv4_6.py",
+    "path": "src/transformers/models/minicpmv4_6/configuration_minicpmv4_6.py",
+    "sha": "1187848215e388d0659df91df1972661bf20f337",
+    "size": 5348,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/configuration_minicpmv4_6.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/configuration_minicpmv4_6.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/1187848215e388d0659df91df1972661bf20f337",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/configuration_minicpmv4_6.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/configuration_minicpmv4_6.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/1187848215e388d0659df91df1972661bf20f337",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/configuration_minicpmv4_6.py"
+    }
+  },
+  {
+    "name": "image_processing_minicpmv4_6.py",
+    "path": "src/transformers/models/minicpmv4_6/image_processing_minicpmv4_6.py",
+    "sha": "2cfabdd987323461a2e8ac1bf00a4daae6087f52",
+    "size": 10711,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/image_processing_minicpmv4_6.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/image_processing_minicpmv4_6.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/2cfabdd987323461a2e8ac1bf00a4daae6087f52",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/image_processing_minicpmv4_6.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/image_processing_minicpmv4_6.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/2cfabdd987323461a2e8ac1bf00a4daae6087f52",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/image_processing_minicpmv4_6.py"
+    }
+  },
+  {
+    "name": "image_processing_pil_minicpmv4_6.py",
+    "path": "src/transformers/models/minicpmv4_6/image_processing_pil_minicpmv4_6.py",
+    "sha": "5a8dc3f4c33b708f5ca39ab64b4d72eb5df4eb5f",
+    "size": 10481,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/image_processing_pil_minicpmv4_6.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/image_processing_pil_minicpmv4_6.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/5a8dc3f4c33b708f5ca39ab64b4d72eb5df4eb5f",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/image_processing_pil_minicpmv4_6.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/image_processing_pil_minicpmv4_6.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/5a8dc3f4c33b708f5ca39ab64b4d72eb5df4eb5f",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/image_processing_pil_minicpmv4_6.py"
+    }
+  },
+  {
+    "name": "modeling_minicpmv4_6.py",
+    "path": "src/transformers/models/minicpmv4_6/modeling_minicpmv4_6.py",
+    "sha": "c0df9965cb4dbd42fd1a704fa61778cd653b4d60",
+    "size": 38497,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/modeling_minicpmv4_6.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/modeling_minicpmv4_6.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/c0df9965cb4dbd42fd1a704fa61778cd653b4d60",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/modeling_minicpmv4_6.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/modeling_minicpmv4_6.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/c0df9965cb4dbd42fd1a704fa61778cd653b4d60",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/modeling_minicpmv4_6.py"
+    }
+  },
+  {
+    "name": "modular_minicpmv4_6.py",
+    "path": "src/transformers/models/minicpmv4_6/modular_minicpmv4_6.py",
+    "sha": "9ae26e3c0ccb6be6ac9a86a52d05ceed21986f83",
+    "size": 35823,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/modular_minicpmv4_6.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/modular_minicpmv4_6.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/9ae26e3c0ccb6be6ac9a86a52d05ceed21986f83",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/modular_minicpmv4_6.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/modular_minicpmv4_6.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/9ae26e3c0ccb6be6ac9a86a52d05ceed21986f83",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/modular_minicpmv4_6.py"
+    }
+  },
+  {
+    "name": "processing_minicpmv4_6.py",
+    "path": "src/transformers/models/minicpmv4_6/processing_minicpmv4_6.py",
+    "sha": "ea571c887df63c7cbcc7a24b1fc28a642ca91759",
+    "size": 9891,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/processing_minicpmv4_6.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/processing_minicpmv4_6.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/ea571c887df63c7cbcc7a24b1fc28a642ca91759",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/processing_minicpmv4_6.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/processing_minicpmv4_6.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/ea571c887df63c7cbcc7a24b1fc28a642ca91759",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/processing_minicpmv4_6.py"
+    }
+  },
+  {
+    "name": "video_processing_minicpmv4_6.py",
+    "path": "src/transformers/models/minicpmv4_6/video_processing_minicpmv4_6.py",
+    "sha": "0ae914739141c1878f5d5b8fc9cb7589daff417a",
+    "size": 24237,
+    "url": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/video_processing_minicpmv4_6.py?ref=main",
+    "html_url": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/video_processing_minicpmv4_6.py",
+    "git_url": "https://api.github.com/repos/huggingface/transformers/git/blobs/0ae914739141c1878f5d5b8fc9cb7589daff417a",
+    "download_url": "https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/minicpmv4_6/video_processing_minicpmv4_6.py",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/transformers/contents/src/transformers/models/minicpmv4_6/video_processing_minicpmv4_6.py?ref=main",
+      "git": "https://api.github.com/repos/huggingface/transformers/git/blobs/0ae914739141c1878f5d5b8fc9cb7589daff417a",
+      "html": "https://github.com/huggingface/transformers/blob/main/src/transformers/models/minicpmv4_6/video_processing_minicpmv4_6.py"
+    }
+  }
+]

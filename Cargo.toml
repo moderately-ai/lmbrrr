@@ -1,0 +1,40 @@
+[package]
+name = "lmbrrr"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[features]
+default = []
+accelerate = ["candle/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+apple-optimized = ["metal", "accelerate"]
+cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cudnn = ["cuda", "candle/cudnn", "candle-nn/cudnn", "candle-transformers/cudnn"]
+flash-attn = ["candle-transformers/flash-attn"]
+metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
+metal-debug-labels = [
+  "metal",
+  "candle/metal-debug-labels",
+  "candle-nn/metal-debug-labels",
+  "candle-transformers/metal-debug-labels",
+]
+mkl = ["candle/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+
+[dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+candle = { package = "candle-core", version = "0.11.0" }
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+clap = { version = "4.2.4", features = ["derive"] }
+crossterm = "0.28"
+hf-hub = { version = "0.5.0", features = ["tokio"] }
+image = { version = "0.25.2", default-features = false, features = ["jpeg", "png", "webp"] }
+memmap2 = "0.9"
+ratatui = "0.29"
+safetensors = "0.8.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
+
+[dev-dependencies]
+tempfile = "3"

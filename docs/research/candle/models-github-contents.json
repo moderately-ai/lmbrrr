@@ -1,0 +1,2002 @@
+[
+  {
+    "name": "based.rs",
+    "path": "candle-transformers/src/models/based.rs",
+    "sha": "dd2aa80dadaf0c70c6b0b2b75e1664a7e702c69e",
+    "size": 18586,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/based.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/based.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/dd2aa80dadaf0c70c6b0b2b75e1664a7e702c69e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/based.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/based.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/dd2aa80dadaf0c70c6b0b2b75e1664a7e702c69e",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/based.rs"
+    }
+  },
+  {
+    "name": "beit.rs",
+    "path": "candle-transformers/src/models/beit.rs",
+    "sha": "6b6368423f3d3e3fdd80a680bc12a1296a1b4297",
+    "size": 13206,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/beit.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/beit.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/6b6368423f3d3e3fdd80a680bc12a1296a1b4297",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/beit.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/beit.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/6b6368423f3d3e3fdd80a680bc12a1296a1b4297",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/beit.rs"
+    }
+  },
+  {
+    "name": "bert.rs",
+    "path": "candle-transformers/src/models/bert.rs",
+    "sha": "a348c53e140c6d31e36da9fd952307a576cde013",
+    "size": 22213,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/bert.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/bert.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/a348c53e140c6d31e36da9fd952307a576cde013",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/bert.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/bert.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/a348c53e140c6d31e36da9fd952307a576cde013",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/bert.rs"
+    }
+  },
+  {
+    "name": "bigcode.rs",
+    "path": "candle-transformers/src/models/bigcode.rs",
+    "sha": "ed63e4d73dbe100378ead231f9e8e9d79141fdb3",
+    "size": 13042,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/bigcode.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/bigcode.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/ed63e4d73dbe100378ead231f9e8e9d79141fdb3",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/bigcode.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/bigcode.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/ed63e4d73dbe100378ead231f9e8e9d79141fdb3",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/bigcode.rs"
+    }
+  },
+  {
+    "name": "blip.rs",
+    "path": "candle-transformers/src/models/blip.rs",
+    "sha": "a391daacbfd3e96b83604924f7f3d962c93f4d26",
+    "size": 9776,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/blip.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/blip.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/a391daacbfd3e96b83604924f7f3d962c93f4d26",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/blip.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/blip.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/a391daacbfd3e96b83604924f7f3d962c93f4d26",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/blip.rs"
+    }
+  },
+  {
+    "name": "blip_text.rs",
+    "path": "candle-transformers/src/models/blip_text.rs",
+    "sha": "8aeb5dbe35745d5e3dafd51373f01d93448d80b4",
+    "size": 15631,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/blip_text.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/blip_text.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/8aeb5dbe35745d5e3dafd51373f01d93448d80b4",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/blip_text.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/blip_text.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/8aeb5dbe35745d5e3dafd51373f01d93448d80b4",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/blip_text.rs"
+    }
+  },
+  {
+    "name": "chatglm.rs",
+    "path": "candle-transformers/src/models/chatglm.rs",
+    "sha": "59132c5ee73987b8d926ed97237a63bc82f3da45",
+    "size": 19543,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/chatglm.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/chatglm.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/59132c5ee73987b8d926ed97237a63bc82f3da45",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/chatglm.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/chatglm.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/59132c5ee73987b8d926ed97237a63bc82f3da45",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/chatglm.rs"
+    }
+  },
+  {
+    "name": "chinese_clip",
+    "path": "candle-transformers/src/models/chinese_clip",
+    "sha": "3d961df5c532cd10b282d5f00e5576e450b46744",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/chinese_clip?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/chinese_clip",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/3d961df5c532cd10b282d5f00e5576e450b46744",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/chinese_clip?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/3d961df5c532cd10b282d5f00e5576e450b46744",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/chinese_clip"
+    }
+  },
+  {
+    "name": "clip",
+    "path": "candle-transformers/src/models/clip",
+    "sha": "368d7c7257abe55c39180f7edd3dbab4833d20d8",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/clip?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/clip",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/368d7c7257abe55c39180f7edd3dbab4833d20d8",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/clip?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/368d7c7257abe55c39180f7edd3dbab4833d20d8",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/clip"
+    }
+  },
+  {
+    "name": "codegeex4_9b.rs",
+    "path": "candle-transformers/src/models/codegeex4_9b.rs",
+    "sha": "40c74ccf0fb6f2100a1c3cbf1a35549e83bdc4d2",
+    "size": 20055,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/codegeex4_9b.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/codegeex4_9b.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/40c74ccf0fb6f2100a1c3cbf1a35549e83bdc4d2",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/codegeex4_9b.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/codegeex4_9b.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/40c74ccf0fb6f2100a1c3cbf1a35549e83bdc4d2",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/codegeex4_9b.rs"
+    }
+  },
+  {
+    "name": "colpali.rs",
+    "path": "candle-transformers/src/models/colpali.rs",
+    "sha": "16ca4eb304ff8b3c38aca315fb1abc843a7b5476",
+    "size": 1497,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/colpali.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/colpali.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/16ca4eb304ff8b3c38aca315fb1abc843a7b5476",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/colpali.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/colpali.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/16ca4eb304ff8b3c38aca315fb1abc843a7b5476",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/colpali.rs"
+    }
+  },
+  {
+    "name": "convmixer.rs",
+    "path": "candle-transformers/src/models/convmixer.rs",
+    "sha": "77570a6aaff24f5e86db0817c16ca9eac1466b7c",
+    "size": 2948,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/convmixer.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/convmixer.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/77570a6aaff24f5e86db0817c16ca9eac1466b7c",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/convmixer.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/convmixer.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/77570a6aaff24f5e86db0817c16ca9eac1466b7c",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/convmixer.rs"
+    }
+  },
+  {
+    "name": "convnext.rs",
+    "path": "candle-transformers/src/models/convnext.rs",
+    "sha": "727e11381c6b754c4e4d449d223024ea533fb0a9",
+    "size": 9738,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/convnext.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/convnext.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/727e11381c6b754c4e4d449d223024ea533fb0a9",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/convnext.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/convnext.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/727e11381c6b754c4e4d449d223024ea533fb0a9",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/convnext.rs"
+    }
+  },
+  {
+    "name": "csm.rs",
+    "path": "candle-transformers/src/models/csm.rs",
+    "sha": "28267ecc7a5ed6b7c676e600857499305c5e479c",
+    "size": 18226,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/csm.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/csm.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/28267ecc7a5ed6b7c676e600857499305c5e479c",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/csm.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/csm.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/28267ecc7a5ed6b7c676e600857499305c5e479c",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/csm.rs"
+    }
+  },
+  {
+    "name": "dac.rs",
+    "path": "candle-transformers/src/models/dac.rs",
+    "sha": "21cba02e87048173be1b1f814ea1fee670db1215",
+    "size": 10792,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/dac.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/dac.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/21cba02e87048173be1b1f814ea1fee670db1215",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/dac.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/dac.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/21cba02e87048173be1b1f814ea1fee670db1215",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/dac.rs"
+    }
+  },
+  {
+    "name": "debertav2.rs",
+    "path": "candle-transformers/src/models/debertav2.rs",
+    "sha": "4f19d3b41911e1ded053b958e64da470de955006",
+    "size": 47961,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/debertav2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/debertav2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/4f19d3b41911e1ded053b958e64da470de955006",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/debertav2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/debertav2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/4f19d3b41911e1ded053b958e64da470de955006",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/debertav2.rs"
+    }
+  },
+  {
+    "name": "deepseek2.rs",
+    "path": "candle-transformers/src/models/deepseek2.rs",
+    "sha": "5260dfa62d2eb11b1b00cb5f5c90730b4679618f",
+    "size": 35381,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/deepseek2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/deepseek2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/5260dfa62d2eb11b1b00cb5f5c90730b4679618f",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/deepseek2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/deepseek2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/5260dfa62d2eb11b1b00cb5f5c90730b4679618f",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/deepseek2.rs"
+    }
+  },
+  {
+    "name": "depth_anything_v2.rs",
+    "path": "candle-transformers/src/models/depth_anything_v2.rs",
+    "sha": "690d396bdc238c163e28d9dc4373ad5afc3d4879",
+    "size": 16369,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/depth_anything_v2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/depth_anything_v2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/690d396bdc238c163e28d9dc4373ad5afc3d4879",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/depth_anything_v2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/depth_anything_v2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/690d396bdc238c163e28d9dc4373ad5afc3d4879",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/depth_anything_v2.rs"
+    }
+  },
+  {
+    "name": "dinov2.rs",
+    "path": "candle-transformers/src/models/dinov2.rs",
+    "sha": "6dd0ab2dada6bc9e496b971e526af695b911e4cc",
+    "size": 12229,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/dinov2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/dinov2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/6dd0ab2dada6bc9e496b971e526af695b911e4cc",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/dinov2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/dinov2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/6dd0ab2dada6bc9e496b971e526af695b911e4cc",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/dinov2.rs"
+    }
+  },
+  {
+    "name": "dinov2reg4.rs",
+    "path": "candle-transformers/src/models/dinov2reg4.rs",
+    "sha": "549f2c3ce51ddeae498d823ed57b9a49a65b3b18",
+    "size": 9626,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/dinov2reg4.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/dinov2reg4.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/549f2c3ce51ddeae498d823ed57b9a49a65b3b18",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/dinov2reg4.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/dinov2reg4.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/549f2c3ce51ddeae498d823ed57b9a49a65b3b18",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/dinov2reg4.rs"
+    }
+  },
+  {
+    "name": "distilbert.rs",
+    "path": "candle-transformers/src/models/distilbert.rs",
+    "sha": "abaffa81fbd2062580ab9155c45f270d39e581e6",
+    "size": 15133,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/distilbert.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/distilbert.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/abaffa81fbd2062580ab9155c45f270d39e581e6",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/distilbert.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/distilbert.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/abaffa81fbd2062580ab9155c45f270d39e581e6",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/distilbert.rs"
+    }
+  },
+  {
+    "name": "efficientnet.rs",
+    "path": "candle-transformers/src/models/efficientnet.rs",
+    "sha": "be6954605777c2357d604ffe1a179d65cac21247",
+    "size": 9588,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/efficientnet.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/efficientnet.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/be6954605777c2357d604ffe1a179d65cac21247",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/efficientnet.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/efficientnet.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/be6954605777c2357d604ffe1a179d65cac21247",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/efficientnet.rs"
+    }
+  },
+  {
+    "name": "efficientvit.rs",
+    "path": "candle-transformers/src/models/efficientvit.rs",
+    "sha": "4c231d76799d59395e89b6419945886fca62e073",
+    "size": 14465,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/efficientvit.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/efficientvit.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/4c231d76799d59395e89b6419945886fca62e073",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/efficientvit.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/efficientvit.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/4c231d76799d59395e89b6419945886fca62e073",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/efficientvit.rs"
+    }
+  },
+  {
+    "name": "encodec.rs",
+    "path": "candle-transformers/src/models/encodec.rs",
+    "sha": "de280a570aa95619d1f77d912443f452a3a18fc7",
+    "size": 24442,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/encodec.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/encodec.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/de280a570aa95619d1f77d912443f452a3a18fc7",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/encodec.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/encodec.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/de280a570aa95619d1f77d912443f452a3a18fc7",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/encodec.rs"
+    }
+  },
+  {
+    "name": "eva2.rs",
+    "path": "candle-transformers/src/models/eva2.rs",
+    "sha": "9e31f58c73fd3baae11fc81dc9005a296a2aefee",
+    "size": 14354,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/eva2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/eva2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/9e31f58c73fd3baae11fc81dc9005a296a2aefee",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/eva2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/eva2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/9e31f58c73fd3baae11fc81dc9005a296a2aefee",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/eva2.rs"
+    }
+  },
+  {
+    "name": "falcon.rs",
+    "path": "candle-transformers/src/models/falcon.rs",
+    "sha": "c75b4d70d346eefc8ac71e849c2840a0d8468efd",
+    "size": 16903,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/falcon.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/falcon.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/c75b4d70d346eefc8ac71e849c2840a0d8468efd",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/falcon.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/falcon.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/c75b4d70d346eefc8ac71e849c2840a0d8468efd",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/falcon.rs"
+    }
+  },
+  {
+    "name": "fastvit.rs",
+    "path": "candle-transformers/src/models/fastvit.rs",
+    "sha": "0dcef5dc760926b371b1931aaf3f978163359212",
+    "size": 14952,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/fastvit.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/fastvit.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/0dcef5dc760926b371b1931aaf3f978163359212",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/fastvit.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/fastvit.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/0dcef5dc760926b371b1931aaf3f978163359212",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/fastvit.rs"
+    }
+  },
+  {
+    "name": "flux",
+    "path": "candle-transformers/src/models/flux",
+    "sha": "a74513e47c2f99d7cd5856294b4771fd816304a4",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/flux?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/flux",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/a74513e47c2f99d7cd5856294b4771fd816304a4",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/flux?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/a74513e47c2f99d7cd5856294b4771fd816304a4",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/flux"
+    }
+  },
+  {
+    "name": "gemma.rs",
+    "path": "candle-transformers/src/models/gemma.rs",
+    "sha": "4b656d6a7fa4163754d88ac7cbb88b8aa3941479",
+    "size": 14602,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/gemma.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/4b656d6a7fa4163754d88ac7cbb88b8aa3941479",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/gemma.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/4b656d6a7fa4163754d88ac7cbb88b8aa3941479",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/gemma.rs"
+    }
+  },
+  {
+    "name": "gemma2.rs",
+    "path": "candle-transformers/src/models/gemma2.rs",
+    "sha": "ec23efc52910053079ec0a4a3a250e0f1b219c45",
+    "size": 15061,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/gemma2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/ec23efc52910053079ec0a4a3a250e0f1b219c45",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/gemma2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/ec23efc52910053079ec0a4a3a250e0f1b219c45",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/gemma2.rs"
+    }
+  },
+  {
+    "name": "gemma3.rs",
+    "path": "candle-transformers/src/models/gemma3.rs",
+    "sha": "08b4e5ad6e34b760da9aa7bd52d09bcb4949116c",
+    "size": 17068,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma3.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/gemma3.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/08b4e5ad6e34b760da9aa7bd52d09bcb4949116c",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/gemma3.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma3.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/08b4e5ad6e34b760da9aa7bd52d09bcb4949116c",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/gemma3.rs"
+    }
+  },
+  {
+    "name": "gemma4",
+    "path": "candle-transformers/src/models/gemma4",
+    "sha": "579910a0a7467475ca1c656d030107651ac66989",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma4?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/gemma4",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/579910a0a7467475ca1c656d030107651ac66989",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/gemma4?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/579910a0a7467475ca1c656d030107651ac66989",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/gemma4"
+    }
+  },
+  {
+    "name": "glm4.rs",
+    "path": "candle-transformers/src/models/glm4.rs",
+    "sha": "969325f2c9ec342336ccc2703141cd465e19c552",
+    "size": 20616,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/glm4.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/glm4.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/969325f2c9ec342336ccc2703141cd465e19c552",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/glm4.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/glm4.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/969325f2c9ec342336ccc2703141cd465e19c552",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/glm4.rs"
+    }
+  },
+  {
+    "name": "glm4_new.rs",
+    "path": "candle-transformers/src/models/glm4_new.rs",
+    "sha": "bee255327cb7c1ac167a01b61756925fa8d927de",
+    "size": 12585,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/glm4_new.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/glm4_new.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/bee255327cb7c1ac167a01b61756925fa8d927de",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/glm4_new.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/glm4_new.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/bee255327cb7c1ac167a01b61756925fa8d927de",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/glm4_new.rs"
+    }
+  },
+  {
+    "name": "granite.rs",
+    "path": "candle-transformers/src/models/granite.rs",
+    "sha": "e147839d712476fc45cd30c34f62df06630a24eb",
+    "size": 15678,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/granite.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/granite.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/e147839d712476fc45cd30c34f62df06630a24eb",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/granite.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/granite.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/e147839d712476fc45cd30c34f62df06630a24eb",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/granite.rs"
+    }
+  },
+  {
+    "name": "granitemoehybrid.rs",
+    "path": "candle-transformers/src/models/granitemoehybrid.rs",
+    "sha": "6a5a3fa056e8b9210cd2ff14ff7244561d3c1417",
+    "size": 20394,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/granitemoehybrid.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/granitemoehybrid.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/6a5a3fa056e8b9210cd2ff14ff7244561d3c1417",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/granitemoehybrid.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/granitemoehybrid.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/6a5a3fa056e8b9210cd2ff14ff7244561d3c1417",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/granitemoehybrid.rs"
+    }
+  },
+  {
+    "name": "helium.rs",
+    "path": "candle-transformers/src/models/helium.rs",
+    "sha": "40cff396e77edf3fdf7e6b3c3e3e48af56103eb5",
+    "size": 12982,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/helium.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/helium.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/40cff396e77edf3fdf7e6b3c3e3e48af56103eb5",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/helium.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/helium.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/40cff396e77edf3fdf7e6b3c3e3e48af56103eb5",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/helium.rs"
+    }
+  },
+  {
+    "name": "hiera.rs",
+    "path": "candle-transformers/src/models/hiera.rs",
+    "sha": "98ad8257374d03491cc2e71a5746dd240de9e46e",
+    "size": 8274,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/hiera.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/hiera.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/98ad8257374d03491cc2e71a5746dd240de9e46e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/hiera.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/hiera.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/98ad8257374d03491cc2e71a5746dd240de9e46e",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/hiera.rs"
+    }
+  },
+  {
+    "name": "jina_bert.rs",
+    "path": "candle-transformers/src/models/jina_bert.rs",
+    "sha": "40535a8bb990c2a78f6ab2b04235706f561a99bd",
+    "size": 13257,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/jina_bert.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/jina_bert.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/40535a8bb990c2a78f6ab2b04235706f561a99bd",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/jina_bert.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/jina_bert.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/40535a8bb990c2a78f6ab2b04235706f561a99bd",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/jina_bert.rs"
+    }
+  },
+  {
+    "name": "lfm2.rs",
+    "path": "candle-transformers/src/models/lfm2.rs",
+    "sha": "de2961535885b2cabef937ba224141002f7cbcd3",
+    "size": 21676,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/lfm2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/lfm2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/de2961535885b2cabef937ba224141002f7cbcd3",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/lfm2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/lfm2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/de2961535885b2cabef937ba224141002f7cbcd3",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/lfm2.rs"
+    }
+  },
+  {
+    "name": "llama.rs",
+    "path": "candle-transformers/src/models/llama.rs",
+    "sha": "c62f56271f569a45ac19574498ac27a8e3625c92",
+    "size": 18181,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llama.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/llama.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/c62f56271f569a45ac19574498ac27a8e3625c92",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/llama.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llama.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/c62f56271f569a45ac19574498ac27a8e3625c92",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/llama.rs"
+    }
+  },
+  {
+    "name": "llama2_c.rs",
+    "path": "candle-transformers/src/models/llama2_c.rs",
+    "sha": "887f1d7de5e1d7239be46577fa1eac662ead3dc7",
+    "size": 11979,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llama2_c.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/llama2_c.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/887f1d7de5e1d7239be46577fa1eac662ead3dc7",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/llama2_c.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llama2_c.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/887f1d7de5e1d7239be46577fa1eac662ead3dc7",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/llama2_c.rs"
+    }
+  },
+  {
+    "name": "llama2_c_weights.rs",
+    "path": "candle-transformers/src/models/llama2_c_weights.rs",
+    "sha": "8149c214c971d828bb62f9cf094aa1e12086bab6",
+    "size": 6529,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llama2_c_weights.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/llama2_c_weights.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/8149c214c971d828bb62f9cf094aa1e12086bab6",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/llama2_c_weights.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llama2_c_weights.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/8149c214c971d828bb62f9cf094aa1e12086bab6",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/llama2_c_weights.rs"
+    }
+  },
+  {
+    "name": "llava",
+    "path": "candle-transformers/src/models/llava",
+    "sha": "4f8fade61b6d7b0b1f5c1c34dc122ae0f876b1a2",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llava?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/llava",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/4f8fade61b6d7b0b1f5c1c34dc122ae0f876b1a2",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/llava?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/4f8fade61b6d7b0b1f5c1c34dc122ae0f876b1a2",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/llava"
+    }
+  },
+  {
+    "name": "mamba.rs",
+    "path": "candle-transformers/src/models/mamba.rs",
+    "sha": "dfae0af3983cd16f7e26d20ecab3a63ea28cb7cc",
+    "size": 7558,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mamba.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mamba.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/dfae0af3983cd16f7e26d20ecab3a63ea28cb7cc",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mamba.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mamba.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/dfae0af3983cd16f7e26d20ecab3a63ea28cb7cc",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mamba.rs"
+    }
+  },
+  {
+    "name": "mamba2.rs",
+    "path": "candle-transformers/src/models/mamba2.rs",
+    "sha": "834510769bc262d6523fb315d4dfdce145fb018d",
+    "size": 22160,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mamba2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mamba2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/834510769bc262d6523fb315d4dfdce145fb018d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mamba2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mamba2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/834510769bc262d6523fb315d4dfdce145fb018d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mamba2.rs"
+    }
+  },
+  {
+    "name": "marian.rs",
+    "path": "candle-transformers/src/models/marian.rs",
+    "sha": "ad57b876e139ce959b2327d6f61226cb92fa8e77",
+    "size": 21019,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/marian.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/marian.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/ad57b876e139ce959b2327d6f61226cb92fa8e77",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/marian.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/marian.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/ad57b876e139ce959b2327d6f61226cb92fa8e77",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/marian.rs"
+    }
+  },
+  {
+    "name": "metavoice.rs",
+    "path": "candle-transformers/src/models/metavoice.rs",
+    "sha": "722aa9e671b25c8af2ee50be99fb0bc11ec6fa51",
+    "size": 37571,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/metavoice.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/metavoice.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/722aa9e671b25c8af2ee50be99fb0bc11ec6fa51",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/metavoice.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/metavoice.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/722aa9e671b25c8af2ee50be99fb0bc11ec6fa51",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/metavoice.rs"
+    }
+  },
+  {
+    "name": "mimi",
+    "path": "candle-transformers/src/models/mimi",
+    "sha": "7da60c9c0aa1da2a0485a7431b52faa6f25077de",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mimi?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/mimi",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/7da60c9c0aa1da2a0485a7431b52faa6f25077de",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mimi?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/7da60c9c0aa1da2a0485a7431b52faa6f25077de",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/mimi"
+    }
+  },
+  {
+    "name": "mistral.rs",
+    "path": "candle-transformers/src/models/mistral.rs",
+    "sha": "23f982e990760d3edac5e18f5029e8b8c9c48d52",
+    "size": 15327,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mistral.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mistral.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/23f982e990760d3edac5e18f5029e8b8c9c48d52",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mistral.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mistral.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/23f982e990760d3edac5e18f5029e8b8c9c48d52",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mistral.rs"
+    }
+  },
+  {
+    "name": "mixformer.rs",
+    "path": "candle-transformers/src/models/mixformer.rs",
+    "sha": "797d75827e3ea99af949e55ec59c6a16ea35c99e",
+    "size": 15219,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mixformer.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mixformer.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/797d75827e3ea99af949e55ec59c6a16ea35c99e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mixformer.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mixformer.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/797d75827e3ea99af949e55ec59c6a16ea35c99e",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mixformer.rs"
+    }
+  },
+  {
+    "name": "mixtral.rs",
+    "path": "candle-transformers/src/models/mixtral.rs",
+    "sha": "70115e10a385ee19373ad51a519b4a725e328450",
+    "size": 17902,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mixtral.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mixtral.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/70115e10a385ee19373ad51a519b4a725e328450",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mixtral.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mixtral.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/70115e10a385ee19373ad51a519b4a725e328450",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mixtral.rs"
+    }
+  },
+  {
+    "name": "mmdit",
+    "path": "candle-transformers/src/models/mmdit",
+    "sha": "4f6ba13501e8fc1dd2f4d6086874ebcdd82b9f41",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mmdit?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/mmdit",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/4f6ba13501e8fc1dd2f4d6086874ebcdd82b9f41",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mmdit?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/4f6ba13501e8fc1dd2f4d6086874ebcdd82b9f41",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/mmdit"
+    }
+  },
+  {
+    "name": "mobileclip.rs",
+    "path": "candle-transformers/src/models/mobileclip.rs",
+    "sha": "f0baf9e10cb5c6f79698aeab64ffe963b44017df",
+    "size": 3349,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mobileclip.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mobileclip.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/f0baf9e10cb5c6f79698aeab64ffe963b44017df",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mobileclip.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mobileclip.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/f0baf9e10cb5c6f79698aeab64ffe963b44017df",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mobileclip.rs"
+    }
+  },
+  {
+    "name": "mobilenetv4.rs",
+    "path": "candle-transformers/src/models/mobilenetv4.rs",
+    "sha": "ab1e70803f51bfa974627700042ee9562a51a12d",
+    "size": 33426,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mobilenetv4.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mobilenetv4.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/ab1e70803f51bfa974627700042ee9562a51a12d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mobilenetv4.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mobilenetv4.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/ab1e70803f51bfa974627700042ee9562a51a12d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mobilenetv4.rs"
+    }
+  },
+  {
+    "name": "mobileone.rs",
+    "path": "candle-transformers/src/models/mobileone.rs",
+    "sha": "e8836745b96780519b7efbbffd3e254419e0eab2",
+    "size": 9545,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mobileone.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mobileone.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/e8836745b96780519b7efbbffd3e254419e0eab2",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mobileone.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mobileone.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/e8836745b96780519b7efbbffd3e254419e0eab2",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mobileone.rs"
+    }
+  },
+  {
+    "name": "mod.rs",
+    "path": "candle-transformers/src/models/mod.rs",
+    "sha": "f8900319bcf87c29fde8beca47ade69a1f12163d",
+    "size": 3267,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mod.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mod.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/f8900319bcf87c29fde8beca47ade69a1f12163d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mod.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mod.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/f8900319bcf87c29fde8beca47ade69a1f12163d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mod.rs"
+    }
+  },
+  {
+    "name": "modernbert.rs",
+    "path": "candle-transformers/src/models/modernbert.rs",
+    "sha": "a1f0389aaf087b2d4c1a82e98293b0148fd37756",
+    "size": 15272,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/modernbert.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/modernbert.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/a1f0389aaf087b2d4c1a82e98293b0148fd37756",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/modernbert.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/modernbert.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/a1f0389aaf087b2d4c1a82e98293b0148fd37756",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/modernbert.rs"
+    }
+  },
+  {
+    "name": "moondream.rs",
+    "path": "candle-transformers/src/models/moondream.rs",
+    "sha": "4c0b30503ebda1f87a374fa3784fdcfa5cfc0f63",
+    "size": 10250,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/moondream.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/moondream.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/4c0b30503ebda1f87a374fa3784fdcfa5cfc0f63",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/moondream.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/moondream.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/4c0b30503ebda1f87a374fa3784fdcfa5cfc0f63",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/moondream.rs"
+    }
+  },
+  {
+    "name": "mpt.rs",
+    "path": "candle-transformers/src/models/mpt.rs",
+    "sha": "d4170d6bff27adcdba262621112923df586d03fc",
+    "size": 10074,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mpt.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mpt.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/d4170d6bff27adcdba262621112923df586d03fc",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/mpt.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/mpt.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/d4170d6bff27adcdba262621112923df586d03fc",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/mpt.rs"
+    }
+  },
+  {
+    "name": "nomic_bert.rs",
+    "path": "candle-transformers/src/models/nomic_bert.rs",
+    "sha": "8557e6d8e41300323dfccf43a7ca492ce9177180",
+    "size": 16291,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/nomic_bert.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/nomic_bert.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/8557e6d8e41300323dfccf43a7ca492ce9177180",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/nomic_bert.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/nomic_bert.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/8557e6d8e41300323dfccf43a7ca492ce9177180",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/nomic_bert.rs"
+    }
+  },
+  {
+    "name": "nvembed_v2",
+    "path": "candle-transformers/src/models/nvembed_v2",
+    "sha": "534ff2c9909a7ae14643f30155bc25463f15fa9a",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/nvembed_v2?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/nvembed_v2",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/534ff2c9909a7ae14643f30155bc25463f15fa9a",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/nvembed_v2?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/534ff2c9909a7ae14643f30155bc25463f15fa9a",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/nvembed_v2"
+    }
+  },
+  {
+    "name": "olmo.rs",
+    "path": "candle-transformers/src/models/olmo.rs",
+    "sha": "6cf5b1f79df7e8f87c17627aa87273ca40edd927",
+    "size": 12000,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/olmo.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/olmo.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/6cf5b1f79df7e8f87c17627aa87273ca40edd927",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/olmo.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/olmo.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/6cf5b1f79df7e8f87c17627aa87273ca40edd927",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/olmo.rs"
+    }
+  },
+  {
+    "name": "olmo2.rs",
+    "path": "candle-transformers/src/models/olmo2.rs",
+    "sha": "5567cb67f81e128b7f78d640a7d1a67d38b37922",
+    "size": 11715,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/olmo2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/olmo2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/5567cb67f81e128b7f78d640a7d1a67d38b37922",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/olmo2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/olmo2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/5567cb67f81e128b7f78d640a7d1a67d38b37922",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/olmo2.rs"
+    }
+  },
+  {
+    "name": "openclip",
+    "path": "candle-transformers/src/models/openclip",
+    "sha": "ded1979b5aaa7f9edc28b1cd5ac3b14db2a5fd45",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/openclip?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/openclip",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/ded1979b5aaa7f9edc28b1cd5ac3b14db2a5fd45",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/openclip?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/ded1979b5aaa7f9edc28b1cd5ac3b14db2a5fd45",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/openclip"
+    }
+  },
+  {
+    "name": "paddleocr_vl",
+    "path": "candle-transformers/src/models/paddleocr_vl",
+    "sha": "8259ac0f8db5969084a2927de0f43dbe1035e01e",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/paddleocr_vl?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/paddleocr_vl",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/8259ac0f8db5969084a2927de0f43dbe1035e01e",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/paddleocr_vl?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/8259ac0f8db5969084a2927de0f43dbe1035e01e",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/paddleocr_vl"
+    }
+  },
+  {
+    "name": "paligemma.rs",
+    "path": "candle-transformers/src/models/paligemma.rs",
+    "sha": "e9928699236479ddf77b03a8e374968844272cda",
+    "size": 5822,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/paligemma.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/paligemma.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/e9928699236479ddf77b03a8e374968844272cda",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/paligemma.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/paligemma.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/e9928699236479ddf77b03a8e374968844272cda",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/paligemma.rs"
+    }
+  },
+  {
+    "name": "parler_tts.rs",
+    "path": "candle-transformers/src/models/parler_tts.rs",
+    "sha": "b514ee0b28381830c83ee33e5f041fa3820c2e36",
+    "size": 16533,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/parler_tts.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/parler_tts.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/b514ee0b28381830c83ee33e5f041fa3820c2e36",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/parler_tts.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/parler_tts.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/b514ee0b28381830c83ee33e5f041fa3820c2e36",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/parler_tts.rs"
+    }
+  },
+  {
+    "name": "persimmon.rs",
+    "path": "candle-transformers/src/models/persimmon.rs",
+    "sha": "d1e3db316f2e57f9f9dd9ee0c4fe1905bd51ae94",
+    "size": 2415,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/persimmon.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/persimmon.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/d1e3db316f2e57f9f9dd9ee0c4fe1905bd51ae94",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/persimmon.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/persimmon.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/d1e3db316f2e57f9f9dd9ee0c4fe1905bd51ae94",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/persimmon.rs"
+    }
+  },
+  {
+    "name": "phi.rs",
+    "path": "candle-transformers/src/models/phi.rs",
+    "sha": "c94ef6686bdb921df40880337393fc58870c903c",
+    "size": 12369,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/phi.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/phi.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/c94ef6686bdb921df40880337393fc58870c903c",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/phi.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/phi.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/c94ef6686bdb921df40880337393fc58870c903c",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/phi.rs"
+    }
+  },
+  {
+    "name": "phi3.rs",
+    "path": "candle-transformers/src/models/phi3.rs",
+    "sha": "6535d9a4fd45f7f7976a6ef39b015bbc829a20cc",
+    "size": 15139,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/phi3.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/phi3.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/6535d9a4fd45f7f7976a6ef39b015bbc829a20cc",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/phi3.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/phi3.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/6535d9a4fd45f7f7976a6ef39b015bbc829a20cc",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/phi3.rs"
+    }
+  },
+  {
+    "name": "pixtral",
+    "path": "candle-transformers/src/models/pixtral",
+    "sha": "5a526d19181623ba49479bf313d315d996194e51",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/pixtral?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/pixtral",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/5a526d19181623ba49479bf313d315d996194e51",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/pixtral?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/5a526d19181623ba49479bf313d315d996194e51",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/pixtral"
+    }
+  },
+  {
+    "name": "quantized_blip.rs",
+    "path": "candle-transformers/src/models/quantized_blip.rs",
+    "sha": "acba9ba191774ce75eed81bc27c8b9ec26a3f6a8",
+    "size": 8787,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_blip.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_blip.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/acba9ba191774ce75eed81bc27c8b9ec26a3f6a8",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_blip.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_blip.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/acba9ba191774ce75eed81bc27c8b9ec26a3f6a8",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_blip.rs"
+    }
+  },
+  {
+    "name": "quantized_blip_text.rs",
+    "path": "candle-transformers/src/models/quantized_blip_text.rs",
+    "sha": "7b753fb1160ac4cf92cf234b80d3e964f8421748",
+    "size": 15437,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_blip_text.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_blip_text.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/7b753fb1160ac4cf92cf234b80d3e964f8421748",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_blip_text.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_blip_text.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/7b753fb1160ac4cf92cf234b80d3e964f8421748",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_blip_text.rs"
+    }
+  },
+  {
+    "name": "quantized_gemma3.rs",
+    "path": "candle-transformers/src/models/quantized_gemma3.rs",
+    "sha": "7af22243c65600cd76c4e774714560de32b20a9c",
+    "size": 17195,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_gemma3.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_gemma3.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/7af22243c65600cd76c4e774714560de32b20a9c",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_gemma3.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_gemma3.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/7af22243c65600cd76c4e774714560de32b20a9c",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_gemma3.rs"
+    }
+  },
+  {
+    "name": "quantized_glm4.rs",
+    "path": "candle-transformers/src/models/quantized_glm4.rs",
+    "sha": "51da17f7ee4d1e9aee5025f8dd27fe8067985074",
+    "size": 15284,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_glm4.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_glm4.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/51da17f7ee4d1e9aee5025f8dd27fe8067985074",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_glm4.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_glm4.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/51da17f7ee4d1e9aee5025f8dd27fe8067985074",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_glm4.rs"
+    }
+  },
+  {
+    "name": "quantized_lfm2.rs",
+    "path": "candle-transformers/src/models/quantized_lfm2.rs",
+    "sha": "058fee21ad747dfe430dee9a2dfdbaa2f59bcd2d",
+    "size": 21612,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_lfm2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_lfm2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/058fee21ad747dfe430dee9a2dfdbaa2f59bcd2d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_lfm2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_lfm2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/058fee21ad747dfe430dee9a2dfdbaa2f59bcd2d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_lfm2.rs"
+    }
+  },
+  {
+    "name": "quantized_llama.rs",
+    "path": "candle-transformers/src/models/quantized_llama.rs",
+    "sha": "f69c600d47bc281609ded40d558bf660140b09a4",
+    "size": 28949,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_llama.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_llama.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/f69c600d47bc281609ded40d558bf660140b09a4",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_llama.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_llama.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/f69c600d47bc281609ded40d558bf660140b09a4",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_llama.rs"
+    }
+  },
+  {
+    "name": "quantized_llama2_c.rs",
+    "path": "candle-transformers/src/models/quantized_llama2_c.rs",
+    "sha": "f798cc3be1422043e589a81a77e096ab43dc4642",
+    "size": 8663,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_llama2_c.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_llama2_c.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/f798cc3be1422043e589a81a77e096ab43dc4642",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_llama2_c.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_llama2_c.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/f798cc3be1422043e589a81a77e096ab43dc4642",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_llama2_c.rs"
+    }
+  },
+  {
+    "name": "quantized_metavoice.rs",
+    "path": "candle-transformers/src/models/quantized_metavoice.rs",
+    "sha": "ac72162715cd6386eaab9810606a76ebf6da89f0",
+    "size": 9419,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_metavoice.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_metavoice.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/ac72162715cd6386eaab9810606a76ebf6da89f0",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_metavoice.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_metavoice.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/ac72162715cd6386eaab9810606a76ebf6da89f0",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_metavoice.rs"
+    }
+  },
+  {
+    "name": "quantized_mistral.rs",
+    "path": "candle-transformers/src/models/quantized_mistral.rs",
+    "sha": "cdb687d573a58a7c1f9368937f285d0f6ae0b447",
+    "size": 11222,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_mistral.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_mistral.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/cdb687d573a58a7c1f9368937f285d0f6ae0b447",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_mistral.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_mistral.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/cdb687d573a58a7c1f9368937f285d0f6ae0b447",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_mistral.rs"
+    }
+  },
+  {
+    "name": "quantized_mixformer.rs",
+    "path": "candle-transformers/src/models/quantized_mixformer.rs",
+    "sha": "8736544625cc1f763d00b2f80c00e630689743df",
+    "size": 12518,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_mixformer.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_mixformer.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/8736544625cc1f763d00b2f80c00e630689743df",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_mixformer.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_mixformer.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/8736544625cc1f763d00b2f80c00e630689743df",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_mixformer.rs"
+    }
+  },
+  {
+    "name": "quantized_moondream.rs",
+    "path": "candle-transformers/src/models/quantized_moondream.rs",
+    "sha": "9a49598bcdc6f9810b8444f7edfbe1332ffae266",
+    "size": 7735,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_moondream.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_moondream.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/9a49598bcdc6f9810b8444f7edfbe1332ffae266",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_moondream.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_moondream.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/9a49598bcdc6f9810b8444f7edfbe1332ffae266",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_moondream.rs"
+    }
+  },
+  {
+    "name": "quantized_mpt.rs",
+    "path": "candle-transformers/src/models/quantized_mpt.rs",
+    "sha": "44d8566b7b2e74b26b1a7a21b36bfb1b257b8732",
+    "size": 7597,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_mpt.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_mpt.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/44d8566b7b2e74b26b1a7a21b36bfb1b257b8732",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_mpt.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_mpt.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/44d8566b7b2e74b26b1a7a21b36bfb1b257b8732",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_mpt.rs"
+    }
+  },
+  {
+    "name": "quantized_phi.rs",
+    "path": "candle-transformers/src/models/quantized_phi.rs",
+    "sha": "30de2f177784a0a46336b7eaaa9ec3904495d7d7",
+    "size": 11060,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_phi.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_phi.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/30de2f177784a0a46336b7eaaa9ec3904495d7d7",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_phi.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_phi.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/30de2f177784a0a46336b7eaaa9ec3904495d7d7",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_phi.rs"
+    }
+  },
+  {
+    "name": "quantized_phi3.rs",
+    "path": "candle-transformers/src/models/quantized_phi3.rs",
+    "sha": "de932793eb89763e441c8ef9858c43bcb9148cf4",
+    "size": 11866,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_phi3.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_phi3.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/de932793eb89763e441c8ef9858c43bcb9148cf4",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_phi3.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_phi3.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/de932793eb89763e441c8ef9858c43bcb9148cf4",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_phi3.rs"
+    }
+  },
+  {
+    "name": "quantized_qwen2.rs",
+    "path": "candle-transformers/src/models/quantized_qwen2.rs",
+    "sha": "8d24608f125ef4c75dc068a3abd2885ec57a726d",
+    "size": 12575,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_qwen2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_qwen2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/8d24608f125ef4c75dc068a3abd2885ec57a726d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_qwen2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_qwen2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/8d24608f125ef4c75dc068a3abd2885ec57a726d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_qwen2.rs"
+    }
+  },
+  {
+    "name": "quantized_qwen3.rs",
+    "path": "candle-transformers/src/models/quantized_qwen3.rs",
+    "sha": "17a4c131eb7eb5ee178fd2085a2683fe3d197604",
+    "size": 20306,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_qwen3.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_qwen3.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/17a4c131eb7eb5ee178fd2085a2683fe3d197604",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_qwen3.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_qwen3.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/17a4c131eb7eb5ee178fd2085a2683fe3d197604",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_qwen3.rs"
+    }
+  },
+  {
+    "name": "quantized_qwen3_moe.rs",
+    "path": "candle-transformers/src/models/quantized_qwen3_moe.rs",
+    "sha": "57c3abf599e58f66a256a74ce27c088e1e65db62",
+    "size": 15130,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_qwen3_moe.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_qwen3_moe.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/57c3abf599e58f66a256a74ce27c088e1e65db62",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_qwen3_moe.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_qwen3_moe.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/57c3abf599e58f66a256a74ce27c088e1e65db62",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_qwen3_moe.rs"
+    }
+  },
+  {
+    "name": "quantized_recurrent_gemma.rs",
+    "path": "candle-transformers/src/models/quantized_recurrent_gemma.rs",
+    "sha": "e40daa1f33fed80239923dd2d1ec526875b8d8f7",
+    "size": 15117,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_recurrent_gemma.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_recurrent_gemma.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/e40daa1f33fed80239923dd2d1ec526875b8d8f7",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_recurrent_gemma.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_recurrent_gemma.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/e40daa1f33fed80239923dd2d1ec526875b8d8f7",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_recurrent_gemma.rs"
+    }
+  },
+  {
+    "name": "quantized_rwkv_v5.rs",
+    "path": "candle-transformers/src/models/quantized_rwkv_v5.rs",
+    "sha": "cc5204bf243e2cb207df0a930e305dda7490aec6",
+    "size": 11078,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_rwkv_v5.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_rwkv_v5.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/cc5204bf243e2cb207df0a930e305dda7490aec6",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_rwkv_v5.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_rwkv_v5.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/cc5204bf243e2cb207df0a930e305dda7490aec6",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_rwkv_v5.rs"
+    }
+  },
+  {
+    "name": "quantized_rwkv_v6.rs",
+    "path": "candle-transformers/src/models/quantized_rwkv_v6.rs",
+    "sha": "91288c2e618609e25308c9582be27b0c750913f0",
+    "size": 12606,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_rwkv_v6.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_rwkv_v6.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/91288c2e618609e25308c9582be27b0c750913f0",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_rwkv_v6.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_rwkv_v6.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/91288c2e618609e25308c9582be27b0c750913f0",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_rwkv_v6.rs"
+    }
+  },
+  {
+    "name": "quantized_stable_lm.rs",
+    "path": "candle-transformers/src/models/quantized_stable_lm.rs",
+    "sha": "d74ed743d87a73025b5330df9b6d9ef576051741",
+    "size": 10576,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_stable_lm.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_stable_lm.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/d74ed743d87a73025b5330df9b6d9ef576051741",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_stable_lm.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_stable_lm.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/d74ed743d87a73025b5330df9b6d9ef576051741",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_stable_lm.rs"
+    }
+  },
+  {
+    "name": "quantized_t5.rs",
+    "path": "candle-transformers/src/models/quantized_t5.rs",
+    "sha": "4fc9c537f87c6b98f552919396ec3332a075acd8",
+    "size": 26456,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_t5.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_t5.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/4fc9c537f87c6b98f552919396ec3332a075acd8",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/quantized_t5.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/quantized_t5.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/4fc9c537f87c6b98f552919396ec3332a075acd8",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/quantized_t5.rs"
+    }
+  },
+  {
+    "name": "qwen2.rs",
+    "path": "candle-transformers/src/models/qwen2.rs",
+    "sha": "8a29646efe4ec341358c46b794b1fdbc6de0fea0",
+    "size": 13241,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/8a29646efe4ec341358c46b794b1fdbc6de0fea0",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/qwen2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/8a29646efe4ec341358c46b794b1fdbc6de0fea0",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen2.rs"
+    }
+  },
+  {
+    "name": "qwen2_moe.rs",
+    "path": "candle-transformers/src/models/qwen2_moe.rs",
+    "sha": "0f52008483114d336869f82f21caaf0790706cd2",
+    "size": 17140,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen2_moe.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen2_moe.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/0f52008483114d336869f82f21caaf0790706cd2",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/qwen2_moe.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen2_moe.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/0f52008483114d336869f82f21caaf0790706cd2",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen2_moe.rs"
+    }
+  },
+  {
+    "name": "qwen3.rs",
+    "path": "candle-transformers/src/models/qwen3.rs",
+    "sha": "2d278f5dffb17c0361ee9362b25ac64e8afc2f3f",
+    "size": 16556,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen3.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen3.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/2d278f5dffb17c0361ee9362b25ac64e8afc2f3f",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/qwen3.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen3.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/2d278f5dffb17c0361ee9362b25ac64e8afc2f3f",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen3.rs"
+    }
+  },
+  {
+    "name": "qwen3_moe.rs",
+    "path": "candle-transformers/src/models/qwen3_moe.rs",
+    "sha": "0576b4c075a15d2c7cffa56e46c96e714d81357e",
+    "size": 12180,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen3_moe.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen3_moe.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/0576b4c075a15d2c7cffa56e46c96e714d81357e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/qwen3_moe.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen3_moe.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/0576b4c075a15d2c7cffa56e46c96e714d81357e",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/qwen3_moe.rs"
+    }
+  },
+  {
+    "name": "qwen3_vl",
+    "path": "candle-transformers/src/models/qwen3_vl",
+    "sha": "bf099a4faa8ba038ac5ccaa1a66a7725677d7785",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen3_vl?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/qwen3_vl",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/bf099a4faa8ba038ac5ccaa1a66a7725677d7785",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/qwen3_vl?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/bf099a4faa8ba038ac5ccaa1a66a7725677d7785",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/qwen3_vl"
+    }
+  },
+  {
+    "name": "recurrent_gemma.rs",
+    "path": "candle-transformers/src/models/recurrent_gemma.rs",
+    "sha": "d6a029babc4eac3e0e99c1d14000d9f6d49815a7",
+    "size": 23452,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/recurrent_gemma.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/recurrent_gemma.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/d6a029babc4eac3e0e99c1d14000d9f6d49815a7",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/recurrent_gemma.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/recurrent_gemma.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/d6a029babc4eac3e0e99c1d14000d9f6d49815a7",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/recurrent_gemma.rs"
+    }
+  },
+  {
+    "name": "repvgg.rs",
+    "path": "candle-transformers/src/models/repvgg.rs",
+    "sha": "6e45c2d68c95ccdf46fba78964c57a54345e3d07",
+    "size": 8975,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/repvgg.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/repvgg.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/6e45c2d68c95ccdf46fba78964c57a54345e3d07",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/repvgg.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/repvgg.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/6e45c2d68c95ccdf46fba78964c57a54345e3d07",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/repvgg.rs"
+    }
+  },
+  {
+    "name": "resnet.rs",
+    "path": "candle-transformers/src/models/resnet.rs",
+    "sha": "31395c8f843ffb8bbee1e192c5181e2aed16537e",
+    "size": 7757,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/resnet.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/resnet.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/31395c8f843ffb8bbee1e192c5181e2aed16537e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/resnet.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/resnet.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/31395c8f843ffb8bbee1e192c5181e2aed16537e",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/resnet.rs"
+    }
+  },
+  {
+    "name": "rwkv_v5.rs",
+    "path": "candle-transformers/src/models/rwkv_v5.rs",
+    "sha": "15e386d2926e8e9d4152c80aeff930974f70769d",
+    "size": 15946,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/rwkv_v5.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/rwkv_v5.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/15e386d2926e8e9d4152c80aeff930974f70769d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/rwkv_v5.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/rwkv_v5.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/15e386d2926e8e9d4152c80aeff930974f70769d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/rwkv_v5.rs"
+    }
+  },
+  {
+    "name": "rwkv_v6.rs",
+    "path": "candle-transformers/src/models/rwkv_v6.rs",
+    "sha": "5da1c5ce81b428feeda5c345690995c04cb9ce4c",
+    "size": 12075,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/rwkv_v6.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/rwkv_v6.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/5da1c5ce81b428feeda5c345690995c04cb9ce4c",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/rwkv_v6.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/rwkv_v6.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/5da1c5ce81b428feeda5c345690995c04cb9ce4c",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/rwkv_v6.rs"
+    }
+  },
+  {
+    "name": "rwkv_v7.rs",
+    "path": "candle-transformers/src/models/rwkv_v7.rs",
+    "sha": "89840159e3d4affaaf7e77318a38e86f2fd6f839",
+    "size": 37350,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/rwkv_v7.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/rwkv_v7.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/89840159e3d4affaaf7e77318a38e86f2fd6f839",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/rwkv_v7.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/rwkv_v7.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/89840159e3d4affaaf7e77318a38e86f2fd6f839",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/rwkv_v7.rs"
+    }
+  },
+  {
+    "name": "segformer.rs",
+    "path": "candle-transformers/src/models/segformer.rs",
+    "sha": "bf72e7c69070a872c1bf5f1f877afaf649336b10",
+    "size": 22825,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/segformer.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/segformer.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/bf72e7c69070a872c1bf5f1f877afaf649336b10",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/segformer.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/segformer.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/bf72e7c69070a872c1bf5f1f877afaf649336b10",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/segformer.rs"
+    }
+  },
+  {
+    "name": "segment_anything",
+    "path": "candle-transformers/src/models/segment_anything",
+    "sha": "c31443d6656d57dbf353567d1d061e35d6d1f8b2",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/segment_anything?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/segment_anything",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/c31443d6656d57dbf353567d1d061e35d6d1f8b2",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/segment_anything?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/c31443d6656d57dbf353567d1d061e35d6d1f8b2",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/segment_anything"
+    }
+  },
+  {
+    "name": "siglip.rs",
+    "path": "candle-transformers/src/models/siglip.rs",
+    "sha": "578beea3d86f00bcfdaa311fe664977f4a1af7fc",
+    "size": 25029,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/siglip.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/siglip.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/578beea3d86f00bcfdaa311fe664977f4a1af7fc",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/siglip.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/siglip.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/578beea3d86f00bcfdaa311fe664977f4a1af7fc",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/siglip.rs"
+    }
+  },
+  {
+    "name": "smol",
+    "path": "candle-transformers/src/models/smol",
+    "sha": "3b1f2f2d4b21b898ce55567ccdacfb75074c82b2",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/smol?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/smol",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/3b1f2f2d4b21b898ce55567ccdacfb75074c82b2",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/smol?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/3b1f2f2d4b21b898ce55567ccdacfb75074c82b2",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/smol"
+    }
+  },
+  {
+    "name": "snac.rs",
+    "path": "candle-transformers/src/models/snac.rs",
+    "sha": "65fcb97b410026b084359c946b8f1e719ac38f1d",
+    "size": 23715,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/snac.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/snac.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/65fcb97b410026b084359c946b8f1e719ac38f1d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/snac.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/snac.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/65fcb97b410026b084359c946b8f1e719ac38f1d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/snac.rs"
+    }
+  },
+  {
+    "name": "stable_diffusion",
+    "path": "candle-transformers/src/models/stable_diffusion",
+    "sha": "804bbcc9783d9985e6184e2d09fae2c63eeda9a2",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/stable_diffusion?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/stable_diffusion",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/804bbcc9783d9985e6184e2d09fae2c63eeda9a2",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/stable_diffusion?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/804bbcc9783d9985e6184e2d09fae2c63eeda9a2",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/stable_diffusion"
+    }
+  },
+  {
+    "name": "stable_lm.rs",
+    "path": "candle-transformers/src/models/stable_lm.rs",
+    "sha": "536f7727e4a6a6ebe1fe71fc9e0290cb75e5df79",
+    "size": 15007,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/stable_lm.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/stable_lm.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/536f7727e4a6a6ebe1fe71fc9e0290cb75e5df79",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/stable_lm.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/stable_lm.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/536f7727e4a6a6ebe1fe71fc9e0290cb75e5df79",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/stable_lm.rs"
+    }
+  },
+  {
+    "name": "starcoder2.rs",
+    "path": "candle-transformers/src/models/starcoder2.rs",
+    "sha": "266221e5c8537c5c5f18e133f3faf0ea0742bc4e",
+    "size": 11752,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/starcoder2.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/starcoder2.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/266221e5c8537c5c5f18e133f3faf0ea0742bc4e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/starcoder2.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/starcoder2.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/266221e5c8537c5c5f18e133f3faf0ea0742bc4e",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/starcoder2.rs"
+    }
+  },
+  {
+    "name": "stella_en_v5.rs",
+    "path": "candle-transformers/src/models/stella_en_v5.rs",
+    "sha": "148c0197f5e2fb0ed5647ab9f2e4d96f3a2594fd",
+    "size": 27124,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/stella_en_v5.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/stella_en_v5.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/148c0197f5e2fb0ed5647ab9f2e4d96f3a2594fd",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/stella_en_v5.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/stella_en_v5.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/148c0197f5e2fb0ed5647ab9f2e4d96f3a2594fd",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/stella_en_v5.rs"
+    }
+  },
+  {
+    "name": "t5.rs",
+    "path": "candle-transformers/src/models/t5.rs",
+    "sha": "5d23549f21f43a4a0d6a5a002888e3f1d1b9ba99",
+    "size": 31682,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/t5.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/t5.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/5d23549f21f43a4a0d6a5a002888e3f1d1b9ba99",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/t5.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/t5.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/5d23549f21f43a4a0d6a5a002888e3f1d1b9ba99",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/t5.rs"
+    }
+  },
+  {
+    "name": "trocr.rs",
+    "path": "candle-transformers/src/models/trocr.rs",
+    "sha": "88418dd3cafd80b499521e796039daa0517cd425",
+    "size": 16817,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/trocr.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/trocr.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/88418dd3cafd80b499521e796039daa0517cd425",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/trocr.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/trocr.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/88418dd3cafd80b499521e796039daa0517cd425",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/trocr.rs"
+    }
+  },
+  {
+    "name": "vgg.rs",
+    "path": "candle-transformers/src/models/vgg.rs",
+    "sha": "57f9ae67bbf9f54081df50b755090a6d17a266ae",
+    "size": 8192,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/vgg.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/vgg.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/57f9ae67bbf9f54081df50b755090a6d17a266ae",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/vgg.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/vgg.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/57f9ae67bbf9f54081df50b755090a6d17a266ae",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/vgg.rs"
+    }
+  },
+  {
+    "name": "vit.rs",
+    "path": "candle-transformers/src/models/vit.rs",
+    "sha": "49ab463017036126719cd7308009d6237ad78909",
+    "size": 12535,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/vit.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/vit.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/49ab463017036126719cd7308009d6237ad78909",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/vit.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/vit.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/49ab463017036126719cd7308009d6237ad78909",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/vit.rs"
+    }
+  },
+  {
+    "name": "voxtral",
+    "path": "candle-transformers/src/models/voxtral",
+    "sha": "ae9d98d68a0735154ab62a3e3422f25fe9fe9d8b",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/voxtral?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/voxtral",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/ae9d98d68a0735154ab62a3e3422f25fe9fe9d8b",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/voxtral?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/ae9d98d68a0735154ab62a3e3422f25fe9fe9d8b",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/voxtral"
+    }
+  },
+  {
+    "name": "whisper",
+    "path": "candle-transformers/src/models/whisper",
+    "sha": "a7ff18e4e790409dd90b620e1d8085555c416523",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/whisper?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/whisper",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/a7ff18e4e790409dd90b620e1d8085555c416523",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/whisper?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/a7ff18e4e790409dd90b620e1d8085555c416523",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/whisper"
+    }
+  },
+  {
+    "name": "with_tracing.rs",
+    "path": "candle-transformers/src/models/with_tracing.rs",
+    "sha": "f4706c7e9511e6a89324e86df41b7d536bc4a517",
+    "size": 5405,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/with_tracing.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/with_tracing.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/f4706c7e9511e6a89324e86df41b7d536bc4a517",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/with_tracing.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/with_tracing.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/f4706c7e9511e6a89324e86df41b7d536bc4a517",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/with_tracing.rs"
+    }
+  },
+  {
+    "name": "wuerstchen",
+    "path": "candle-transformers/src/models/wuerstchen",
+    "sha": "ea79c24622329394272f575f9490b1578f29dcb9",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/wuerstchen?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/wuerstchen",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/ea79c24622329394272f575f9490b1578f29dcb9",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/wuerstchen?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/ea79c24622329394272f575f9490b1578f29dcb9",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/wuerstchen"
+    }
+  },
+  {
+    "name": "xlm_roberta.rs",
+    "path": "candle-transformers/src/models/xlm_roberta.rs",
+    "sha": "ee94f0687d48ebcd68bfb217b76fa42356966103",
+    "size": 18612,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/xlm_roberta.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/xlm_roberta.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/ee94f0687d48ebcd68bfb217b76fa42356966103",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/xlm_roberta.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/xlm_roberta.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/ee94f0687d48ebcd68bfb217b76fa42356966103",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/xlm_roberta.rs"
+    }
+  },
+  {
+    "name": "yi.rs",
+    "path": "candle-transformers/src/models/yi.rs",
+    "sha": "8a2fb111be239aa149d79a8bf5989afc3a754067",
+    "size": 12394,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/yi.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/yi.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/8a2fb111be239aa149d79a8bf5989afc3a754067",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-transformers/src/models/yi.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/yi.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/8a2fb111be239aa149d79a8bf5989afc3a754067",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/yi.rs"
+    }
+  },
+  {
+    "name": "z_image",
+    "path": "candle-transformers/src/models/z_image",
+    "sha": "3ff6bd4c6e6305367b76f6baf2899a15a15c933a",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/z_image?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/z_image",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/3ff6bd4c6e6305367b76f6baf2899a15a15c933a",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-transformers/src/models/z_image?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/3ff6bd4c6e6305367b76f6baf2899a15a15c933a",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-transformers/src/models/z_image"
+    }
+  }
+]

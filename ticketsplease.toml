@@ -1,0 +1,84 @@
+schema_version = 1
+tickets_dir = "tickets"
+default_base = "main"
+
+[guard]
+# A declared-area overlap with an open sibling is a non-failing WARN by default
+# (exit 0); an under-declaration (scope escape) always fails (exit 6). Set true
+# (or pass `guard --strict`) to make an overlap gate too.
+# gate_collisions = false
+
+[language]
+# "none" = path-glob scopes only; "rust" = also expand via the cargo crate graph.
+backend = "none"
+
+# Map abstract scope names to path globs. Tickets reference these stable names.
+[scopes]
+"coordination" = [
+  "tickets/**",
+  "ticketsplease.toml",
+  ".ticketsplease/**",
+  ".gitignore",
+]
+"docs/research" = ["docs/research/*.md"]
+"docs/papers" = ["docs/research/papers/**"]
+"docs/artifacts" = [
+  "docs/research/models/**",
+  "docs/research/candle/**",
+  "docs/research/quantization/**",
+]
+"repo/meta" = ["README.md"]
+"runtime/candle" = [
+  "Cargo.toml",
+  "Cargo.lock",
+  "crates/runtime/**",
+  "crates/lmbrrr/**",
+  "src/**",
+]
+"runtime/metal" = [
+  "crates/kernels/**",
+  "crates/metal/**",
+]
+"model/minicpm" = [
+  "crates/models/minicpm/**",
+  "tools/models/minicpm/**",
+]
+"model/qwen" = [
+  "crates/models/qwen/**",
+  "tools/models/qwen/**",
+]
+"model/vision" = [
+  "crates/models/vision/**",
+  "tools/models/vision/**",
+]
+"inference/speculative" = [
+  "crates/speculative/**",
+  "tools/speculative/**",
+]
+"quantization" = [
+  "crates/quantization/**",
+  "tools/quantization/**",
+]
+"evals" = [
+  "benches/**",
+  "benchmarks/**",
+  "evals/**",
+  "crates/bench/**",
+]
+
+# Optionally map a scope to its owning crate so the Rust backend can expand
+# reverse-dependents (requires `cargo` at runtime).
+[scope_crates]
+# "core" = "my-core-crate"
+
+# Name a forked/external dependency (pinned via `git = … rev = …`) as a scope.
+# The guard flags a branch that bumps the pin (matched by `repo`) or edits an
+# in-tree fork `paths` glob, against tickets declaring the same scope.
+[external_scopes]
+# "sqlparser-fork" = { repo = "tomsanbear/sqlparser", paths = [] }
+
+# Tune how costly an exclusive overlap on a scope is for tracks/next
+# (--max-overlap): weight 0 = free to co-edit (an additive hub), higher =
+# riskier. Default 1; a shared-by-both claim is always free.
+[scope_policy]
+# "core" = { weight = 0 }

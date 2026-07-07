@@ -1,0 +1,146 @@
+[
+  {
+    "name": "err.rs",
+    "path": "candle-metal-kernels/src/err.rs",
+    "sha": "46a822bd1b03972f57cc5260131fd96453974ca2",
+    "size": 2127,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/err.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/err.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/46a822bd1b03972f57cc5260131fd96453974ca2",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-metal-kernels/src/err.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/err.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/46a822bd1b03972f57cc5260131fd96453974ca2",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/err.rs"
+    }
+  },
+  {
+    "name": "kernel.rs",
+    "path": "candle-metal-kernels/src/kernel.rs",
+    "sha": "02cbd9b40d6d354d5c180a6e99b01835eebc48f3",
+    "size": 6195,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/kernel.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/kernel.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/02cbd9b40d6d354d5c180a6e99b01835eebc48f3",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-metal-kernels/src/kernel.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/kernel.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/02cbd9b40d6d354d5c180a6e99b01835eebc48f3",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/kernel.rs"
+    }
+  },
+  {
+    "name": "kernels",
+    "path": "candle-metal-kernels/src/kernels",
+    "sha": "ea9ca0ec29797a567065ec048f49e7ecb701fd98",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/kernels?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-metal-kernels/src/kernels",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/ea9ca0ec29797a567065ec048f49e7ecb701fd98",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/kernels?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/ea9ca0ec29797a567065ec048f49e7ecb701fd98",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-metal-kernels/src/kernels"
+    }
+  },
+  {
+    "name": "lib.rs",
+    "path": "candle-metal-kernels/src/lib.rs",
+    "sha": "c75cdb7d1a62321c6450c875a64adb067e338d7d",
+    "size": 1394,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/lib.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/lib.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/c75cdb7d1a62321c6450c875a64adb067e338d7d",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-metal-kernels/src/lib.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/lib.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/c75cdb7d1a62321c6450c875a64adb067e338d7d",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/lib.rs"
+    }
+  },
+  {
+    "name": "metal",
+    "path": "candle-metal-kernels/src/metal",
+    "sha": "0d60717f3ad371881c2d1812eec0695b8573d4b1",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/metal?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-metal-kernels/src/metal",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/0d60717f3ad371881c2d1812eec0695b8573d4b1",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/metal?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/0d60717f3ad371881c2d1812eec0695b8573d4b1",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-metal-kernels/src/metal"
+    }
+  },
+  {
+    "name": "metal_src",
+    "path": "candle-metal-kernels/src/metal_src",
+    "sha": "ed0ece510adb0b4b60728dc8380f73e20b2947d2",
+    "size": 0,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/metal_src?ref=main",
+    "html_url": "https://github.com/huggingface/candle/tree/main/candle-metal-kernels/src/metal_src",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/trees/ed0ece510adb0b4b60728dc8380f73e20b2947d2",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/metal_src?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/trees/ed0ece510adb0b4b60728dc8380f73e20b2947d2",
+      "html": "https://github.com/huggingface/candle/tree/main/candle-metal-kernels/src/metal_src"
+    }
+  },
+  {
+    "name": "source.rs",
+    "path": "candle-metal-kernels/src/source.rs",
+    "sha": "3b3732995086e5375c412db913b30129b621b44e",
+    "size": 1314,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/source.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/source.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/3b3732995086e5375c412db913b30129b621b44e",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-metal-kernels/src/source.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/source.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/3b3732995086e5375c412db913b30129b621b44e",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/source.rs"
+    }
+  },
+  {
+    "name": "tests.rs",
+    "path": "candle-metal-kernels/src/tests.rs",
+    "sha": "9a3b9547b3193b37fd404d65c8d2578ff207e861",
+    "size": 69876,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/tests.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/tests.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/9a3b9547b3193b37fd404d65c8d2578ff207e861",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-metal-kernels/src/tests.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/tests.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/9a3b9547b3193b37fd404d65c8d2578ff207e861",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/tests.rs"
+    }
+  },
+  {
+    "name": "utils.rs",
+    "path": "candle-metal-kernels/src/utils.rs",
+    "sha": "b4cd96cb6f49b5e4574b4437c3d598ee084833be",
+    "size": 9892,
+    "url": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/utils.rs?ref=main",
+    "html_url": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/utils.rs",
+    "git_url": "https://api.github.com/repos/huggingface/candle/git/blobs/b4cd96cb6f49b5e4574b4437c3d598ee084833be",
+    "download_url": "https://raw.githubusercontent.com/huggingface/candle/main/candle-metal-kernels/src/utils.rs",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/huggingface/candle/contents/candle-metal-kernels/src/utils.rs?ref=main",
+      "git": "https://api.github.com/repos/huggingface/candle/git/blobs/b4cd96cb6f49b5e4574b4437c3d598ee084833be",
+      "html": "https://github.com/huggingface/candle/blob/main/candle-metal-kernels/src/utils.rs"
+    }
+  }
+]
