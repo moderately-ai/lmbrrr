@@ -235,6 +235,12 @@ struct SpecVerifyArgs {
     #[arg(long = "draft-token", value_delimiter = ',')]
     draft_tokens: Vec<u32>,
 
+    #[arg(long = "draft-confidence", value_delimiter = ',')]
+    draft_confidences: Vec<f64>,
+
+    #[arg(long)]
+    schedule_confidence_threshold: Option<f64>,
+
     #[arg(long)]
     baseline_draft_tokens: Option<usize>,
 
@@ -626,6 +632,17 @@ struct SpecVerifyStats {
     prefill_elapsed: Duration,
     verify_elapsed: Duration,
     argmax_elapsed: Duration,
+}
+
+#[derive(Clone, Debug)]
+struct ConfidenceSchedule {
+    threshold: f64,
+    original_draft_tokens: usize,
+    scheduled_draft_tokens: usize,
+    dropped_draft_tokens: usize,
+    scheduled_cumulative_confidence: f64,
+    next_rejected_cumulative_confidence: Option<f64>,
+    confidences: Vec<f64>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1525,6 +1542,12 @@ fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
         None
     };
 
+    let confidence_schedule = apply_confidence_schedule(
+        &mut draft_tokens,
+        &args.draft_confidences,
+        args.schedule_confidence_threshold,
+    )?;
+
     let stats = verify_greedy_draft(
         &mut model,
         &device,
@@ -1583,6 +1606,7 @@ fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
         "prompt": args.prompt.as_str(),
         "prompt_tokens": prompt_tokens.len(),
         "draft_tokens": draft_tokens.len(),
+        "confidence_schedule": confidence_schedule_json(&confidence_schedule),
         "verified_tokens": analysis.verified_tokens(),
         "accepted_tokens": analysis.accepted_tokens,
         "bonus_tokens": analysis.bonus_tokens(),
@@ -2398,6 +2422,78 @@ fn corrupt_draft_token(
     })
 }
 
+fn apply_confidence_schedule(
+    draft_tokens: &mut Vec<u32>,
+    confidences: &[f64],
+    threshold: Option<f64>,
+) -> Result<Option<ConfidenceSchedule>> {
+    let Some(threshold) = threshold else {
+        if !confidences.is_empty() {
+            anyhow::bail!("--draft-confidence requires --schedule-confidence-threshold");
+        }
+        return Ok(None);
+    };
+    if !(0.0..=1.0).contains(&threshold) {
+        anyhow::bail!("--schedule-confidence-threshold must be between 0 and 1");
+    }
+    if confidences.len() < draft_tokens.len() {
+        anyhow::bail!(
+            "got {} draft confidences for {} draft tokens",
+            confidences.len(),
+            draft_tokens.len()
+        );
+    }
+    if let Some(confidence) = confidences
+        .iter()
+        .find(|confidence| !(0.0..=1.0).contains(*confidence))
+    {
+        anyhow::bail!("draft confidence {confidence} is outside 0..=1");
+    }
+
+    let original_draft_tokens = draft_tokens.len();
+    let (scheduled_draft_tokens, scheduled_cumulative_confidence, next_rejected) =
+        schedule_prefix_len(&confidences[..original_draft_tokens], threshold);
+    draft_tokens.truncate(scheduled_draft_tokens);
+    Ok(Some(ConfidenceSchedule {
+        threshold,
+        original_draft_tokens,
+        scheduled_draft_tokens,
+        dropped_draft_tokens: original_draft_tokens.saturating_sub(scheduled_draft_tokens),
+        scheduled_cumulative_confidence,
+        next_rejected_cumulative_confidence: next_rejected,
+        confidences: confidences[..original_draft_tokens].to_vec(),
+    }))
+}
+
+fn schedule_prefix_len(confidences: &[f64], threshold: f64) -> (usize, f64, Option<f64>) {
+    let mut cumulative = 1.0f64;
+    let mut accepted = 0usize;
+    for confidence in confidences {
+        let next = cumulative * confidence;
+        if next < threshold {
+            return (accepted, cumulative, Some(next));
+        }
+        cumulative = next;
+        accepted += 1;
+    }
+    (accepted, cumulative, None)
+}
+
+fn confidence_schedule_json(schedule: &Option<ConfidenceSchedule>) -> serde_json::Value {
+    match schedule {
+        Some(schedule) => serde_json::json!({
+            "threshold": schedule.threshold,
+            "original_draft_tokens": schedule.original_draft_tokens,
+            "scheduled_draft_tokens": schedule.scheduled_draft_tokens,
+            "dropped_draft_tokens": schedule.dropped_draft_tokens,
+            "scheduled_cumulative_confidence": schedule.scheduled_cumulative_confidence,
+            "next_rejected_cumulative_confidence": schedule.next_rejected_cumulative_confidence,
+            "confidences": schedule.confidences,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
 fn verify_greedy_draft(
     model: &mut MiniCpmForConditionalGeneration,
     device: &Device,
@@ -3131,6 +3227,24 @@ mod tests {
         assert_eq!(analysis.verifier_waste_share(), Some(0.5));
         assert!(analysis.positions[1].first_rejected);
         assert!(!analysis.positions[2].accepted);
+    }
+
+    #[test]
+    fn confidence_scheduler_truncates_before_threshold_drop() {
+        let (len, cumulative, next) = schedule_prefix_len(&[0.9, 0.9, 0.9], 0.75);
+
+        assert_eq!(len, 2);
+        assert!((cumulative - 0.81).abs() < 1e-9);
+        assert!(next.is_some_and(|value| (value - 0.729).abs() < 1e-9));
+    }
+
+    #[test]
+    fn confidence_scheduler_can_drop_all_tokens() {
+        let (len, cumulative, next) = schedule_prefix_len(&[0.7, 0.9], 0.8);
+
+        assert_eq!(len, 0);
+        assert_eq!(cumulative, 1.0);
+        assert_eq!(next, Some(0.7));
     }
 
     #[test]
