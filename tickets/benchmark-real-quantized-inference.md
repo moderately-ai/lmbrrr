@@ -1,7 +1,7 @@
 ---
 id: benchmark-real-quantized-inference
 title: Benchmark real quantized MiniCPM inference
-status: todo
+status: done
 priority: p1
 dependencies: [store-quantized-weights-as-qtensor]
 related: []
