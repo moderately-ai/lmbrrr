@@ -6,7 +6,7 @@ use candle_nn::{
 use crate::{
     config::{MiniCpmConfig, VisionConfig},
     image_processor::ProcessedImages,
-    qwen35::{Qwen35Profiler, Qwen35TextModel},
+    qwen35::{Qwen35Profiler, Qwen35TextModel, Qwen35TraceRecorder},
 };
 
 #[derive(Clone, Debug)]
@@ -466,6 +466,10 @@ impl MiniCpmForConditionalGeneration {
 
     pub fn set_text_profiler(&mut self, profiler: Option<Qwen35Profiler>) {
         self.model.language_model.set_profiler(profiler);
+    }
+
+    pub fn set_text_trace_recorder(&mut self, trace_recorder: Option<Qwen35TraceRecorder>) {
+        self.model.language_model.set_trace_recorder(trace_recorder);
     }
 
     pub fn forward(

@@ -27,7 +27,7 @@ use lmbrrr::{
     image_processor::{preprocess_paths, ProcessedImages},
     minicpm::MiniCpmForConditionalGeneration,
     prompt::{chat_prompt, expand_image_placeholders},
-    qwen35::{Qwen35ProfileEvent, Qwen35Profiler},
+    qwen35::{Qwen35ProfileEvent, Qwen35Profiler, Qwen35TraceRecorder},
     token_stream::TokenOutputStream,
     weights::{validate_minicpm_header, WeightReport},
 };
@@ -56,6 +56,7 @@ enum Command {
     Logits(LogitsArgs),
     Profile(ProfileArgs),
     SpecVerify(SpecVerifyArgs),
+    Trace(TraceArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -230,6 +231,30 @@ struct SpecVerifyArgs {
 
     #[arg(long)]
     fail_on_mismatch: bool,
+}
+
+#[derive(Parser, Debug)]
+struct TraceArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long)]
+    prompt: String,
+
+    #[arg(long)]
+    enable_thinking: bool,
+
+    #[arg(long, default_value_t = 16)]
+    max_new_tokens: usize,
+
+    #[arg(long = "capture-layer", value_delimiter = ',')]
+    capture_layers: Vec<usize>,
+
+    #[arg(long, default_value_t = 8)]
+    top_k_logits: usize,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -781,6 +806,7 @@ fn main() -> Result<()> {
         Command::Logits(args) => logits(args),
         Command::Profile(args) => profile_decode(args),
         Command::SpecVerify(args) => spec_verify(args),
+        Command::Trace(args) => trace_hidden_states(args),
     }
 }
 
@@ -1443,6 +1469,145 @@ fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
     Ok(())
 }
 
+fn trace_hidden_states(args: TraceArgs) -> Result<()> {
+    if args.max_new_tokens == 0 {
+        anyhow::bail!("--max-new-tokens must be greater than zero");
+    }
+    if args.top_k_logits == 0 {
+        anyhow::bail!("--top-k-logits must be greater than zero");
+    }
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let capture_layers = trace_capture_layers(
+        &args.capture_layers,
+        bundle.config.text_config.num_hidden_layers,
+    )?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+    let trace_recorder = Qwen35TraceRecorder::new(capture_layers.clone());
+    model.set_text_trace_recorder(Some(trace_recorder.clone()));
+    model.clear_cache();
+
+    let mut generated_token_ids = Vec::with_capacity(args.max_new_tokens);
+    let mut steps = Vec::with_capacity(args.max_new_tokens);
+    let mut total_forward_elapsed = Duration::ZERO;
+    let mut total_argmax_elapsed = Duration::ZERO;
+    let mut total_logits_elapsed = Duration::ZERO;
+    let mut eos_reached = false;
+
+    trace_recorder.clear();
+    let prompt_input = Tensor::from_slice(&prompt_tokens, (1, prompt_tokens.len()), &device)?;
+    let forward_start = Instant::now();
+    let mut logits = model.forward(
+        &prompt_input,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        0,
+    )?;
+    device.synchronize()?;
+    let mut forward_elapsed = forward_start.elapsed();
+    let mut hidden_states = trace_recorder.take();
+    let mut phase = "prefill";
+    let mut context_position = prompt_tokens.len() - 1;
+    let mut offset = 0usize;
+    let mut seq_len = prompt_tokens.len();
+
+    for step_index in 0..args.max_new_tokens {
+        total_forward_elapsed += forward_elapsed;
+        let (next_token, argmax_elapsed) = argmax_token(&logits, &device)?;
+        total_argmax_elapsed += argmax_elapsed;
+        let logits_start = Instant::now();
+        let top_logits = top_k_logits(&logits.squeeze(0)?, args.top_k_logits, &tokenizer)?;
+        let logits_elapsed = logits_start.elapsed();
+        total_logits_elapsed += logits_elapsed;
+
+        let step_eos = eos_ids.contains(&next_token);
+        steps.push(serde_json::json!({
+            "step": step_index,
+            "phase": phase,
+            "context_position": context_position,
+            "offset": offset,
+            "seq_len": seq_len,
+            "target_token_id": next_token,
+            "target_token": decode_token_lossy(&tokenizer, next_token),
+            "eos": step_eos,
+            "model_forward_seconds": secs(forward_elapsed),
+            "argmax_seconds": secs(argmax_elapsed),
+            "logits_top_k_seconds": secs(logits_elapsed),
+            "top_logits": top_logits_json(&top_logits),
+            "hidden_state_count": hidden_states.len(),
+            "hidden_states": hidden_states,
+        }));
+
+        if step_eos {
+            eos_reached = true;
+            break;
+        }
+        generated_token_ids.push(next_token);
+        if generated_token_ids.len() == args.max_new_tokens {
+            break;
+        }
+
+        phase = "decode";
+        context_position = prompt_tokens.len() + generated_token_ids.len() - 1;
+        offset = context_position;
+        seq_len = 1;
+        trace_recorder.clear();
+        let input = Tensor::from_slice(&[next_token], (1, 1), &device)?;
+        let forward_start = Instant::now();
+        logits = model.forward(
+            &input,
+            None::<&ProcessedImages>,
+            &args.model.downsample_mode,
+            offset,
+        )?;
+        device.synchronize()?;
+        forward_elapsed = forward_start.elapsed();
+        hidden_states = trace_recorder.take();
+    }
+    model.set_text_trace_recorder(None);
+
+    let prompt_token_count = prompt_tokens.len();
+    let generated_token_count = generated_token_ids.len();
+    let generated_text = decode_tokens(&tokenizer, &generated_token_ids)?;
+    let report = serde_json::json!({
+        "kind": "lmbrrr_hidden_state_trace",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "downsample_mode": args.model.downsample_mode.as_str(),
+        "enable_thinking": args.enable_thinking,
+        "artifact_seconds": secs(bundle.elapsed),
+        "load_seconds": secs(load_elapsed),
+        "prompt": args.prompt.as_str(),
+        "prompt_token_ids": &prompt_tokens,
+        "prompt_tokens": prompt_token_count,
+        "max_new_tokens": args.max_new_tokens,
+        "generated_token_ids": &generated_token_ids,
+        "generated_tokens": generated_token_count,
+        "generated_text": generated_text,
+        "eos_reached": eos_reached,
+        "capture_layers": capture_layers,
+        "top_k_logits": args.top_k_logits,
+        "timing": {
+            "model_forward_seconds": secs(total_forward_elapsed),
+            "model_forward_tokens_per_second": tokens_per_second(steps.len(), total_forward_elapsed),
+            "argmax_seconds": secs(total_argmax_elapsed),
+            "logits_top_k_seconds": secs(total_logits_elapsed),
+        },
+        "steps": steps,
+    });
+
+    write_json_report(args.output.as_ref(), &report)
+}
+
 fn resolve_artifacts(model: &ModelArgs) -> Result<ArtifactBundle> {
     let started = Instant::now();
     let artifacts = resolve_model_artifacts(
@@ -2007,6 +2172,36 @@ fn top_k_logits(logits: &Tensor, top_k: usize, tokenizer: &Tokenizer) -> Result<
         .collect()
 }
 
+fn top_logits_json(top_logits: &[TopLogit]) -> Vec<serde_json::Value> {
+    top_logits
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "token_id": item.token_id,
+                "token": item.token,
+                "logit": item.logit,
+            })
+        })
+        .collect()
+}
+
+fn trace_capture_layers(requested: &[usize], num_layers: usize) -> Result<Vec<usize>> {
+    if num_layers == 0 {
+        anyhow::bail!("model has zero text layers");
+    }
+    let mut layers = if requested.is_empty() {
+        vec![0, (num_layers - 1) / 2, num_layers - 1]
+    } else {
+        requested.to_vec()
+    };
+    layers.sort_unstable();
+    layers.dedup();
+    if let Some(layer) = layers.iter().find(|layer| **layer >= num_layers) {
+        anyhow::bail!("capture layer {layer} is outside 0..{}", num_layers - 1);
+    }
+    Ok(layers)
+}
+
 fn argmax_token(logits: &Tensor, device: &Device) -> Result<(u32, Duration)> {
     device.synchronize()?;
     let started = Instant::now();
@@ -2259,6 +2454,19 @@ mod tests {
         assert_eq!(corruption.original_token_id, 8);
         assert_eq!(corruption.corrupted_token_id, 9);
         assert_eq!(draft, [7, 9, 9]);
+    }
+
+    #[test]
+    fn trace_capture_layers_defaults_to_low_mid_high() {
+        let layers = trace_capture_layers(&[], 24).unwrap();
+        assert_eq!(layers, [0, 11, 23]);
+    }
+
+    #[test]
+    fn trace_capture_layers_sorts_dedups_and_validates() {
+        let layers = trace_capture_layers(&[7, 3, 7], 8).unwrap();
+        assert_eq!(layers, [3, 7]);
+        assert!(trace_capture_layers(&[8], 8).is_err());
     }
 
     #[test]

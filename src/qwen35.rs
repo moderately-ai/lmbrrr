@@ -67,6 +67,88 @@ impl Qwen35Profiler {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct Qwen35HiddenStateTrace {
+    pub layer_index: usize,
+    pub layer_kind: String,
+    pub seq_len: usize,
+    pub offset: usize,
+    pub position: usize,
+    pub hidden_size: usize,
+    pub dtype: String,
+    pub values: Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Qwen35TraceRecorder {
+    selected_layers: Arc<Vec<usize>>,
+    records: Arc<Mutex<Vec<Qwen35HiddenStateTrace>>>,
+}
+
+impl Qwen35TraceRecorder {
+    pub fn new(mut selected_layers: Vec<usize>) -> Self {
+        selected_layers.sort_unstable();
+        selected_layers.dedup();
+        Self {
+            selected_layers: Arc::new(selected_layers),
+            records: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn selected_layers(&self) -> Vec<usize> {
+        self.selected_layers.as_ref().clone()
+    }
+
+    pub fn clear(&self) {
+        self.records
+            .lock()
+            .expect("Qwen35 trace lock poisoned")
+            .clear();
+    }
+
+    pub fn take(&self) -> Vec<Qwen35HiddenStateTrace> {
+        std::mem::take(&mut *self.records.lock().expect("Qwen35 trace lock poisoned"))
+    }
+
+    fn record_layer(
+        &self,
+        layer_index: usize,
+        layer_kind: &'static str,
+        hidden: &Tensor,
+        offset: usize,
+    ) -> Result<()> {
+        if !self.selected_layers.contains(&layer_index) {
+            return Ok(());
+        }
+
+        let (batch, seq_len, hidden_size) = hidden.dims3()?;
+        if batch != 1 {
+            candle::bail!("hidden-state tracing expects batch size 1, got {batch}");
+        }
+        let values = hidden
+            .narrow(1, seq_len - 1, 1)?
+            .squeeze(1)?
+            .squeeze(0)?
+            .to_dtype(DType::F32)?
+            .to_device(&Device::Cpu)?
+            .to_vec1::<f32>()?;
+        self.records
+            .lock()
+            .expect("Qwen35 trace lock poisoned")
+            .push(Qwen35HiddenStateTrace {
+                layer_index,
+                layer_kind: layer_kind.to_string(),
+                seq_len,
+                offset,
+                position: offset + seq_len - 1,
+                hidden_size,
+                dtype: format!("{:?}", hidden.dtype()),
+                values,
+            });
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Qwen35RmsNorm {
     weight: Tensor,
@@ -760,6 +842,10 @@ impl DecoderLayer {
         })
     }
 
+    fn kind(&self) -> &'static str {
+        self.mixer.kind()
+    }
+
     fn forward(
         &mut self,
         xs: &Tensor,
@@ -827,6 +913,7 @@ pub struct Qwen35TextModel {
     device: Device,
     dtype: DType,
     profiler: Option<Qwen35Profiler>,
+    trace_recorder: Option<Qwen35TraceRecorder>,
 }
 
 impl Qwen35TextModel {
@@ -850,6 +937,7 @@ impl Qwen35TextModel {
             device: vb.device().clone(),
             dtype: vb.dtype(),
             profiler: None,
+            trace_recorder: None,
         })
     }
 
@@ -874,8 +962,10 @@ impl Qwen35TextModel {
             None
         };
         let profiler = self.profiler.clone();
+        let trace_recorder = self.trace_recorder.clone();
         let mut hidden = inputs_embeds.clone();
         for (layer_index, layer) in self.layers.iter_mut().enumerate() {
+            let layer_kind = layer.kind();
             hidden = layer.forward(
                 &hidden,
                 mask.as_ref(),
@@ -883,6 +973,9 @@ impl Qwen35TextModel {
                 layer_index,
                 profiler.as_ref(),
             )?;
+            if let Some(trace_recorder) = trace_recorder.as_ref() {
+                trace_recorder.record_layer(layer_index, layer_kind, &hidden, offset)?;
+            }
         }
         profiled(
             profiler.as_ref(),
@@ -904,6 +997,10 @@ impl Qwen35TextModel {
 
     pub fn set_profiler(&mut self, profiler: Option<Qwen35Profiler>) {
         self.profiler = profiler;
+    }
+
+    pub fn set_trace_recorder(&mut self, trace_recorder: Option<Qwen35TraceRecorder>) {
+        self.trace_recorder = trace_recorder;
     }
 
     fn causal_mask(&self, b: usize, tgt: usize, offset: usize) -> Result<Tensor> {
