@@ -1,7 +1,7 @@
 ---
 id: train-eagle-draft-head-from-traces
 title: Train EAGLE draft head from hidden-state traces
-status: todo
+status: done
 priority: p1
 dependencies: [record-hidden-state-traces, prototype-eagle-chain-drafter]
 related: []
