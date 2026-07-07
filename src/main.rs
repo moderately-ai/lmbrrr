@@ -27,6 +27,10 @@ use lmbrrr::{
     image_processor::{preprocess_paths, ProcessedImages},
     minicpm::MiniCpmForConditionalGeneration,
     prompt::{chat_prompt, expand_image_placeholders},
+    quant_sensitivity::{
+        aggregate_calibration, read_calibration_jsonl, score_weight_sensitivity, CalibrationRow,
+        QuantFormat,
+    },
     qwen35::{Qwen35ProfileEvent, Qwen35Profiler, Qwen35TraceRecorder},
     token_stream::TokenOutputStream,
     weights::{validate_minicpm_header, WeightReport},
@@ -57,6 +61,7 @@ enum Command {
     Profile(ProfileArgs),
     SpecVerify(SpecVerifyArgs),
     Trace(TraceArgs),
+    QuantSensitivity(QuantSensitivityArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -257,12 +262,59 @@ struct TraceArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Parser, Debug)]
+struct QuantSensitivityArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(
+        long,
+        default_value = "evals/calibration/minicpm_v46_quant_calibration.jsonl"
+    )]
+    calibration: PathBuf,
+
+    #[arg(long = "candidate-quant", value_enum)]
+    candidate_quants: Vec<QuantFormatArg>,
+
+    #[arg(long)]
+    max_cases: Option<usize>,
+
+    #[arg(long)]
+    max_modules: Option<usize>,
+
+    #[arg(long)]
+    include_protected: bool,
+
+    #[arg(long, default_value_t = 8)]
+    top_k_logits: usize,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum DTypeArg {
     Auto,
     F32,
     F16,
     Bf16,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum QuantFormatArg {
+    Q4Symmetric,
+    Q5Symmetric,
+    Q8Symmetric,
+}
+
+impl QuantFormatArg {
+    fn resolve(self) -> QuantFormat {
+        match self {
+            Self::Q4Symmetric => QuantFormat::SymmetricInt4,
+            Self::Q5Symmetric => QuantFormat::SymmetricInt5,
+            Self::Q8Symmetric => QuantFormat::SymmetricInt8,
+        }
+    }
 }
 
 impl DTypeArg {
@@ -807,6 +859,7 @@ fn main() -> Result<()> {
         Command::Profile(args) => profile_decode(args),
         Command::SpecVerify(args) => spec_verify(args),
         Command::Trace(args) => trace_hidden_states(args),
+        Command::QuantSensitivity(args) => quant_sensitivity(args),
     }
 }
 
@@ -1606,6 +1659,136 @@ fn trace_hidden_states(args: TraceArgs) -> Result<()> {
     });
 
     write_json_report(args.output.as_ref(), &report)
+}
+
+fn quant_sensitivity(args: QuantSensitivityArgs) -> Result<()> {
+    if args.top_k_logits == 0 {
+        anyhow::bail!("--top-k-logits must be greater than zero");
+    }
+    let formats = if args.candidate_quants.is_empty() {
+        vec![
+            QuantFormat::SymmetricInt4,
+            QuantFormat::SymmetricInt5,
+            QuantFormat::SymmetricInt8,
+        ]
+    } else {
+        args.candidate_quants
+            .iter()
+            .map(|format| format.resolve())
+            .collect::<Vec<_>>()
+    };
+
+    let calibration_rows = read_calibration_jsonl(&args.calibration)?;
+    let text_rows = calibration_rows
+        .iter()
+        .filter(|row| row.modality == "text")
+        .take(args.max_cases.unwrap_or(usize::MAX))
+        .collect::<Vec<_>>();
+    if text_rows.is_empty() {
+        anyhow::bail!(
+            "calibration file {} contains no text rows",
+            args.calibration.display()
+        );
+    }
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+
+    let baseline_started = Instant::now();
+    let mut baseline_cases = Vec::with_capacity(text_rows.len());
+    for row in text_rows {
+        baseline_cases.push(run_quant_baseline_case(
+            &mut model,
+            &device,
+            &tokenizer,
+            row,
+            &args.model.downsample_mode,
+            args.top_k_logits,
+        )?);
+    }
+    let baseline_elapsed = baseline_started.elapsed();
+
+    let weight_report = score_weight_sensitivity(
+        &bundle.artifacts.weights,
+        &formats,
+        args.max_modules,
+        args.include_protected,
+    )?;
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_quantization_sensitivity",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "downsample_mode": args.model.downsample_mode.as_str(),
+        "calibration_set": args.calibration,
+        "calibration": aggregate_calibration(&calibration_rows),
+        "candidate_quants": formats.iter().map(|format| format.name()).collect::<Vec<_>>(),
+        "include_protected": args.include_protected,
+        "artifact_seconds": secs(bundle.elapsed),
+        "load_seconds": secs(load_elapsed),
+        "tensor_count": bundle.weight_report.tensor_count,
+        "has_lm_head": bundle.weight_report.has_lm_head,
+        "baseline": {
+            "status": "measured",
+            "rows_measured": baseline_cases.len(),
+            "text_rows_available": calibration_rows.iter().filter(|row| row.modality == "text").count(),
+            "seconds": secs(baseline_elapsed),
+            "top_k_logits": args.top_k_logits,
+            "cases": baseline_cases,
+        },
+        "weights": weight_report,
+        "measurement_limits": {
+            "activation_error": "not collected yet because MiniCPM module activation hooks are not implemented",
+            "per_module_logit_drift": "not collected yet because this command does not run perturbed quantized module forwards",
+            "latency_delta": "weight quantization simulation is timed; runtime matmul latency awaits quantized loader/kernel tickets",
+        },
+    });
+
+    write_json_report(args.output.as_ref(), &report)
+}
+
+fn run_quant_baseline_case(
+    model: &mut MiniCpmForConditionalGeneration,
+    device: &Device,
+    tokenizer: &Tokenizer,
+    row: &CalibrationRow,
+    downsample_mode: &str,
+    top_k: usize,
+) -> Result<serde_json::Value> {
+    if row.token_ids.is_empty() {
+        anyhow::bail!("calibration row {} has no token ids", row.id);
+    }
+    model.clear_cache();
+    let input = Tensor::from_slice(&row.token_ids, (1, row.token_ids.len()), device)?;
+    let started = Instant::now();
+    let logits = model.forward(&input, None::<&ProcessedImages>, downsample_mode, 0)?;
+    device.synchronize()?;
+    let forward_elapsed = started.elapsed();
+    let top_logits = top_k_logits(&logits.squeeze(0)?, top_k, tokenizer)?;
+    let top1 = top_logits.first();
+    Ok(serde_json::json!({
+        "id": row.id.as_str(),
+        "category": row.category.as_str(),
+        "modality": row.modality.as_str(),
+        "enable_thinking": row.enable_thinking,
+        "media_status": row.media_status.as_deref(),
+        "prompt_tokens": row.token_ids.len(),
+        "declared_prompt_tokens": row.prompt_token_count,
+        "prompt_token_count_match": row.token_ids.len() == row.prompt_token_count,
+        "sensitivity_focus": row.sensitivity_focus,
+        "prefill_seconds": secs(forward_elapsed),
+        "prefill_tokens_per_second": tokens_per_second(row.token_ids.len(), forward_elapsed),
+        "top1_token_id": top1.map(|item| item.token_id),
+        "top1_token": top1.map(|item| item.token.as_str()),
+        "top1_logit": top1.map(|item| item.logit),
+        "top_logits": top_logits_json(&top_logits),
+    }))
 }
 
 fn resolve_artifacts(model: &ModelArgs) -> Result<ArtifactBundle> {

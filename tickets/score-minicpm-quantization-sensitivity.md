@@ -1,13 +1,13 @@
 ---
 id: score-minicpm-quantization-sensitivity
 title: Score MiniCPM quantization sensitivity
-status: todo
+status: done
 priority: p1
 dependencies: [build-minicpm-quantization-calibration-set]
 related: []
 scopes: [quantization, runtime/candle]
 shared_scopes: [evals, docs/research]
-paths: []
+paths: [src/main.rs, src/lib.rs, src/quant_sensitivity.rs, docs/research/quantization-sensitivity-scoring.md]
 tags: [quantization, calibration, implementation]
 ---
 Add a sensitivity-scoring command for MiniCPM-V-4.6 mixed-precision quantization, following `docs/research/dynamic-quantization-lab.md`.
