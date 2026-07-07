@@ -72,6 +72,11 @@ Acceptance gate:
 MiniCPM-V-4.6 config exposes `mtp_num_hidden_layers = 1`. If the checkpoint
 contains usable MTP weights, this is the lowest-friction draft source.
 
+Update from `audit-minicpm-mtp-weights`: the local MiniCPM-V-4.6 safetensors
+header has no `mtp.*` or draft-like tensors, so this checkpoint does not provide
+a built-in MTP drafter. Keep the MTP branch documented for future checkpoints,
+but use the replay drafter path for the current experiment.
+
 Plan:
 
 1. Audit safetensor names for MTP modules and document whether weights are
@@ -218,4 +223,3 @@ Do not claim speculative speedup unless:
 6. `prototype-dspark-confidence-scheduler`
    - Add confidence-head outputs and single-request verification-length
      scheduling after a block drafter exists.
-
