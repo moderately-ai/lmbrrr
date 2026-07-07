@@ -5,6 +5,7 @@ pub mod minicpm;
 pub mod prompt;
 pub mod quant_convert;
 pub mod quant_sensitivity;
+pub mod quantized_linear;
 pub mod qwen35;
 pub mod token_stream;
 pub mod weights;

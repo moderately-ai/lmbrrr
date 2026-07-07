@@ -4,11 +4,12 @@ use std::{
 };
 
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{embedding, linear_b, linear_no_bias, Activation, Embedding, Linear, VarBuilder};
+use candle_nn::{embedding, linear_b, linear_no_bias, Activation, Embedding, VarBuilder};
 use candle_transformers::utils::repeat_kv;
 use serde::Serialize;
 
 use crate::config::{LayerType, TextConfig};
+use crate::quantized_linear::{MixedLinear, QuantizedTextArtifact};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Qwen35ProfileEvent {
@@ -232,18 +233,30 @@ impl RotaryEmbedding {
 
 #[derive(Clone, Debug)]
 struct Mlp {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    gate_proj: MixedLinear,
+    up_proj: MixedLinear,
+    down_proj: MixedLinear,
     act: Activation,
 }
 
 impl Mlp {
     fn new(cfg: &TextConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            gate_proj: linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("gate_proj"))?,
-            up_proj: linear_no_bias(cfg.hidden_size, cfg.intermediate_size, vb.pp("up_proj"))?,
-            down_proj: linear_no_bias(cfg.intermediate_size, cfg.hidden_size, vb.pp("down_proj"))?,
+            gate_proj: MixedLinear::dense(linear_no_bias(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                vb.pp("gate_proj"),
+            )?),
+            up_proj: MixedLinear::dense(linear_no_bias(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                vb.pp("up_proj"),
+            )?),
+            down_proj: MixedLinear::dense(linear_no_bias(
+                cfg.intermediate_size,
+                cfg.hidden_size,
+                vb.pp("down_proj"),
+            )?),
             act: cfg.hidden_act,
         })
     }
@@ -253,14 +266,39 @@ impl Mlp {
         let rhs = self.up_proj.forward(xs)?;
         self.down_proj.forward(&(lhs * rhs)?)
     }
+
+    fn apply_quantized_text_artifact(
+        &mut self,
+        layer_index: usize,
+        artifact: &QuantizedTextArtifact,
+    ) -> Result<usize> {
+        let prefix = format!("model.language_model.layers.{layer_index}.mlp");
+        let mut replaced = 0usize;
+        replaced += replace_quantized_linear(
+            &mut self.gate_proj,
+            &format!("{prefix}.gate_proj.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.up_proj,
+            &format!("{prefix}.up_proj.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.down_proj,
+            &format!("{prefix}.down_proj.weight"),
+            artifact,
+        )?;
+        Ok(replaced)
+    }
 }
 
 #[derive(Clone, Debug)]
 struct FullAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: MixedLinear,
+    k_proj: MixedLinear,
+    v_proj: MixedLinear,
+    o_proj: MixedLinear,
     q_norm: Qwen35RmsNorm,
     k_norm: Qwen35RmsNorm,
     num_heads: usize,
@@ -275,30 +313,30 @@ struct FullAttention {
 impl FullAttention {
     fn new(cfg: &TextConfig, rotary: Arc<RotaryEmbedding>, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            q_proj: linear_b(
+            q_proj: MixedLinear::dense(linear_b(
                 cfg.hidden_size,
                 cfg.num_attention_heads * cfg.head_dim * 2,
                 cfg.attention_bias,
                 vb.pp("q_proj"),
-            )?,
-            k_proj: linear_b(
+            )?),
+            k_proj: MixedLinear::dense(linear_b(
                 cfg.hidden_size,
                 cfg.num_key_value_heads * cfg.head_dim,
                 cfg.attention_bias,
                 vb.pp("k_proj"),
-            )?,
-            v_proj: linear_b(
+            )?),
+            v_proj: MixedLinear::dense(linear_b(
                 cfg.hidden_size,
                 cfg.num_key_value_heads * cfg.head_dim,
                 cfg.attention_bias,
                 vb.pp("v_proj"),
-            )?,
-            o_proj: linear_b(
+            )?),
+            o_proj: MixedLinear::dense(linear_b(
                 cfg.num_attention_heads * cfg.head_dim,
                 cfg.hidden_size,
                 cfg.attention_bias,
                 vb.pp("o_proj"),
-            )?,
+            )?),
             q_norm: Qwen35RmsNorm::new(cfg.head_dim, cfg.rms_norm_eps, true, vb.pp("q_norm"))?,
             k_norm: Qwen35RmsNorm::new(cfg.head_dim, cfg.rms_norm_eps, true, vb.pp("k_norm"))?,
             num_heads: cfg.num_attention_heads,
@@ -436,15 +474,45 @@ impl FullAttention {
             .expect("full-attention KV cache lock poisoned")
             .reset();
     }
+
+    fn apply_quantized_text_artifact(
+        &mut self,
+        layer_index: usize,
+        artifact: &QuantizedTextArtifact,
+    ) -> Result<usize> {
+        let prefix = format!("model.language_model.layers.{layer_index}.self_attn");
+        let mut replaced = 0usize;
+        replaced += replace_quantized_linear(
+            &mut self.q_proj,
+            &format!("{prefix}.q_proj.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.k_proj,
+            &format!("{prefix}.k_proj.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.v_proj,
+            &format!("{prefix}.v_proj.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.o_proj,
+            &format!("{prefix}.o_proj.weight"),
+            artifact,
+        )?;
+        Ok(replaced)
+    }
 }
 
 #[derive(Clone, Debug)]
 struct GatedDeltaNet {
-    in_proj_qkv: Linear,
-    in_proj_z: Linear,
-    in_proj_b: Linear,
-    in_proj_a: Linear,
-    out_proj: Linear,
+    in_proj_qkv: MixedLinear,
+    in_proj_z: MixedLinear,
+    in_proj_b: MixedLinear,
+    in_proj_a: MixedLinear,
+    out_proj: MixedLinear,
     conv_weight: Tensor,
     dt_bias_f32: Tensor,
     a_log_exp_f32: Tensor,
@@ -478,19 +546,31 @@ impl GatedDeltaNet {
                 .exp()?
                 .reshape((1, 1, cfg.linear_num_value_heads))?;
         Ok(Self {
-            in_proj_qkv: linear_no_bias(cfg.hidden_size, conv_dim, vb.pp("in_proj_qkv"))?,
-            in_proj_z: linear_no_bias(cfg.hidden_size, value_dim, vb.pp("in_proj_z"))?,
-            in_proj_b: linear_no_bias(
+            in_proj_qkv: MixedLinear::dense(linear_no_bias(
+                cfg.hidden_size,
+                conv_dim,
+                vb.pp("in_proj_qkv"),
+            )?),
+            in_proj_z: MixedLinear::dense(linear_no_bias(
+                cfg.hidden_size,
+                value_dim,
+                vb.pp("in_proj_z"),
+            )?),
+            in_proj_b: MixedLinear::dense(linear_no_bias(
                 cfg.hidden_size,
                 cfg.linear_num_value_heads,
                 vb.pp("in_proj_b"),
-            )?,
-            in_proj_a: linear_no_bias(
+            )?),
+            in_proj_a: MixedLinear::dense(linear_no_bias(
                 cfg.hidden_size,
                 cfg.linear_num_value_heads,
                 vb.pp("in_proj_a"),
-            )?,
-            out_proj: linear_no_bias(value_dim, cfg.hidden_size, vb.pp("out_proj"))?,
+            )?),
+            out_proj: MixedLinear::dense(linear_no_bias(
+                value_dim,
+                cfg.hidden_size,
+                vb.pp("out_proj"),
+            )?),
             conv_weight: vb.get((conv_dim, 1, cfg.linear_conv_kernel_dim), "conv1d.weight")?,
             dt_bias_f32,
             a_log_exp_f32,
@@ -516,6 +596,41 @@ impl GatedDeltaNet {
     fn clear_cache(&mut self) {
         self.conv_state = None;
         self.recurrent_state = None;
+    }
+
+    fn apply_quantized_text_artifact(
+        &mut self,
+        layer_index: usize,
+        artifact: &QuantizedTextArtifact,
+    ) -> Result<usize> {
+        let prefix = format!("model.language_model.layers.{layer_index}.linear_attn");
+        let mut replaced = 0usize;
+        replaced += replace_quantized_linear(
+            &mut self.in_proj_qkv,
+            &format!("{prefix}.in_proj_qkv.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.in_proj_z,
+            &format!("{prefix}.in_proj_z.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.in_proj_b,
+            &format!("{prefix}.in_proj_b.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.in_proj_a,
+            &format!("{prefix}.in_proj_a.weight"),
+            artifact,
+        )?;
+        replaced += replace_quantized_linear(
+            &mut self.out_proj,
+            &format!("{prefix}.out_proj.weight"),
+            artifact,
+        )?;
+        Ok(replaced)
     }
 
     fn forward(
@@ -799,6 +914,17 @@ impl TokenMixer {
             Self::Linear(_) => "linear_attention",
         }
     }
+
+    fn apply_quantized_text_artifact(
+        &mut self,
+        layer_index: usize,
+        artifact: &QuantizedTextArtifact,
+    ) -> Result<usize> {
+        match self {
+            Self::Full(attn) => attn.apply_quantized_text_artifact(layer_index, artifact),
+            Self::Linear(attn) => attn.apply_quantized_text_artifact(layer_index, artifact),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -903,6 +1029,37 @@ impl DecoderLayer {
             TokenMixer::Linear(attn) => attn.clear_cache(),
         }
     }
+
+    fn apply_quantized_text_artifact(
+        &mut self,
+        layer_index: usize,
+        artifact: &QuantizedTextArtifact,
+    ) -> Result<usize> {
+        let mut replaced = self
+            .mixer
+            .apply_quantized_text_artifact(layer_index, artifact)?;
+        replaced += self
+            .mlp
+            .apply_quantized_text_artifact(layer_index, artifact)?;
+        Ok(replaced)
+    }
+}
+
+fn replace_quantized_linear(
+    linear: &mut MixedLinear,
+    name: &str,
+    artifact: &QuantizedTextArtifact,
+) -> Result<usize> {
+    match artifact
+        .load_linear(name)
+        .map_err(|err| candle::Error::Msg(format!("load quantized linear {name}: {err}")))?
+    {
+        Some(quantized) => {
+            *linear = quantized;
+            Ok(1)
+        }
+        None => Ok(0),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -943,6 +1100,17 @@ impl Qwen35TextModel {
 
     pub fn embeddings(&self) -> &Tensor {
         self.embed_tokens.embeddings()
+    }
+
+    pub fn apply_quantized_text_artifact(
+        &mut self,
+        artifact: &QuantizedTextArtifact,
+    ) -> Result<usize> {
+        let mut replaced = 0usize;
+        for (layer_index, layer) in self.layers.iter_mut().enumerate() {
+            replaced += layer.apply_quantized_text_artifact(layer_index, artifact)?;
+        }
+        Ok(replaced)
     }
 
     pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor> {

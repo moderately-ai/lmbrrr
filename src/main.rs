@@ -32,6 +32,7 @@ use lmbrrr::{
         aggregate_calibration, read_calibration_jsonl, score_weight_sensitivity, CalibrationRow,
         QuantFormat,
     },
+    quantized_linear::QuantizedTextArtifact,
     qwen35::{Qwen35ProfileEvent, Qwen35Profiler, Qwen35TraceRecorder},
     token_stream::TokenOutputStream,
     weights::{validate_minicpm_header, WeightReport},
@@ -97,6 +98,9 @@ struct ModelArgs {
 
     #[arg(long = "weights")]
     weights: Vec<PathBuf>,
+
+    #[arg(long)]
+    quantized_manifest: Option<PathBuf>,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -415,6 +419,13 @@ struct ArtifactBundle {
     generation_config: Option<GenerationConfig>,
     weight_report: WeightReport,
     elapsed: Duration,
+}
+
+#[derive(Clone, Debug)]
+struct QuantizedLoadStats {
+    manifest: PathBuf,
+    quantized_tensors: usize,
+    replaced_text_linears: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -916,6 +927,7 @@ fn run(args: RunArgs) -> Result<()> {
                 "config": bundle.artifacts.config,
                 "tokenizer": bundle.artifacts.tokenizer,
                 "weights": bundle.artifacts.weights,
+                "quantized_manifest": args.model.quantized_manifest,
                 "tensor_count": bundle.weight_report.tensor_count,
                 "has_lm_head": bundle.weight_report.has_lm_head,
                 "text_layers": bundle.config.text_config.num_hidden_layers,
@@ -947,7 +959,12 @@ fn run(args: RunArgs) -> Result<()> {
     let prompt_text = prepare_run_prompt(&args, preprocessor.as_ref(), processed_images.as_ref())?;
     let tokens = tokenize_prompt(&tokenizer, prompt_text)?;
 
-    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let mut stream = TokenOutputStream::new(tokenizer);
     let use_tui = !args.no_progress && std::io::stdout().is_terminal();
@@ -1046,6 +1063,7 @@ fn run(args: RunArgs) -> Result<()> {
             "device": format!("{device:?}"),
             "dtype": format!("{dtype:?}"),
             "enable_thinking": args.generation.enable_thinking,
+            "quantized_load": quantized_load_json(&quantized_load),
         })
     );
     Ok(())
@@ -1073,7 +1091,12 @@ fn bench(args: BenchArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let mut writer = benchmark_writer(args.output.as_ref(), args.append)?;
 
@@ -1144,6 +1167,7 @@ fn bench(args: BenchArgs) -> Result<()> {
                     "load_seconds": secs(load_elapsed),
                     "tensor_count": bundle.weight_report.tensor_count,
                     "has_lm_head": bundle.weight_report.has_lm_head,
+                    "quantized_load": quantized_load_json(&quantized_load),
                     "text": {
                         "raw": text.raw_text,
                         "reasoning": text.reasoning_text,
@@ -1190,7 +1214,12 @@ fn logits(args: LogitsArgs) -> Result<()> {
     let device = select_device(args.model.cpu)?;
     let dtype = args.model.dtype.resolve(&device);
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
-    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
 
     let mut rows = Vec::with_capacity(cases.len());
     let mut all_passed = true;
@@ -1258,6 +1287,7 @@ fn logits(args: LogitsArgs) -> Result<()> {
         "top_k": args.top_k,
         "artifact_seconds": secs(bundle.elapsed),
         "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
         "passed": all_passed,
         "cases": rows,
     });
@@ -1284,7 +1314,12 @@ fn profile_decode(args: ProfileArgs) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&prompt, 0, false);
     let tokens = tokenize_prompt(&tokenizer, prompt_text)?;
-    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
     let profiler = Qwen35Profiler::new();
     model.set_text_profiler(Some(profiler.clone()));
     model.clear_cache();
@@ -1365,6 +1400,7 @@ fn profile_decode(args: ProfileArgs) -> Result<()> {
         "decode_steps": args.max_new_tokens,
         "artifact_seconds": secs(bundle.elapsed),
         "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
         "timing_method": "wall-clock with device.synchronize() around profiled components; intrusive but attributable",
         "prefill": {
             "seconds": secs(prefill_elapsed),
@@ -1416,7 +1452,12 @@ fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
-    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
     let (mut draft_tokens, draft_source, baseline_tokens) =
@@ -1511,6 +1552,7 @@ fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
         "enable_thinking": args.enable_thinking,
         "artifact_seconds": secs(bundle.elapsed),
         "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
         "draft_source": draft_source,
         "prompt": args.prompt.as_str(),
         "prompt_tokens": prompt_tokens.len(),
@@ -1581,7 +1623,12 @@ fn trace_hidden_states(args: TraceArgs) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
-    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let trace_recorder = Qwen35TraceRecorder::new(capture_layers.clone());
     model.set_text_trace_recorder(Some(trace_recorder.clone()));
@@ -1680,6 +1727,7 @@ fn trace_hidden_states(args: TraceArgs) -> Result<()> {
         "enable_thinking": args.enable_thinking,
         "artifact_seconds": secs(bundle.elapsed),
         "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
         "prompt": args.prompt.as_str(),
         "prompt_token_ids": &prompt_tokens,
         "prompt_tokens": prompt_token_count,
@@ -1736,7 +1784,12 @@ fn quant_sensitivity(args: QuantSensitivityArgs) -> Result<()> {
     let device = select_device(args.model.cpu)?;
     let dtype = args.model.dtype.resolve(&device);
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
-    let (mut model, load_elapsed) = load_model(&bundle, dtype, &device)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
 
     let baseline_started = Instant::now();
     let mut baseline_cases = Vec::with_capacity(text_rows.len());
@@ -1773,6 +1826,7 @@ fn quant_sensitivity(args: QuantSensitivityArgs) -> Result<()> {
         "include_protected": args.include_protected,
         "artifact_seconds": secs(bundle.elapsed),
         "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
         "tensor_count": bundle.weight_report.tensor_count,
         "has_lm_head": bundle.weight_report.has_lm_head,
         "baseline": {
@@ -1892,12 +1946,44 @@ fn load_model(
     bundle: &ArtifactBundle,
     dtype: DType,
     device: &Device,
-) -> Result<(MiniCpmForConditionalGeneration, Duration)> {
+) -> Result<(
+    MiniCpmForConditionalGeneration,
+    Duration,
+    Option<QuantizedLoadStats>,
+)> {
     let load_start = Instant::now();
     let vb =
         unsafe { VarBuilder::from_mmaped_safetensors(&bundle.artifacts.weights, dtype, device)? };
     let model = MiniCpmForConditionalGeneration::new(&bundle.config, vb)?;
-    Ok((model, load_start.elapsed()))
+    Ok((model, load_start.elapsed(), None))
+}
+
+fn load_model_with_optional_quantization(
+    bundle: &ArtifactBundle,
+    dtype: DType,
+    device: &Device,
+    quantized_manifest: Option<&PathBuf>,
+) -> Result<(
+    MiniCpmForConditionalGeneration,
+    Duration,
+    Option<QuantizedLoadStats>,
+)> {
+    let (mut model, load_elapsed, _) = load_model(bundle, dtype, device)?;
+    let Some(manifest) = quantized_manifest else {
+        return Ok((model, load_elapsed, None));
+    };
+    let artifact = QuantizedTextArtifact::from_manifest(manifest, device, dtype)?;
+    let quantized_tensors = artifact.quantized_tensor_count();
+    let replaced_text_linears = model.apply_quantized_text_artifact(&artifact)?;
+    Ok((
+        model,
+        load_elapsed,
+        Some(QuantizedLoadStats {
+            manifest: artifact.manifest_path().to_path_buf(),
+            quantized_tensors,
+            replaced_text_linears,
+        }),
+    ))
 }
 
 fn load_tokenizer(artifacts: &Artifacts) -> Result<Tokenizer> {
@@ -2333,6 +2419,18 @@ fn write_json_report(path: Option<&PathBuf>, value: &serde_json::Value) -> Resul
     Ok(())
 }
 
+fn quantized_load_json(load: &Option<QuantizedLoadStats>) -> serde_json::Value {
+    match load {
+        Some(load) => serde_json::json!({
+            "manifest": load.manifest,
+            "quantized_tensors": load.quantized_tensors,
+            "replaced_text_linears": load.replaced_text_linears,
+            "backend": "dequantized_qmatmul_tensor",
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
 #[derive(Debug)]
 struct TopLogitComparison {
     top1_match: bool,
@@ -2595,6 +2693,7 @@ mod tests {
                 generation_config: None,
                 preprocessor: None,
                 weights: Vec::new(),
+                quantized_manifest: None,
             },
             generation: GenerationArgs {
                 max_new_tokens: 128,

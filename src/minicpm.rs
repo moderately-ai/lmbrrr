@@ -6,6 +6,7 @@ use candle_nn::{
 use crate::{
     config::{MiniCpmConfig, VisionConfig},
     image_processor::ProcessedImages,
+    quantized_linear::QuantizedTextArtifact,
     qwen35::{Qwen35Profiler, Qwen35TextModel, Qwen35TraceRecorder},
 };
 
@@ -430,6 +431,10 @@ impl MiniCpmModel {
         )?;
         self.merger.forward(&hidden, &target_sizes)
     }
+
+    fn apply_quantized_text_artifact(&mut self, artifact: &QuantizedTextArtifact) -> Result<usize> {
+        self.language_model.apply_quantized_text_artifact(artifact)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -470,6 +475,13 @@ impl MiniCpmForConditionalGeneration {
 
     pub fn set_text_trace_recorder(&mut self, trace_recorder: Option<Qwen35TraceRecorder>) {
         self.model.language_model.set_trace_recorder(trace_recorder);
+    }
+
+    pub fn apply_quantized_text_artifact(
+        &mut self,
+        artifact: &QuantizedTextArtifact,
+    ) -> Result<usize> {
+        self.model.apply_quantized_text_artifact(artifact)
     }
 
     pub fn forward(

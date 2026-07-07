@@ -1,13 +1,13 @@
 ---
 id: load-minicpm-quantized-linear-weights
 title: Load MiniCPM quantized linear weights
-status: todo
+status: done
 priority: p2
 dependencies: [convert-minicpm-mixed-precision-weights]
 related: []
 scopes: [runtime/candle, quantization]
 shared_scopes: []
-paths: []
+paths: [src/main.rs, src/lib.rs, src/qwen35.rs, src/minicpm.rs, src/quantized_linear.rs, docs/research/quantized-linear-loader.md]
 tags: [quantization, runtime, implementation]
 ---
 Teach the Candle runner to load quantized MiniCPM linear weights beside BF16 tensors.
