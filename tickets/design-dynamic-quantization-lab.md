@@ -1,13 +1,13 @@
 ---
 id: design-dynamic-quantization-lab
 title: Design dynamic quantization experiment lab
-status: todo
+status: done
 priority: p2
 dependencies: [research-minicpm-surface, define-experiment-pivot-gates]
 related: []
 scopes: [docs/research, quantization]
 shared_scopes: []
-paths: []
+paths: [docs/research/dynamic-quantization-lab.md, tickets/design-dynamic-quantization-lab.md, tickets/build-minicpm-quantization-calibration-set.md, tickets/score-minicpm-quantization-sensitivity.md, tickets/convert-minicpm-mixed-precision-weights.md, tickets/load-minicpm-quantized-linear-weights.md, tickets/benchmark-metal-quantized-matmul-kernels.md]
 tags: [research, quantization]
 ---
 ## Goal
