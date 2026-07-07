@@ -1,7 +1,7 @@
 ---
 id: integrate-dspark-adaptive-scheduler
 title: Integrate DSpark adaptive speculative scheduler
-status: todo
+status: done
 priority: p2
 dependencies: [prototype-dspark-confidence-scheduler, integrate-eagle-draft-runner]
 related: []

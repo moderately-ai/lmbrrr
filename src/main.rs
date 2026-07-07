@@ -383,6 +383,9 @@ struct EagleLiveProbeArgs {
     draft_width: usize,
 
     #[arg(long)]
+    schedule_confidence_threshold: Option<f64>,
+
+    #[arg(long)]
     enable_thinking: bool,
 
     #[arg(long)]
@@ -2509,11 +2512,21 @@ fn eagle_live_probe(args: EagleLiveProbeArgs) -> Result<()> {
     }
     model.set_text_trace_recorder(None);
 
-    let scheduled_width = args
+    let candidate_width = args
         .draft_width
         .min(draft_token_ids.len())
         .min(generated_token_ids.len());
-    let draft_chain = draft_token_ids[..scheduled_width].to_vec();
+    let mut draft_chain = draft_token_ids[..candidate_width].to_vec();
+    let confidence_schedule = if args.schedule_confidence_threshold.is_some() {
+        apply_confidence_schedule(
+            &mut draft_chain,
+            &confidences[..candidate_width],
+            args.schedule_confidence_threshold,
+        )?
+    } else {
+        None
+    };
+    let scheduled_width = draft_chain.len();
     let target_chain = generated_token_ids[..scheduled_width].to_vec();
     let bonus_token_id = generated_token_ids
         .get(scheduled_width)
@@ -2547,7 +2560,9 @@ fn eagle_live_probe(args: EagleLiveProbeArgs) -> Result<()> {
         "generated_text": decode_tokens(&tokenizer, &generated_token_ids)?,
         "eos_reached": eos_reached,
         "requested_draft_width": args.draft_width,
+        "candidate_draft_width": candidate_width,
         "scheduled_draft_width": scheduled_width,
+        "confidence_schedule": confidence_schedule_json(&confidence_schedule),
         "draft_token_ids": &draft_token_ids,
         "draft_text": decode_tokens(&tokenizer, &draft_chain)?,
         "draft_confidences": &confidences,
@@ -2558,6 +2573,8 @@ fn eagle_live_probe(args: EagleLiveProbeArgs) -> Result<()> {
         "first_rejected_index": analysis.first_rejected_index,
         "verifier_waste_tokens": analysis.verifier_waste_tokens(),
         "verifier_waste_share": analysis.verifier_waste_share(),
+        "target_decode_steps_covered_estimate": analysis.accepted_length(),
+        "target_forward_calls_saved_estimate": analysis.accepted_length().saturating_sub(1),
         "bonus_token_id": analysis.bonus_token_id,
         "bonus_token": decode_token_lossy(&tokenizer, analysis.bonus_token_id),
         "reconstructed_token_ids": &analysis.reconstructed_token_ids,
