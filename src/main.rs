@@ -9,7 +9,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle::{DType, Device, Tensor, D};
+use candle::{
+    quantized::{GgmlDType, QMatMul, QTensor},
+    DType, Device, Module, Tensor, D,
+};
 use candle_nn::VarBuilder;
 use candle_transformers::{
     generation::{LogitsProcessor, Sampling},
@@ -65,6 +68,7 @@ enum Command {
     Trace(TraceArgs),
     QuantSensitivity(QuantSensitivityArgs),
     QuantConvert(QuantConvertArgs),
+    QuantMatmulBench(QuantMatmulBenchArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -317,6 +321,27 @@ struct QuantConvertArgs {
 
     #[arg(long)]
     manifest_only: bool,
+}
+
+#[derive(Parser, Debug)]
+struct QuantMatmulBenchArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long, default_value_t = 128)]
+    chunk_tokens: usize,
+
+    #[arg(long, default_value_t = 2)]
+    warmup: usize,
+
+    #[arg(long, default_value_t = 5)]
+    iterations: usize,
+
+    #[arg(long)]
+    include_lm_head: bool,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -912,6 +937,7 @@ fn main() -> Result<()> {
         Command::Trace(args) => trace_hidden_states(args),
         Command::QuantSensitivity(args) => quant_sensitivity(args),
         Command::QuantConvert(args) => quant_convert(args),
+        Command::QuantMatmulBench(args) => quant_matmul_bench(args),
     }
 }
 
@@ -1873,6 +1899,318 @@ fn quant_convert(args: QuantConvertArgs) -> Result<()> {
         "summary": manifest["summary"].clone(),
     });
     write_json_report(None, &summary)
+}
+
+fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
+    if args.chunk_tokens == 0 {
+        anyhow::bail!("--chunk-tokens must be greater than zero");
+    }
+    if args.iterations == 0 {
+        anyhow::bail!("--iterations must be greater than zero");
+    }
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let shapes = quant_matmul_shapes(&bundle.config, args.include_lm_head);
+    let activation_dtypes = [DType::F32, DType::F16, DType::BF16];
+    let quant_dtypes = [
+        GgmlDType::Q8_0,
+        GgmlDType::Q4K,
+        GgmlDType::Q5K,
+        GgmlDType::Q6K,
+    ];
+
+    let mut rows = Vec::new();
+    for shape in shapes {
+        let weight_values = deterministic_values(shape.out_dim * shape.in_dim, 0.013);
+        let weight_cpu =
+            Tensor::from_vec(weight_values, (shape.out_dim, shape.in_dim), &Device::Cpu)?;
+        for mode in [MatmulMode::Decode, MatmulMode::Prefill] {
+            let tokens = match mode {
+                MatmulMode::Decode => 1,
+                MatmulMode::Prefill => args.chunk_tokens,
+            };
+            let input_values = deterministic_values(tokens * shape.in_dim, 0.017);
+            let input_cpu =
+                Tensor::from_vec(input_values, (1, tokens, shape.in_dim), &Device::Cpu)?;
+
+            for activation_dtype in activation_dtypes {
+                rows.push(bench_dense_matmul(
+                    &shape,
+                    mode,
+                    activation_dtype,
+                    &weight_cpu,
+                    &input_cpu,
+                    &device,
+                    args.warmup,
+                    args.iterations,
+                ));
+            }
+
+            for quant_dtype in quant_dtypes {
+                for activation_dtype in activation_dtypes {
+                    rows.push(bench_quant_matmul(
+                        &shape,
+                        mode,
+                        quant_dtype,
+                        activation_dtype,
+                        &weight_cpu,
+                        &input_cpu,
+                        &device,
+                        args.warmup,
+                        args.iterations,
+                    ));
+                }
+            }
+        }
+    }
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_quantized_matmul_benchmark",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "chunk_tokens": args.chunk_tokens,
+        "warmup": args.warmup,
+        "iterations": args.iterations,
+        "include_lm_head": args.include_lm_head,
+        "artifact_seconds": secs(bundle.elapsed),
+        "rows": rows,
+        "note": "Dense baselines use generated weights with Candle matmul. Quantized rows use Candle QTensor::quantize_onto and QMatMul::forward; failures are recorded because activation dtype support is part of the measurement.",
+    });
+    write_json_report(args.output.as_ref(), &report)
+}
+
+#[derive(Copy, Clone, Debug)]
+enum MatmulMode {
+    Decode,
+    Prefill,
+}
+
+impl MatmulMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Decode => "decode_mv",
+            Self::Prefill => "prefill_mm",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MatmulShape {
+    name: &'static str,
+    family: &'static str,
+    in_dim: usize,
+    out_dim: usize,
+}
+
+fn quant_matmul_shapes(cfg: &MiniCpmConfig, include_lm_head: bool) -> Vec<MatmulShape> {
+    let text = &cfg.text_config;
+    let key_dim = text.linear_key_head_dim * text.linear_num_key_heads;
+    let value_dim = text.linear_value_head_dim * text.linear_num_value_heads;
+    let conv_dim = key_dim * 2 + value_dim;
+    let mut shapes = vec![
+        MatmulShape {
+            name: "deltanet_in_proj_qkv",
+            family: "text.deltanet",
+            in_dim: text.hidden_size,
+            out_dim: conv_dim,
+        },
+        MatmulShape {
+            name: "deltanet_out_proj",
+            family: "text.deltanet",
+            in_dim: value_dim,
+            out_dim: text.hidden_size,
+        },
+        MatmulShape {
+            name: "mlp_up_or_gate_proj",
+            family: "text.mlp",
+            in_dim: text.hidden_size,
+            out_dim: text.intermediate_size,
+        },
+        MatmulShape {
+            name: "mlp_down_proj",
+            family: "text.mlp",
+            in_dim: text.intermediate_size,
+            out_dim: text.hidden_size,
+        },
+        MatmulShape {
+            name: "full_attention_q_proj",
+            family: "text.full_attention",
+            in_dim: text.hidden_size,
+            out_dim: text.num_attention_heads * text.head_dim * 2,
+        },
+        MatmulShape {
+            name: "full_attention_o_proj",
+            family: "text.full_attention",
+            in_dim: text.num_attention_heads * text.head_dim,
+            out_dim: text.hidden_size,
+        },
+    ];
+    if include_lm_head {
+        shapes.push(MatmulShape {
+            name: "lm_head",
+            family: "text.lm_head",
+            in_dim: text.hidden_size,
+            out_dim: text.vocab_size,
+        });
+    }
+    shapes
+}
+
+fn bench_dense_matmul(
+    shape: &MatmulShape,
+    mode: MatmulMode,
+    activation_dtype: DType,
+    weight_cpu: &Tensor,
+    input_cpu: &Tensor,
+    device: &Device,
+    warmup: usize,
+    iterations: usize,
+) -> serde_json::Value {
+    let result = (|| -> Result<(Duration, Duration)> {
+        let prepare_started = Instant::now();
+        let weight = weight_cpu.to_device(device)?.to_dtype(activation_dtype)?;
+        let input = input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
+        device.synchronize()?;
+        let prepare_elapsed = prepare_started.elapsed();
+        let elapsed = time_iterations(device, warmup, iterations, || {
+            let w = weight.t()?;
+            let tokens = input.dim(1)?;
+            Ok(input
+                .reshape((tokens, shape.in_dim))?
+                .matmul(&w)?
+                .reshape((1, tokens, shape.out_dim))?)
+        })?;
+        Ok((prepare_elapsed, elapsed))
+    })();
+    matmul_bench_row(
+        shape,
+        mode,
+        "dense",
+        Some(format!("{activation_dtype:?}")),
+        activation_dtype,
+        None,
+        result,
+        iterations,
+    )
+}
+
+fn bench_quant_matmul(
+    shape: &MatmulShape,
+    mode: MatmulMode,
+    quant_dtype: GgmlDType,
+    activation_dtype: DType,
+    weight_cpu: &Tensor,
+    input_cpu: &Tensor,
+    device: &Device,
+    warmup: usize,
+    iterations: usize,
+) -> serde_json::Value {
+    let result = (|| -> Result<(Duration, Duration)> {
+        let prepare_started = Instant::now();
+        let qweight = QTensor::quantize_onto(weight_cpu, quant_dtype, device)?;
+        let qmatmul = QMatMul::from_qtensor(qweight)?;
+        let input = input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
+        device.synchronize()?;
+        let prepare_elapsed = prepare_started.elapsed();
+        let elapsed = if activation_dtype == DType::F32 {
+            time_iterations(device, warmup, iterations, || Ok(qmatmul.forward(&input)?))?
+        } else {
+            time_iterations(device, warmup, iterations, || {
+                let input = input.to_dtype(DType::F32)?;
+                Ok(qmatmul.forward(&input)?)
+            })?
+        };
+        Ok((prepare_elapsed, elapsed))
+    })();
+    matmul_bench_row(
+        shape,
+        mode,
+        "quantized",
+        Some(format!("{quant_dtype:?}")),
+        activation_dtype,
+        (activation_dtype != DType::F32).then_some("to_f32"),
+        result,
+        iterations,
+    )
+}
+
+fn matmul_bench_row(
+    shape: &MatmulShape,
+    mode: MatmulMode,
+    backend: &str,
+    weight_dtype: Option<String>,
+    activation_dtype: DType,
+    activation_cast: Option<&str>,
+    result: Result<(Duration, Duration)>,
+    iterations: usize,
+) -> serde_json::Value {
+    match result {
+        Ok((prepare_elapsed, elapsed)) => serde_json::json!({
+            "shape": shape.name,
+            "family": shape.family,
+            "mode": mode.name(),
+            "backend": backend,
+            "weight_dtype": weight_dtype,
+            "activation_dtype": format!("{activation_dtype:?}"),
+            "activation_cast": activation_cast,
+            "in_dim": shape.in_dim,
+            "out_dim": shape.out_dim,
+            "iterations": iterations,
+            "prepare_seconds": secs(prepare_elapsed),
+            "elapsed_seconds": secs(elapsed),
+            "seconds_per_iteration": secs(elapsed) / iterations as f64,
+            "tokens_per_second": tokens_per_second(match mode {
+                MatmulMode::Decode => iterations,
+                MatmulMode::Prefill => iterations,
+            }, elapsed),
+            "ok": true,
+        }),
+        Err(err) => serde_json::json!({
+            "shape": shape.name,
+            "family": shape.family,
+            "mode": mode.name(),
+            "backend": backend,
+            "weight_dtype": weight_dtype,
+            "activation_dtype": format!("{activation_dtype:?}"),
+            "activation_cast": activation_cast,
+            "in_dim": shape.in_dim,
+            "out_dim": shape.out_dim,
+            "iterations": iterations,
+            "ok": false,
+            "error": err.to_string(),
+        }),
+    }
+}
+
+fn time_iterations(
+    device: &Device,
+    warmup: usize,
+    iterations: usize,
+    mut f: impl FnMut() -> Result<Tensor>,
+) -> Result<Duration> {
+    for _ in 0..warmup {
+        let _ = f()?;
+    }
+    device.synchronize()?;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        let _ = f()?;
+    }
+    device.synchronize()?;
+    Ok(started.elapsed())
+}
+
+fn deterministic_values(len: usize, scale: f32) -> Vec<f32> {
+    (0..len)
+        .map(|idx| {
+            let a = (idx % 251) as f32 - 125.0;
+            let b = ((idx / 251) % 127) as f32 - 63.0;
+            (a * 0.007 + b * 0.003).sin() * scale
+        })
+        .collect()
 }
 
 fn run_quant_baseline_case(

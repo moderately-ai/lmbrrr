@@ -1,13 +1,13 @@
 ---
 id: benchmark-metal-quantized-matmul-kernels
 title: Benchmark Metal quantized matmul kernels
-status: todo
+status: done
 priority: p2
 dependencies: [load-minicpm-quantized-linear-weights]
 related: []
 scopes: [runtime/metal, quantization]
 shared_scopes: [docs/research]
-paths: []
+paths: [src/main.rs, docs/research/metal-quantized-matmul-benchmark.md]
 tags: [quantization, metal, benchmark]
 ---
 Benchmark Candle's existing Metal quantized matmul paths on MiniCPM/Qwen3.5 shapes before writing custom kernels.
