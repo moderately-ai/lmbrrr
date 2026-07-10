@@ -1,7 +1,7 @@
 ---
 id: measure-metal-roofline-and-dispatch-overhead
 title: Measure Metal roofline and dispatch overhead
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: [profile-dspark-verification-throughput-table]
@@ -9,9 +9,6 @@ scopes: [runtime/candle, runtime/metal]
 shared_scopes: [docs/research]
 paths: [src/main.rs, docs/research/metal-roofline-and-dispatch-overhead.md]
 tags: [performance, measurement, campaign-1000]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783703003
 ---
 ## Goal
 

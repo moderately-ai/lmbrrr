@@ -10,6 +10,10 @@ shared_scopes: [docs/research]
 paths: [src/qwen35.rs, src/minicpm.rs, src/main.rs, docs/research/single-command-buffer-decode.md]
 tags: [performance, kernels, campaign-1000]
 ---
+## Scope correction (roofline, 2026-07-10)
+
+Measured dispatch launch cost is 2.2 us; ~550 launches ~= 1.2 ms of the 16.5 ms token (~7%) — real but secondary. The primary dense inefficiency is small-GEMV underutilization (MLP shapes at ~83 GB/s vs 350 achievable; see docs/research/metal-roofline-and-dispatch-overhead.md), tracked in fix-runner-hot-path-naive-ops and the fork kernel tickets. This ticket stays worthwhile for the ~1.2 ms plus sync elimination, but the stage gate is shared with those tickets rather than owned here.
+
 ## Goal
 
 Encoder/command-buffer discipline for the fixed decode graph: encode the whole per-token forward into as few Metal command buffers as possible, keep buffers resident and pre-allocated, and eliminate host round-trips inside the forward (the only host sync per token should be the final sampled-token readback).

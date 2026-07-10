@@ -21,4 +21,5 @@ Clean up the per-token/per-layer naive ops found in the 2026-07-10 full-source a
 - `FullAttention`: eliminate the per-step full-cache `k_t` transpose+contiguous copy and the `repeat_kv` materialization where possible (broadcast GQA or Candle SDPA), keeping the softmax numerics parity-gated.
 - `MixedLinear`: quantify and, if material, remove the double F32 activation cast around `QMatMul` on Metal (fork lane if the kernel only accepts F32).
 - Fix `quant-matmul-bench` prefill throughput accounting: the `tokens_per_second` field divides iterations (not iterations * chunk_tokens) by elapsed, understating prefill_mm throughput by the chunk size.
+- Investigate the measured MLP GEMV underutilization (3584x1024 runs at ~83 GB/s vs ~350 achievable, ~4.7 ms/token on the table per docs/research/metal-roofline-and-dispatch-overhead.md): profile candle's Metal gemv/gemm dispatch for these shapes and either route to a better kernel (mlx gemv variants) or fix tiling in the fork.
 - Re-run the standard bench matrix and logits parity after each change; document results in docs/research.

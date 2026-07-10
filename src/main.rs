@@ -3981,9 +3981,14 @@ fn roofline(args: RooflineArgs) -> Result<()> {
     let mut copy_rows = Vec::new();
     for mb in [64usize, 256, 1024] {
         let elements = mb * 1024 * 1024 / dtype.size_in_bytes();
-        let x = Tensor::zeros(elements, dtype, &device)?;
-        let elapsed = time_iterations(&device, args.warmup, args.iterations, || Ok(x.copy()?))?;
-        let bytes_moved = 2 * (elements * dtype.size_in_bytes()) as f64 * args.iterations as f64;
+        // Materialize a non-trivial buffer first; a bare zeros tensor can be
+        // elided by the backend and reports absurd copy bandwidth.
+        let x = Tensor::zeros(elements, dtype, &device)?.affine(1.0, 0.5)?;
+        device.synchronize()?;
+        let elapsed = time_iterations(&device, args.warmup, args.iterations, || {
+            Ok(x.affine(1.000001, 0.0)?)
+        })?;
+        let bytes_moved = 2.0 * (elements * dtype.size_in_bytes()) as f64 * args.iterations as f64;
         copy_rows.push(serde_json::json!({
             "tensor_mb": mb,
             "seconds": secs(elapsed),
@@ -4013,8 +4018,9 @@ fn roofline(args: RooflineArgs) -> Result<()> {
         let weight = Tensor::zeros((out_dim, in_dim), dtype, &device)?;
         let linear = candle_nn::Linear::new(weight, None);
         let x = Tensor::zeros((1, in_dim), dtype, &device)?;
-        let elapsed =
-            time_iterations(&device, args.warmup, args.iterations, || linear.forward(&x))?;
+        let elapsed = time_iterations(&device, args.warmup, args.iterations, || {
+            Ok(linear.forward(&x)?)
+        })?;
         let weight_bytes = (out_dim * in_dim * dtype.size_in_bytes()) as f64;
         let per_iter = secs(elapsed) / args.iterations as f64;
         matvec_rows.push(serde_json::json!({
@@ -4035,7 +4041,7 @@ fn roofline(args: RooflineArgs) -> Result<()> {
         for _ in 0..args.dispatch_chain {
             y = y.affine(1.000001, 0.0)?;
         }
-        let _ = y.to_scalar::<f32>()?;
+        let _ = y.to_vec1::<f32>()?;
     }
     device.synchronize()?;
     let started = Instant::now();
@@ -4044,7 +4050,7 @@ fn roofline(args: RooflineArgs) -> Result<()> {
         for _ in 0..args.dispatch_chain {
             y = y.affine(1.000001, 0.0)?;
         }
-        let _ = y.to_scalar::<f32>()?;
+        let _ = y.to_vec1::<f32>()?;
     }
     device.synchronize()?;
     let tiny_chain_elapsed = started.elapsed();
