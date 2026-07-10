@@ -24,9 +24,9 @@ mkl = ["candle/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
 anyhow = { version = "1", features = ["backtrace"] }
 # Fork branch `lmbrrr` carries Metal kernel additions ahead of upstream
 # (i32 casts); pinned by rev, upstreamed as PRs when stable.
-candle = { package = "candle-core", git = "https://github.com/tomsanbear/candle.git", rev = "7b6d198111223c1be658d7005973a10199a901ba" }
-candle-nn = { git = "https://github.com/tomsanbear/candle.git", rev = "7b6d198111223c1be658d7005973a10199a901ba" }
-candle-transformers = { git = "https://github.com/tomsanbear/candle.git", rev = "7b6d198111223c1be658d7005973a10199a901ba" }
+candle = { package = "candle-core", git = "https://github.com/tomsanbear/candle.git", rev = "ff3666ece01382c948e06d5a3512d56c0c370cee" }
+candle-nn = { git = "https://github.com/tomsanbear/candle.git", rev = "ff3666ece01382c948e06d5a3512d56c0c370cee" }
+candle-transformers = { git = "https://github.com/tomsanbear/candle.git", rev = "ff3666ece01382c948e06d5a3512d56c0c370cee" }
 clap = { version = "4.2.4", features = ["derive"] }
 crossterm = "0.28"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
