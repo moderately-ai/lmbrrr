@@ -605,7 +605,10 @@ struct GatedDeltaNet {
     in_proj_b: MixedLinear,
     in_proj_a: MixedLinear,
     out_proj: MixedLinear,
-    conv_weight: Tensor,
+    // Per-tap broadcast tensors (1, conv_dim, 1), precomputed at load: the
+    // narrow+reshape of the raw (conv_dim, 1, ksz) weight is non-contiguous
+    // and would run a copy kernel per tap per decode step.
+    conv_taps: Vec<Tensor>,
     dt_bias_f32: Tensor,
     a_log_exp_f32: Tensor,
     norm: Qwen35RmsNorm,
@@ -631,6 +634,11 @@ impl GatedDeltaNet {
             dt_bias
                 .to_dtype(DType::F32)?
                 .reshape((1, 1, cfg.linear_num_value_heads))?;
+        let conv_weight = vb.get((conv_dim, 1, cfg.linear_conv_kernel_dim), "conv1d.weight")?;
+        let conv_weight = conv_weight.squeeze(1)?;
+        let conv_taps = (0..cfg.linear_conv_kernel_dim)
+            .map(|k| conv_weight.narrow(1, k, 1)?.reshape((1, conv_dim, 1)))
+            .collect::<candle::Result<Vec<_>>>()?;
         let a_log = vb.get(cfg.linear_num_value_heads, "A_log")?;
         let a_log_exp_f32 =
             a_log
@@ -663,7 +671,7 @@ impl GatedDeltaNet {
                 cfg.hidden_size,
                 vb.pp("out_proj"),
             )?),
-            conv_weight: vb.get((conv_dim, 1, cfg.linear_conv_kernel_dim), "conv1d.weight")?,
+            conv_taps,
             dt_bias_f32,
             a_log_exp_f32,
             norm: Qwen35RmsNorm::new(
@@ -833,7 +841,6 @@ impl GatedDeltaNet {
         };
         let full_len = full.dim(2)?;
         let start = full_len - l;
-        let weight = self.conv_weight.squeeze(1)?;
         // Shifted-window depthwise conv: position t accumulates kernel taps in
         // ascending k order, matching the original per-position loop's
         // floating-point order exactly (left zero padding covers t < left).
@@ -851,14 +858,9 @@ impl GatedDeltaNet {
                 2,
             )?
         };
-        let mut acc = padded
-            .narrow(2, 0, l)?
-            .broadcast_mul(&weight.narrow(1, 0, 1)?.reshape((1, c, 1))?)?;
+        let mut acc = padded.narrow(2, 0, l)?.broadcast_mul(&self.conv_taps[0])?;
         for k in 1..ksz {
-            acc = (acc
-                + padded
-                    .narrow(2, k, l)?
-                    .broadcast_mul(&weight.narrow(1, k, 1)?.reshape((1, c, 1))?)?)?;
+            acc = (acc + padded.narrow(2, k, l)?.broadcast_mul(&self.conv_taps[k])?)?;
         }
         let out = acc.silu()?;
 

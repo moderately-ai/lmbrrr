@@ -5361,7 +5361,10 @@ fn generate_tokens(
         next_input_elapsed += input_start.elapsed();
         let decode_model_start = Instant::now();
         logits = model.forward(&input, None::<&ProcessedImages>, downsample_mode, position)?;
-        device.synchronize()?;
+        // No synchronize here: the argmax readback in sample_next_token is the
+        // only wait per token (an extra wait costs ~1-2ms of OS latency and
+        // purges the Metal buffer pool). decode_model_elapsed is encode/queue
+        // time; the GPU wait lands in sampling_elapsed.
         decode_model_elapsed += decode_model_start.elapsed();
         position += 1;
     }
@@ -5644,8 +5647,9 @@ fn trace_capture_layers(requested: &[usize], num_layers: usize) -> Result<Vec<us
 fn argmax_token(logits: &Tensor, device: &Device) -> Result<(u32, Duration)> {
     device.synchronize()?;
     let started = Instant::now();
+    // to_scalar already waits for the GPU; a trailing synchronize would only
+    // add another wait + buffer-pool purge.
     let token = logits.squeeze(0)?.argmax(D::Minus1)?.to_scalar::<u32>()?;
-    device.synchronize()?;
     Ok((token, started.elapsed()))
 }
 
@@ -5657,7 +5661,6 @@ fn argmax_tokens(logits: &Tensor, device: &Device) -> Result<(Vec<u32>, Duration
         .argmax(D::Minus1)?
         .to_device(&Device::Cpu)?
         .to_vec1::<u32>()?;
-    device.synchronize()?;
     Ok((tokens, started.elapsed()))
 }
 
