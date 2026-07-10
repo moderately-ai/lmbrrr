@@ -25,6 +25,13 @@ pub struct DsparkRopeParameters {
     pub rope_theta: f64,
 }
 
+fn default_markov_head_type() -> String {
+    "vanilla".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct DsparkConfig {
     pub vocab_size: usize,
@@ -40,6 +47,15 @@ pub struct DsparkConfig {
     pub markov_rank: usize,
     pub target_layer_ids: Vec<usize>,
     pub rope_parameters: DsparkRopeParameters,
+    // Head-variant switches: the port implements exactly vanilla Markov +
+    // markov-feature confidence; loading must fail loudly on anything else
+    // rather than ignore gate_proj/joint_proj tensors and drift silently.
+    #[serde(default = "default_markov_head_type")]
+    pub markov_head_type: String,
+    #[serde(default = "default_true")]
+    pub enable_confidence_head: bool,
+    #[serde(default = "default_true")]
+    pub confidence_head_with_markov: bool,
 }
 
 impl DsparkConfig {
@@ -52,30 +68,31 @@ impl DsparkConfig {
     }
 }
 
-/// Standard Qwen3 RMSNorm (weight * x_hat, computed in F32, no zero-centering).
+/// Standard Qwen3 RMSNorm (weight * x_hat, no zero-centering), routed through
+/// the fused Metal kernel (1 dispatch, F32 accumulation inside). The drafter
+/// only ever normalizes model-dtype activations, so a single dtype-matched
+/// weight suffices.
 #[derive(Clone, Debug)]
 struct RmsNorm {
-    weight_f32: Tensor,
+    weight: Tensor,
     eps: f64,
 }
 
 impl RmsNorm {
     fn load(vb: &VarBuilder, name: &str, size: usize, eps: f64) -> Result<Self> {
         Ok(Self {
-            weight_f32: vb.get(size, name)?.to_dtype(DType::F32)?,
+            weight: vb.get(size, name)?,
             eps,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> candle::Result<Tensor> {
-        let dtype = xs.dtype();
-        let xs_f32 = xs.to_dtype(DType::F32)?;
-        let variance = xs_f32.sqr()?.mean_keepdim(D::Minus1)?;
-        let inv = (variance + self.eps)?.powf(-0.5)?;
-        xs_f32
-            .broadcast_mul(&inv)?
-            .broadcast_mul(&self.weight_f32)?
-            .to_dtype(dtype)
+        let xs = if xs.is_contiguous() {
+            xs.clone()
+        } else {
+            xs.contiguous()?
+        };
+        candle_nn::ops::rms_norm(&xs, &self.weight, self.eps as f32)
     }
 }
 
@@ -184,6 +201,19 @@ pub struct DraftProposal {
 impl DsparkDrafter {
     pub fn load(dir: &Path, device: &Device, dtype: DType) -> Result<Self> {
         let config = DsparkConfig::from_dir(dir)?;
+        if config.markov_head_type != "vanilla"
+            || !config.enable_confidence_head
+            || !config.confidence_head_with_markov
+        {
+            anyhow::bail!(
+                "drafter checkpoint wants markov_head_type={:?} \
+                 enable_confidence_head={} confidence_head_with_markov={}; this \
+                 port implements only vanilla + markov-feature confidence",
+                config.markov_head_type,
+                config.enable_confidence_head,
+                config.confidence_head_with_markov,
+            );
+        }
         let weights = dir.join("model.safetensors");
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights.clone()], dtype, device)
@@ -287,12 +317,18 @@ impl DsparkDrafter {
         Ok(())
     }
 
-    /// One draft block: [anchor emb, mask emb x (gamma-1)] at absolute
-    /// positions anchor_pos..anchor_pos+gamma, attending bidirectionally over
-    /// cached context + the block. Returns greedy Markov-sampled tokens plus
-    /// per-position confidence logits.
+    /// One draft block at absolute positions anchor_pos..anchor_pos+block_size,
+    /// attending bidirectionally over cached context + the block. The backbone
+    /// ALWAYS runs on the full block_size positions — training only ever saw
+    /// full blocks, and bidirectional attention makes every h_k depend on the
+    /// trailing mask tokens, so a shortened block is out-of-distribution.
+    /// Only the first `gamma` positions go through lm_head/Markov/confidence.
     pub fn propose(&mut self, anchor_token: u32, anchor_pos: usize, gamma: usize) -> Result<DraftProposal> {
-        let mut ids = vec![self.config.mask_token_id; gamma];
+        let block = self.config.block_size;
+        if gamma == 0 || gamma > block {
+            anyhow::bail!("gamma {gamma} outside 1..={block}");
+        }
+        let mut ids = vec![self.config.mask_token_id; block];
         ids[0] = anchor_token;
         let mut hidden = self.embed(&ids)?;
         let (b, q_len, _) = hidden.dims3()?;
@@ -346,8 +382,10 @@ impl DsparkDrafter {
             let gated = (layer.gate_proj.forward(&normed)?.silu()? * layer.up_proj.forward(&normed)?)?;
             hidden = (residual + layer.down_proj.forward(&gated)?)?;
         }
-        let block_hidden = self.norm.forward(&hidden)?;
-        let base_logits = self.lm_head.forward(&block_hidden)?;
+        // Heads read only the proposal prefix; narrowing before lm_head skips
+        // the vocab projection for the unused trailing block positions.
+        let block_hidden = self.norm.forward(&hidden)?.narrow(1, 0, gamma)?;
+        let base_logits = self.lm_head.forward(&block_hidden.contiguous()?)?;
 
         // Left-to-right greedy Markov sampling; corrected logits define p_d.
         // The token chain stays on device (argmax feeds the next index_select

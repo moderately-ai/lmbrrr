@@ -4766,11 +4766,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let wall_seconds = secs(wall_start.elapsed());
     model.set_device_capture(None);
 
-    let mean_tau = if rounds > 0 {
-        committed.len() as f64 / rounds as f64
-    } else {
-        0.0
-    };
+    // Exact per-round committed tokens (accepted + bonus) from the histogram;
+    // committed.len()/rounds counts the prefill token and loses EOS-truncated
+    // tokens, a ~1/rounds bias the scheduler's break-even margin can't afford.
+    let mean_tau = mean_committed_per_round(&accepted_histogram, rounds);
     let advisory_prefix = baseline
         .generated_token_ids
         .iter()
@@ -4992,11 +4991,7 @@ fn dspark_run(args: DsparkRunArgs) -> Result<()> {
             "rounds": run.rounds,
             "rollbacks": run.rollbacks,
             "accepted_histogram": run.accepted_histogram,
-            "mean_accepted_length": if run.rounds > 0 {
-                run.committed.len() as f64 / run.rounds as f64
-            } else {
-                0.0
-            },
+            "mean_accepted_length": mean_committed_per_round(&run.accepted_histogram, run.rounds),
             "prefill_seconds": run.prefill_seconds,
             "verify_seconds": run.verify_seconds,
             "readvance_seconds": run.readvance_seconds,
@@ -5375,6 +5370,20 @@ fn analyze_verification(
         bonus_token_id,
         reconstructed_token_ids,
     })
+}
+
+/// Mean committed tokens per round (accepted drafts + bonus) straight from
+/// the acceptance histogram — exact, unlike committed.len()/rounds.
+fn mean_committed_per_round(accepted_histogram: &[usize], rounds: usize) -> f64 {
+    if rounds == 0 {
+        return 0.0;
+    }
+    let committed: usize = accepted_histogram
+        .iter()
+        .enumerate()
+        .map(|(accepted, count)| (accepted + 1) * count)
+        .sum();
+    committed as f64 / rounds as f64
 }
 
 fn is_greedy_generation(generation: &GenerationArgs) -> bool {
