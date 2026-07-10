@@ -156,6 +156,26 @@ def regenerate(
     volume.commit()
 
 
+@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=1800)
+def drafter_fixture(
+    checkpoint: str = "runs/checkpoints/lmbrrr/dspark_block8_minicpm_v46/step_24",
+    output: str = "fixtures/drafter-parity.safetensors",
+) -> None:
+    """Pinned-env parity fixture for the Candle drafter port (CPU is enough)."""
+    os.makedirs(os.path.dirname(f"/vol/{output}"), exist_ok=True)
+    _run(
+        [
+            "python",
+            "/lmbrrr-dspark/make_drafter_fixture.py",
+            "--checkpoint",
+            f"/vol/{checkpoint}",
+            "--output",
+            f"/vol/{output}",
+        ]
+    )
+    volume.commit()
+
+
 @app.function(image=image, volumes=VOLUMES, timeout=600)
 def inspect_data(path: str = "data/regen-smoke.jsonl", samples: int = 3) -> str:
     """Print head/count of a volume JSONL so stages can be reviewed cheaply."""

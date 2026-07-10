@@ -77,6 +77,22 @@ enum Command {
     Roofline(RooflineArgs),
     VerifyTable(VerifyTableArgs),
     DsparkRun(DsparkRunArgs),
+    DsparkDrafterParity(DsparkDrafterParityArgs),
+}
+
+#[derive(Parser, Debug)]
+struct DsparkDrafterParityArgs {
+    #[arg(long, default_value = "target/dspark-drafter-smoke/step_24")]
+    checkpoint: PathBuf,
+
+    #[arg(long, default_value = "target/dspark-fixtures/drafter-parity.safetensors")]
+    fixture: PathBuf,
+
+    #[arg(long)]
+    cpu: bool,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -1211,7 +1227,104 @@ fn main() -> Result<()> {
         Command::Roofline(args) => roofline(args),
         Command::VerifyTable(args) => verify_table(args),
         Command::DsparkRun(args) => dspark_run(args),
+        Command::DsparkDrafterParity(args) => dspark_drafter_parity(args),
     }
+}
+
+fn dspark_drafter_parity(args: DsparkDrafterParityArgs) -> Result<()> {
+    use lmbrrr::dspark::DsparkDrafter;
+
+    let device = select_device(args.cpu)?;
+    let dtype = if device.is_cpu() { DType::F32 } else { DType::BF16 };
+    let mut drafter = DsparkDrafter::load(&args.checkpoint, &device, dtype)?;
+    let gamma = drafter.config.block_size;
+
+    let fixture = candle::safetensors::load(&args.fixture, &device)
+        .with_context(|| format!("load fixture {}", args.fixture.display()))?;
+    let ctx = fixture
+        .get("target_hidden_states")
+        .context("fixture missing target_hidden_states")?
+        .clone();
+    let draft_ids = fixture
+        .get("draft_input_ids")
+        .context("fixture missing draft_input_ids")?
+        .to_dtype(DType::U32)?
+        .to_device(&Device::Cpu)?
+        .to_vec2::<u32>()?;
+    let anchor = draft_ids[0][0];
+    let ctx_len = ctx.dim(1)?;
+
+    drafter.append_context(&ctx, 0)?;
+    let proposal = drafter.propose(anchor, ctx_len, gamma)?;
+
+    let expected_tokens = fixture
+        .get("sampled_tokens")
+        .context("fixture missing sampled_tokens")?
+        .to_dtype(DType::U32)?
+        .to_device(&Device::Cpu)?
+        .to_vec2::<u32>()?[0]
+        .clone();
+    let expected_conf = fixture
+        .get("confidence_logits")
+        .context("fixture missing confidence_logits")?
+        .to_dtype(DType::F32)?
+        .to_device(&Device::Cpu)?
+        .to_vec2::<f32>()?[0]
+        .clone();
+
+    let max_abs = |ours: &Tensor, name: &str| -> Result<f64> {
+        let theirs = fixture
+            .get(name)
+            .with_context(|| format!("fixture missing {name}"))?;
+        let diff = (ours.to_dtype(DType::F32)? - theirs.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        Ok(diff as f64)
+    };
+    let hidden_diff = max_abs(&proposal.block_hidden, "block_hidden")?;
+    let base_diff = max_abs(&proposal.base_logits, "base_logits")?;
+    let corrected_diff = max_abs(&proposal.corrected_logits, "corrected_logits")?;
+
+    let token_matches = proposal
+        .tokens
+        .iter()
+        .zip(expected_tokens.iter())
+        .filter(|(a, b)| a == b)
+        .count();
+    let conf_max_diff = proposal
+        .confidence_logits
+        .iter()
+        .zip(expected_conf.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+
+    let passed = token_matches == gamma && hidden_diff < 0.25 && conf_max_diff < 0.25;
+    let report = serde_json::json!({
+        "kind": "lmbrrr_dspark_drafter_parity",
+        "schema_version": 1,
+        "checkpoint": args.checkpoint,
+        "fixture": args.fixture,
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "gamma": gamma,
+        "ctx_len": ctx_len,
+        "sampled_tokens": proposal.tokens,
+        "expected_tokens": expected_tokens,
+        "token_matches": token_matches,
+        "max_abs_block_hidden_diff": hidden_diff,
+        "max_abs_base_logits_diff": base_diff,
+        "max_abs_corrected_logits_diff": corrected_diff,
+        "confidence_logits": proposal.confidence_logits,
+        "expected_confidence_logits": expected_conf,
+        "max_abs_confidence_diff": conf_max_diff,
+        "passed": passed,
+    });
+    write_json_report(args.output.as_ref(), &report)?;
+    if !passed {
+        anyhow::bail!("drafter parity failed");
+    }
+    Ok(())
 }
 
 fn run(args: RunArgs) -> Result<()> {
