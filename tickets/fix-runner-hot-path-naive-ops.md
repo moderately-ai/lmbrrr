@@ -1,7 +1,7 @@
 ---
 id: fix-runner-hot-path-naive-ops
 title: Fix runner hot path naive ops
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: []
@@ -9,10 +9,17 @@ scopes: [runtime/candle]
 shared_scopes: [docs/research]
 paths: []
 tags: [performance]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783704428
 ---
 ## Goal
 
 Clean up the per-token/per-layer naive ops found in the 2026-07-10 full-source audit that burn Metal dispatches on every decode step, each gated by strict logits parity and a no-regression bench.
+
+## Progress (2026-07-10)
+
+Pass 1 landed (commit 8f7d14b): RMSNorm F32 weight cache with pre-applied zero-centered +1, on-device causal mask via log(tril2) replacing the O(seq*total) CPU build, quant-bench prefill tokens/s accounting fixed. Strict logits parity passes; decode 65.5 tok/s (unchanged, as expected — these were small dispatches), prefill ~805 tok/s. Remaining below: SDPA switch, k_t cache-copy + repeat_kv elimination, MixedLinear F32 round-trip, and the MLP GEMV tiling investigation — these carry the real tok/s and likely end in fork kernels.
 
 ## Acceptance
 
