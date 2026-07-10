@@ -10,6 +10,10 @@ shared_scopes: []
 paths: []
 tags: [performance, decode-audit-2026-07-10]
 ---
+## Progress (2026-07-10)
+
+BTreeMap allocator landed (fork 733bfcfd, validated 128/128 Metal suite; lmbrrr pinned): `find_available_buffer` is a range(size..) early-exit scan. Measured decode-neutral today (CPU encode path is hidden behind GPU execution) — see fix-metal-buffer-pool-purge-and-residency-commits for the A/B. Remaining items (Commands mutex, encoder HashSet, fence-map scans) stay parked until fusion/single-CB work makes the CPU path measurable; measure with Instruments before touching.
+
 ## Goal
 
 Per-op constants in the fork, multiplied by ~2100 dispatches/token today (shrinks as fusion lands, but the constants remain for every surviving op):
