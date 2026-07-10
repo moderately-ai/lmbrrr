@@ -1,7 +1,7 @@
 ---
 id: design-full-dspark-drafter
 title: Design full DSpark drafter implementation
-status: todo
+status: done
 priority: p1
 dependencies: [implement-real-eagle-recurrent-drafter]
 related: []

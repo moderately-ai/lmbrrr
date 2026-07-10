@@ -16,8 +16,11 @@ Train a DSpark-style drafter with a parallel backbone plus lightweight semi-auto
 
 ## Acceptance
 
-- Build a trace dataset with target hidden features, target top-k distributions, target accepted-token labels, and draft-position labels.
-- Train a parallel block drafter that emits base logits for multiple future positions in one forward path.
-- Add a Markov sequential head that conditions each position on the previous sampled draft token.
-- Train a confidence head using per-position prefix survival labels derived from draft/target distribution mismatch.
-- Export a safetensors artifact and manifest with candidate vocabulary, confidence head, draft width, and calibration metadata.
+- Build a trace dataset in binary shards (safetensors/npz, not per-token JSON) capturing every block position: anchor hidden features from the capture layers, target tokens, and target top-k distributions with a tail-mass bucket (k >= 64) or raw hidden states for local frozen-LM-head projection. The current JSON exporter only records the last position per forward and is not viable at corpus scale.
+- Train a parallel block drafter that emits base logits for multiple future positions in one forward path, with DFlash-style target-context injection into draft K/V.
+- Add a Markov sequential head (low-rank transition bias B = W1*W2, r ~= 256) that conditions each position on the previous sampled draft token.
+- Use the full vocabulary via the frozen shared target embedding and LM head; no observed-vocabulary output head.
+- Train with the paper's three-term objective: cross-entropy + total-variation distribution matching + confidence BCE, position-weighted by exp(-(k-1)/gamma) (default weights 0.1 / 0.9 / 1.0).
+- Train a confidence head using per-position prefix survival labels c* = 1 - 0.5 * total-variation(draft, target).
+- Trainer runs on CUDA (Modal credits are available for corpus generation and training) as well as local MPS for smoke runs; evaluate reusing DeepSpec before writing training code from scratch.
+- Export a safetensors artifact and manifest with backbone, Markov head, confidence head, draft width, capture layers, and calibration metadata.

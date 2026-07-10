@@ -19,5 +19,9 @@ Load the trained DSpark drafter in Rust and run a real speculative cycle: one ta
 - Load the DSpark backbone, Markov head, and confidence head from safetensors.
 - Propose a draft block before target verification without computing target hidden states for future positions.
 - Verify the scheduled prefix in one target chunk and reconstruct exact greedy output.
+- Run multi-round speculative generation: after each verification, accept prefix + bonus token and continue drafting from the new anchor without re-running prompt prefill.
+- Add DeltaNet conv/recurrent state and full-attention KV cache snapshot/restore (or restore-then-re-advance over the accepted prefix) so a rejected suffix cannot leave stale layer state; the current runner mutates conv_state/recurrent_state/KvCache in place with no rollback, which limits it to a single cycle.
+- Gate state-rollback correctness with an exact greedy oracle over at least 128 generated tokens on multiple prompts.
+- Run the drafter as Candle tensors on the target device, sharing the frozen target embedding and LM head; no per-token CPU hidden-state export or scalar Rust matmul loops in the accelerated path.
 - Report draft latency, verify latency, accepted length, verifier waste, confidence scores, and target calls saved.
 - Compare directly against the recurrent EAGLE runner on the same prompts and draft widths.
