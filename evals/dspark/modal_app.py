@@ -105,7 +105,12 @@ def smoke() -> None:
 
 
 @app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=3600)
-def download_prompts(sample_size: int = 2000, test_size: float = 0.05) -> None:
+def download_prompts(
+    sample_size: int = 2000,
+    test_size: float = 0.05,
+    train_name: str = "perfectblend_train.jsonl",
+    test_name: str = "perfectblend.jsonl",
+) -> None:
     """Open-PerfectBlend prompts -> /vol/data via DeepSpec's own splitter."""
     os.makedirs("/vol/data", exist_ok=True)
     _run(
@@ -117,22 +122,25 @@ def download_prompts(sample_size: int = 2000, test_size: float = 0.05) -> None:
             "--test-size",
             str(test_size),
             "--train-output-path",
-            "/vol/data/perfectblend_train.jsonl",
+            f"/vol/data/{train_name}",
             "--test-output-dir",
             "/vol/data/eval_datasets",
+            "--test-output-name",
+            test_name,
             "--skip-existing",
         ]
     )
     volume.commit()
 
 
-@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=6 * 3600)
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=8 * 3600)
 def regenerate(
     num_samples: int = 500,
     max_new_tokens: int = 1024,
     batch_size: int = 16,
     input_name: str = "perfectblend_train.jsonl",
     output_name: str = "regen-smoke.jsonl",
+    skip_samples: int = 0,
 ) -> None:
     """Replace assistant turns with target-model generations (non-thinking)."""
     _run(
@@ -147,12 +155,51 @@ def regenerate(
             f"/vol/data/{output_name}",
             "--num-samples",
             str(num_samples),
+            "--skip-samples",
+            str(skip_samples),
             "--max-new-tokens",
             str(max_new_tokens),
             "--batch-size",
             str(batch_size),
         ]
     )
+    volume.commit()
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=10 * 3600)
+def regenerate_sharded(
+    total_samples: int = 20000,
+    shards: int = 8,
+    max_new_tokens: int = 1024,
+    batch_size: int = 32,
+    input_name: str = "perfectblend_train.jsonl",
+    output_prefix: str = "regen-round1",
+) -> None:
+    """Fan regeneration across parallel GPU containers, then merge shards."""
+    per_shard = (total_samples + shards - 1) // shards
+    calls = [
+        {
+            "num_samples": per_shard,
+            "skip_samples": shard * per_shard,
+            "max_new_tokens": max_new_tokens,
+            "batch_size": batch_size,
+            "input_name": input_name,
+            "output_name": f"{output_prefix}-shard{shard:02d}.jsonl",
+        }
+        for shard in range(shards)
+    ]
+    handles = [regenerate.spawn(**call) for call in calls]
+    for handle in handles:
+        handle.get()
+    volume.reload()
+    merged = f"/vol/data/{output_prefix}.jsonl"
+    with open(merged, "w", encoding="utf-8") as out_handle:
+        for shard in range(shards):
+            shard_path = f"/vol/data/{output_prefix}-shard{shard:02d}.jsonl"
+            with open(shard_path, "r", encoding="utf-8") as in_handle:
+                for line in in_handle:
+                    out_handle.write(line)
+    print(f"merged {shards} shards -> {merged}", flush=True)
     volume.commit()
 
 
@@ -194,7 +241,7 @@ def inspect_data(path: str = "data/regen-smoke.jsonl", samples: int = 3) -> str:
     return report
 
 
-@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=6 * 3600)
+@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=6 * 3600)
 def prepare_cache(
     train_data: str = "data/regen-smoke.jsonl",
     cache_name: str = "target-cache-smoke",
@@ -233,12 +280,13 @@ def prepare_cache(
     volume.commit()
 
 
-@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600)
+@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600)
 def train(
     cache_name: str = "target-cache-smoke",
     global_batch_size: int | None = None,
     num_train_epochs: int | None = None,
     logging_steps: int | None = 1,
+    torch_compile: bool = True,
     exp_name: str | None = None,
 ) -> None:
     """Train the drafter on a prepared cache; checkpoints land in /vol/runs."""
@@ -249,6 +297,7 @@ def train(
         opts.append(f"train.num_train_epochs={num_train_epochs}")
     if logging_steps is not None:
         opts.append(f"logging.logging_steps={logging_steps}")
+    opts.append(f"train.torch_compile={'true' if torch_compile else 'false'}")
     cmd = ["python", "/deepspec/train.py", "--config", TRAIN_CONFIG]
     for opt in opts:
         cmd.extend(["--opts", opt])

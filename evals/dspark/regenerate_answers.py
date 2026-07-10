@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--num-samples", type=int, default=None)
+    parser.add_argument("--skip-samples", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -94,6 +95,8 @@ def main() -> int:
     skipped = 0
     with open(args.input, "r", encoding="utf-8") as handle:
         for line_no, line in enumerate(handle):
+            if line_no < args.skip_samples:
+                continue
             if args.num_samples is not None and len(pending) >= args.num_samples:
                 break
             row = json.loads(line)
