@@ -1,7 +1,7 @@
 ---
 id: emit-per-position-verify-states
 title: Emit per-position states from verify chunks to eliminate re-advance
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [implement-speculative-state-rollback, tree-speculation-over-dspark, integrate-dspark-block-runner]
@@ -10,6 +10,10 @@ shared_scopes: [docs/research]
 paths: [src/qwen35.rs, src/main.rs, docs/research/per-position-verify-states.md]
 tags: [speculative, dspark, performance, campaign-1000]
 ---
+## Outcome (2026-07-10)
+
+Landed (commit 847563d) as lazy closed-form reconstruction (not full materialization): verify chunks retain S0/kc/delta/gcs/conv-window under a runner-controlled capture flag; partial accept computes S_j at the accepted position (one narrow+matmul per layer) and truncates full-attention KV to snapshot_len+prefix (the chunk's rows are causally valid — kept, not rewritten). Legacy restore+re-advance behind LMBRRR_READVANCE_ROLLBACK=1. Design cross-checked by a fresh-agent audit before implementation (closed form == chunk-end update at j=C-1). Gates: 33/33, state-integrity oracle both paths/prompts, envelopes unchanged. Measured: rollback 25.1 -> ~2 ms; round-1 drafter 0.59x -> 0.85x greedy (math γ3, 66.4 tok/s), 0.41x -> 0.63x (tides). Break-even tau lowered as designed; verify (~24.6 ms) now dominates the round -> fuse-deltanet-decode-step-kernel / chunk-kernel lane.
+
 ## Goal
 
 Remove the rollback re-advance forward entirely by making verify chunks emit restorable per-position DeltaNet states, so a partial accept selects the state at the accepted position instead of restoring the pre-chunk snapshot and re-running the accepted prefix.
