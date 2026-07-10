@@ -17,6 +17,10 @@ lease_expires_at: 1783704428
 
 Clean up the per-token/per-layer naive ops found in the 2026-07-10 full-source audit that burn Metal dispatches on every decode step, each gated by strict logits parity and a no-regression bench.
 
+## Update (decode audit, 2026-07-10, pass 3 scope)
+
+Fresh-agent audit quantified the remaining items. RMSNorm: the hand-rolled `Qwen35RmsNorm::forward` (qwen35.rs:168-175) is 9 dispatches and there are 79 norm applications per token (48 layer + 18 DeltaNet group + 12 q/k + final) -> ~710 dispatches/token, the single largest bucket; switching to `candle_nn::ops::rms_norm` (1 dispatch) saves ~640 — weight must be stored BF16 and q/k-norm inputs (narrows of q_gate) need one `.contiguous()` each. SDPA-vector confirmed drop-in for decode (ops.rs:1078-1093): head_dim 256, q_seq==1, native GQA (no repeat_kv), strided k/v (feed the cache narrow directly — no k_t transpose/contiguous), auto 2-pass at k_seq>=1024; fold 1/sqrt(d) into the sdpa scale arg. Current cost eliminated: repeat_kv = 4 whole-cache copy2d per K and V + transpose-contiguous ~= 12 MB/layer at 1k ctx (~72 MB/token, linear in context) + F32 softmax cast pair. Residual after SDPA: with partial_rotary_factor<1 the rotary cat branch (qwen35.rs:216-223) still does 2 cats + narrows per q/k per layer (~25 dispatches/token) — rotate in place or passthrough kernel. New sibling tickets from the same audit: fix-metal-buffer-pool-purge-and-residency-commits, remove-per-token-decode-synchronize, keep-deltanet-recurrent-state-f32, precompute-deltanet-conv-taps, narrow-prefill-hidden-before-lm-head, two-stage-argmax-device-sampling, reduce-metal-dispatch-layer-overheads.
+
 ## Progress (2026-07-10, pass 2)
 
 - GEMV routing landed in the fork (rev ff3666ec): candle's Metal backend sent every matmul to the mlx GEMM tile kernel; call_mlx_gemv existed fully implemented but was never dispatched and not even exported. Now m==1/n==1 matmuls route to gemv with gemm fallback on incompatible strides. Validated in-repo (45/45 Metal matmul+cast tests) and in lmbrrr: thermally-controlled interleaved A/B shows +5.7% steady decode (60.0 -> 63.4 tok/s), strict parity clean.

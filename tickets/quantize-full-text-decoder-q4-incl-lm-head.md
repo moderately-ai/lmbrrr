@@ -10,6 +10,10 @@ shared_scopes: [docs/research]
 paths: [src/quant_convert.rs, src/quant_sensitivity.rs, src/quantized_linear.rs, src/main.rs, evals/**, docs/research/q4-full-decoder-policy.md]
 tags: [quantization, performance, campaign-1000]
 ---
+## Update (decode audit, 2026-07-10)
+
+No wiring exists yet for the headline item: `lm_head` is a plain `candle_nn::Linear` built from tied embeddings (minicpm.rs:445,453-461) and `apply_quantized_text_artifact` (minicpm.rs:501-506 -> qwen35.rs:1360-1369) only iterates decoder layers — the 508 MB/token read (34% of all weight bytes, ~1.45 ms) has no quantization hook. Add a MixedLinear slot / replacement path for lm_head as part of this ticket. Also: `MixedLinear::from_qtensor` sets `force_f32_input` (quantized_linear.rs:39-59), so the quantized path adds 2 casts per projection (~50 extra dispatches/token model-wide) — the quantized gemv should accept BF16 activations (bf16-activation-quantized-matmul-metal) or activations should ride F32 through the layer.
+
 ## Goal
 
 Cut per-token weight reads from ~1.5 GB BF16 to ~0.45 GB by quantizing every text linear AND the lm_head (248k vocab x 1024 = 0.51 GB BF16, currently protected) to Q4K, lifting the bandwidth roofline from ~270 to ~900 forwards/s. Campaign quality bar: quality is reported, not gating; protections become advisory.
