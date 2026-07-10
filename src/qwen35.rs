@@ -152,18 +152,17 @@ impl Qwen35TraceRecorder {
 
 #[derive(Clone, Debug)]
 struct Qwen35RmsNorm {
-    weight: Tensor,
+    // F32 weight with the zero-centered +1.0 pre-applied at load; the old
+    // per-call cast + add was pure per-token overhead across ~50 norms.
+    weight_f32: Tensor,
     eps: f64,
-    zero_centered: bool,
 }
 
 impl Qwen35RmsNorm {
     fn new(size: usize, eps: f64, zero_centered: bool, vb: VarBuilder) -> Result<Self> {
-        Ok(Self {
-            weight: vb.get(size, "weight")?,
-            eps,
-            zero_centered,
-        })
+        let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
+        let weight_f32 = if zero_centered { (weight + 1.0)? } else { weight };
+        Ok(Self { weight_f32, eps })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -172,13 +171,7 @@ impl Qwen35RmsNorm {
         let variance = xs_f32.sqr()?.mean_keepdim(D::Minus1)?;
         let inv = (variance + self.eps)?.powf(-0.5)?;
         let ys = xs_f32.broadcast_mul(&inv)?;
-        let weight = self.weight.to_dtype(DType::F32)?;
-        let weight = if self.zero_centered {
-            (weight + 1.0)?
-        } else {
-            weight
-        };
-        ys.broadcast_mul(&weight)?.to_dtype(dtype)
+        ys.broadcast_mul(&self.weight_f32)?.to_dtype(dtype)
     }
 }
 
@@ -1314,11 +1307,17 @@ impl Qwen35TextModel {
     }
 
     fn causal_mask(&self, b: usize, tgt: usize, offset: usize) -> Result<Tensor> {
-        let minf = f32::NEG_INFINITY;
-        let total = tgt + offset;
-        let mask = (0..tgt)
-            .flat_map(|i| (0..total).map(move |j| if j <= i + offset { 0.0 } else { minf }))
-            .collect::<Vec<_>>();
-        Tensor::from_slice(&mask, (b, 1, tgt, total), &self.device)?.to_dtype(self.dtype)
+        // On-device construction: log(tril) is exactly 0 on visible entries and
+        // -inf on masked ones, replacing the O(tgt * total) CPU build + upload.
+        let causal = Tensor::tril2(tgt, DType::F32, &self.device)?.log()?;
+        let mask = if offset > 0 {
+            let visible = Tensor::zeros((tgt, offset), DType::F32, &self.device)?;
+            Tensor::cat(&[&visible, &causal], 1)?
+        } else {
+            causal
+        };
+        mask.reshape((1, 1, tgt, tgt + offset))?
+            .broadcast_as((b, 1, tgt, tgt + offset))?
+            .to_dtype(self.dtype)
     }
 }

@@ -2788,6 +2788,7 @@ fn bench_dense_matmul(
         None,
         result,
         iterations,
+        input_cpu.dim(1).unwrap_or(1),
     )
 }
 
@@ -2828,6 +2829,7 @@ fn bench_quant_matmul(
         (activation_dtype != DType::F32).then_some("to_f32"),
         result,
         iterations,
+        input_cpu.dim(1).unwrap_or(1),
     )
 }
 
@@ -2840,6 +2842,7 @@ fn matmul_bench_row(
     activation_cast: Option<&str>,
     result: Result<(Duration, Duration)>,
     iterations: usize,
+    tokens_per_iteration: usize,
 ) -> serde_json::Value {
     match result {
         Ok((prepare_elapsed, elapsed)) => serde_json::json!({
@@ -2856,10 +2859,7 @@ fn matmul_bench_row(
             "prepare_seconds": secs(prepare_elapsed),
             "elapsed_seconds": secs(elapsed),
             "seconds_per_iteration": secs(elapsed) / iterations as f64,
-            "tokens_per_second": tokens_per_second(match mode {
-                MatmulMode::Decode => iterations,
-                MatmulMode::Prefill => iterations,
-            }, elapsed),
+            "tokens_per_second": tokens_per_second(tokens_per_iteration * iterations, elapsed),
             "ok": true,
         }),
         Err(err) => serde_json::json!({
