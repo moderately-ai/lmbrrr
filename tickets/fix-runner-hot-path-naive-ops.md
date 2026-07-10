@@ -11,11 +11,15 @@ paths: []
 tags: [performance]
 claimed_from: todo
 assignee: claude
-lease_expires_at: 1783704428
+lease_expires_at: 1783717719
 ---
 ## Goal
 
 Clean up the per-token/per-layer naive ops found in the 2026-07-10 full-source audit that burn Metal dispatches on every decode step, each gated by strict logits parity and a no-regression bench.
+
+## Progress (2026-07-10, pass 3)
+
+Fused rms_norm landed (commit 450cbc1): candle_nn::ops::rms_norm with dtype-matched weight pair + LMBRRR_UNFUSED_RMSNORM=1 reference path. All gates green (tests, fixture, state-integrity oracle both prompts); component profile shows every norm-touching component's host time down 30-40%. End-to-end tok/s NOT yet recorded — the session was thermally saturated (absolute rates 64 -> 37-53, unusable even paired) — run the definitive rotated A/B (audit6 vs audit7 snapshots in the session scratchpad) in a cool window and record here. Remaining pass-3 items: SDPA-vector switch (next), rope cat-branch cleanup, MixedLinear F32 round-trip.
 
 ## Update (decode audit, 2026-07-10, pass 3 scope)
 
