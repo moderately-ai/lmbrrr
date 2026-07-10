@@ -350,33 +350,36 @@ impl DsparkDrafter {
         let base_logits = self.lm_head.forward(&block_hidden)?;
 
         // Left-to-right greedy Markov sampling; corrected logits define p_d.
-        let mut prev = anchor_token;
-        let mut tokens = Vec::with_capacity(gamma);
+        // The token chain stays on device (argmax feeds the next index_select
+        // directly) so the loop enqueues without host syncs; tokens and
+        // confidences are read back once at the end.
+        let mut prev_id = Tensor::from_slice(&[anchor_token], 1, &self.device)?;
+        let mut token_tensors = Vec::with_capacity(gamma);
         let mut corrected = Vec::with_capacity(gamma);
-        let mut confidence_logits = Vec::with_capacity(gamma);
+        let mut features = Vec::with_capacity(gamma);
         for k in 0..gamma {
-            let prev_id = Tensor::from_slice(&[prev], 1, &self.device)?;
             let prev_emb = self.markov_w1.index_select(&prev_id, 0)?;
             let bias = self.markov_w2.forward(&prev_emb)?;
             let step = (base_logits.i((0, k))?.unsqueeze(0)? + &bias)?;
-            let token = step
-                .to_dtype(DType::F32)?
-                .argmax(D::Minus1)?
-                .squeeze(0)?
-                .to_scalar::<u32>()?;
+            let token = step.to_dtype(DType::F32)?.argmax(D::Minus1)?;
             let h_k = block_hidden.i((0, k))?.unsqueeze(0)?;
-            let features = Tensor::cat(&[&h_k, &prev_emb.to_dtype(self.dtype)?], D::Minus1)?;
-            let conf = self
-                .confidence
-                .forward(&features)?
-                .to_dtype(DType::F32)?
-                .squeeze(0)?
-                .to_vec1::<f32>()?[0];
+            features.push(Tensor::cat(&[&h_k, &prev_emb.to_dtype(self.dtype)?], D::Minus1)?);
             corrected.push(step);
-            confidence_logits.push(conf);
-            tokens.push(token);
-            prev = token;
+            token_tensors.push(token.clone());
+            prev_id = token;
         }
+        let feature_refs = features.iter().collect::<Vec<_>>();
+        let confidence_logits = self
+            .confidence
+            .forward(&Tensor::cat(&feature_refs, 0)?)?
+            .to_dtype(DType::F32)?
+            .squeeze(D::Minus1)?
+            .to_device(&Device::Cpu)?
+            .to_vec1::<f32>()?;
+        let token_refs = token_tensors.iter().collect::<Vec<_>>();
+        let tokens = Tensor::cat(&token_refs, 0)?
+            .to_device(&Device::Cpu)?
+            .to_vec1::<u32>()?;
         let corrected_refs = corrected.iter().collect::<Vec<_>>();
         let corrected_logits = Tensor::cat(&corrected_refs, 0)?.unsqueeze(0)?;
         Ok(DraftProposal {
