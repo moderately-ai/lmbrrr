@@ -150,11 +150,18 @@ impl Qwen35TraceRecorder {
     }
 }
 
+fn unfused_rmsnorm() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_RMSNORM").is_ok_and(|v| v == "1"))
+}
+
 #[derive(Clone, Debug)]
 struct Qwen35RmsNorm {
-    // F32 weight with the zero-centered +1.0 pre-applied at load; the old
-    // per-call cast + add was pure per-token overhead across ~50 norms.
+    // Zero-centred +1.0 pre-applied at load. Two dtype copies because the
+    // fused Metal rmsnorm kernel requires alpha to match the input dtype,
+    // and callers hit this with both the model dtype and F32 activations.
     weight_f32: Tensor,
+    weight_native: Tensor,
     eps: f64,
 }
 
@@ -162,10 +169,36 @@ impl Qwen35RmsNorm {
     fn new(size: usize, eps: f64, zero_centered: bool, vb: VarBuilder) -> Result<Self> {
         let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
         let weight_f32 = if zero_centered { (weight + 1.0)? } else { weight };
-        Ok(Self { weight_f32, eps })
+        let weight_native = weight_f32.to_dtype(vb.dtype())?;
+        Ok(Self {
+            weight_f32,
+            weight_native,
+            eps,
+        })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        if unfused_rmsnorm() {
+            return self.forward_unfused(xs);
+        }
+        // Fused kernel: 1 dispatch instead of 9, F32 accumulation inside.
+        // The kernel wants contiguous input; the only non-contiguous callers
+        // are the q/k-norm narrows, which pay one copy here (still 9 -> 2).
+        let weight = if xs.dtype() == DType::F32 {
+            &self.weight_f32
+        } else {
+            &self.weight_native
+        };
+        let xs = if xs.is_contiguous() {
+            xs.clone()
+        } else {
+            xs.contiguous()?
+        };
+        Ok(candle_nn::ops::rms_norm(&xs, weight, self.eps as f32)?)
+    }
+
+    /// Reference path (`LMBRRR_UNFUSED_RMSNORM=1`) for drift attribution.
+    fn forward_unfused(&self, xs: &Tensor) -> Result<Tensor> {
         let dtype = xs.dtype();
         let xs_f32 = xs.to_dtype(DType::F32)?;
         let variance = xs_f32.sqr()?.mean_keepdim(D::Minus1)?;
