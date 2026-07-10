@@ -218,6 +218,7 @@ def train(
     cache_name: str = "target-cache-smoke",
     global_batch_size: int | None = None,
     num_train_epochs: int | None = None,
+    logging_steps: int | None = 1,
     exp_name: str | None = None,
 ) -> None:
     """Train the drafter on a prepared cache; checkpoints land in /vol/runs."""
@@ -226,6 +227,8 @@ def train(
         opts.append(f"train.global_batch_size={global_batch_size}")
     if num_train_epochs is not None:
         opts.append(f"train.num_train_epochs={num_train_epochs}")
+    if logging_steps is not None:
+        opts.append(f"logging.logging_steps={logging_steps}")
     cmd = ["python", "/deepspec/train.py", "--config", TRAIN_CONFIG]
     for opt in opts:
         cmd.extend(["--opts", opt])
