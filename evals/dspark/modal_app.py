@@ -180,7 +180,16 @@ def prepare_cache(
     cache_name: str = "target-cache-smoke",
     local_batch_size: int = 8,
 ) -> None:
-    """DeepSpec target cache (hidden states via hooks) for the given JSONL."""
+    """DeepSpec target cache (hidden states via hooks) for the given JSONL.
+
+    Builds on container-local disk and copies final artifacts to the volume
+    once: the cache writer stages gigabytes through _tmp and renames them,
+    which a commit-based volume reconciles painfully slowly (measured ~15+ min
+    for a 3.6 GB smoke cache written directly to /vol).
+    """
+    import shutil
+
+    build_dir = f"/tmp/cache-build/{cache_name}"
     output_dir = f"/vol/cache/{cache_name}"
     _run(
         [
@@ -191,7 +200,7 @@ def prepare_cache(
             "--train-data-path",
             f"/vol/{train_data}",
             "--output-dir",
-            output_dir,
+            build_dir,
             "--local-batch-size",
             str(local_batch_size),
             "--num-workers",
@@ -199,6 +208,8 @@ def prepare_cache(
         ],
         cwd="/deepspec",
     )
+    print(f"copying cache {build_dir} -> {output_dir}", flush=True)
+    shutil.copytree(build_dir, output_dir, dirs_exist_ok=False)
     volume.commit()
 
 
