@@ -513,12 +513,29 @@ impl MiniCpmForConditionalGeneration {
         offset: usize,
     ) -> Result<Tensor> {
         let (_, seq_len) = input_ids.dims2()?;
-        self.forward_all_logits(input_ids, images, downsample_mode, offset)?
+        // Narrow the hidden state to the last position BEFORE lm_head: the
+        // head is an L x 248094 x 1024 matmul, so projecting every prefill
+        // position only to discard all but one wasted ~0.5 TFLOP and a
+        // ~500 MB logits buffer on a 1k-token prompt. Callers needing dense
+        // logits (spec verification) use forward_all_logits.
+        self.forward_hidden(input_ids, images, downsample_mode, offset)?
             .narrow(1, seq_len - 1, 1)?
+            .apply(&self.lm_head)?
             .squeeze(1)
     }
 
     pub fn forward_all_logits(
+        &mut self,
+        input_ids: &Tensor,
+        images: Option<&ProcessedImages>,
+        downsample_mode: &str,
+        offset: usize,
+    ) -> Result<Tensor> {
+        self.forward_hidden(input_ids, images, downsample_mode, offset)?
+            .apply(&self.lm_head)
+    }
+
+    fn forward_hidden(
         &mut self,
         input_ids: &Tensor,
         images: Option<&ProcessedImages>,
@@ -540,7 +557,7 @@ impl MiniCpmForConditionalGeneration {
         } else {
             self.model.language_model.forward_ids(input_ids, offset)?
         };
-        hidden.apply(&self.lm_head)
+        Ok(hidden)
     }
 
     fn replace_image_embeddings(
