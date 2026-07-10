@@ -74,6 +74,8 @@ enum Command {
     EagleChainDraft(EagleChainDraftArgs),
     EagleLiveProbe(EagleLiveProbeArgs),
     EagleRecurrentDraft(EagleRecurrentDraftArgs),
+    Roofline(RooflineArgs),
+    VerifyTable(VerifyTableArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -470,6 +472,55 @@ struct EagleRecurrentDraftArgs {
 
     #[arg(long)]
     enable_thinking: bool,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct RooflineArgs {
+    #[arg(long)]
+    cpu: bool,
+
+    #[arg(long, default_value_t = 2)]
+    warmup: usize,
+
+    #[arg(long, default_value_t = 10)]
+    iterations: usize,
+
+    #[arg(long, default_value_t = 256)]
+    dispatch_chain: usize,
+
+    /// Estimated Metal dispatches per decode forward, used for the derived
+    /// dispatch-bound projection. Refine once encoder-level counting exists.
+    #[arg(long, default_value_t = 550)]
+    assumed_dispatches: usize,
+
+    /// Weight bytes read per decode forward for the bandwidth-bound
+    /// projection. Default is the BF16 text decoder (~1.5 GB).
+    #[arg(long, default_value_t = 1_500_000_000)]
+    assumed_weight_bytes: u64,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct VerifyTableArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long = "gamma", value_delimiter = ',')]
+    gammas: Vec<usize>,
+
+    #[arg(long = "profile", value_enum)]
+    profiles: Vec<BenchProfile>,
+
+    #[arg(long, default_value_t = 1)]
+    warmup: usize,
+
+    #[arg(long, default_value_t = 5)]
+    iterations: usize,
 
     #[arg(long)]
     output: Option<PathBuf>,
@@ -1128,6 +1179,8 @@ fn main() -> Result<()> {
         Command::EagleChainDraft(args) => eagle_chain_draft(args),
         Command::EagleLiveProbe(args) => eagle_live_probe(args),
         Command::EagleRecurrentDraft(args) => eagle_recurrent_draft(args),
+        Command::Roofline(args) => roofline(args),
+        Command::VerifyTable(args) => verify_table(args),
     }
 }
 
@@ -3912,6 +3965,312 @@ fn run_quant_baseline_case(
         "top1_logit": top1.map(|item| item.logit),
         "top_logits": top_logits_json(&top_logits),
     }))
+}
+
+fn roofline(args: RooflineArgs) -> Result<()> {
+    if args.iterations == 0 || args.dispatch_chain == 0 {
+        anyhow::bail!("--iterations and --dispatch-chain must be greater than zero");
+    }
+    let device = select_device(args.cpu)?;
+    let dtype = if device.is_cpu() {
+        DType::F32
+    } else {
+        DType::BF16
+    };
+
+    let mut copy_rows = Vec::new();
+    for mb in [64usize, 256, 1024] {
+        let elements = mb * 1024 * 1024 / dtype.size_in_bytes();
+        let x = Tensor::zeros(elements, dtype, &device)?;
+        let elapsed = time_iterations(&device, args.warmup, args.iterations, || Ok(x.copy()?))?;
+        let bytes_moved = 2 * (elements * dtype.size_in_bytes()) as f64 * args.iterations as f64;
+        copy_rows.push(serde_json::json!({
+            "tensor_mb": mb,
+            "seconds": secs(elapsed),
+            "achieved_gbps": bytes_moved / secs(elapsed) / 1e9,
+        }));
+    }
+    let peak_copy_gbps = copy_rows
+        .iter()
+        .filter_map(|row| row["achieved_gbps"].as_f64())
+        .fold(0.0f64, f64::max);
+
+    // Matvec throughput at the model's real decode shapes (weights dominate
+    // the bytes, so achieved GB/s here is the effective decode-path bandwidth).
+    let matvec_shapes: [(&str, usize, usize); 9] = [
+        ("mlp_up_or_gate", 3584, 1024),
+        ("mlp_down", 1024, 3584),
+        ("deltanet_in_proj_qkv", 6144, 1024),
+        ("deltanet_out_proj", 1024, 2048),
+        ("full_attn_q_gate", 4096, 1024),
+        ("full_attn_kv", 512, 1024),
+        ("full_attn_o", 1024, 2048),
+        ("lm_head", 248094, 1024),
+        ("peak_square", 8192, 8192),
+    ];
+    let mut matvec_rows = Vec::new();
+    for (name, out_dim, in_dim) in matvec_shapes {
+        let weight = Tensor::zeros((out_dim, in_dim), dtype, &device)?;
+        let linear = candle_nn::Linear::new(weight, None);
+        let x = Tensor::zeros((1, in_dim), dtype, &device)?;
+        let elapsed =
+            time_iterations(&device, args.warmup, args.iterations, || linear.forward(&x))?;
+        let weight_bytes = (out_dim * in_dim * dtype.size_in_bytes()) as f64;
+        let per_iter = secs(elapsed) / args.iterations as f64;
+        matvec_rows.push(serde_json::json!({
+            "shape": name,
+            "out_dim": out_dim,
+            "in_dim": in_dim,
+            "weight_bytes": weight_bytes as u64,
+            "seconds_per_iteration": per_iter,
+            "achieved_gbps": weight_bytes / per_iter / 1e9,
+        }));
+    }
+
+    // Dependent-chain dispatch overhead: tiny affine ops that cannot overlap,
+    // mirroring the serial structure of a decode forward.
+    let tiny = Tensor::zeros(1, DType::F32, &device)?;
+    for _ in 0..args.warmup {
+        let mut y = tiny.clone();
+        for _ in 0..args.dispatch_chain {
+            y = y.affine(1.000001, 0.0)?;
+        }
+        let _ = y.to_scalar::<f32>()?;
+    }
+    device.synchronize()?;
+    let started = Instant::now();
+    for _ in 0..args.iterations {
+        let mut y = tiny.clone();
+        for _ in 0..args.dispatch_chain {
+            y = y.affine(1.000001, 0.0)?;
+        }
+        let _ = y.to_scalar::<f32>()?;
+    }
+    device.synchronize()?;
+    let tiny_chain_elapsed = started.elapsed();
+    let per_dispatch_seconds =
+        secs(tiny_chain_elapsed) / (args.iterations * args.dispatch_chain) as f64;
+
+    // Same measurement with a dependent chain of real h=1024 matvecs.
+    let weight = Tensor::zeros((1024usize, 1024usize), dtype, &device)?;
+    let linear = candle_nn::Linear::new(weight, None);
+    let chain = 64usize;
+    for _ in 0..args.warmup {
+        let mut y = Tensor::zeros((1, 1024usize), dtype, &device)?;
+        for _ in 0..chain {
+            y = linear.forward(&y)?;
+        }
+        device.synchronize()?;
+    }
+    device.synchronize()?;
+    let started = Instant::now();
+    for _ in 0..args.iterations {
+        let mut y = Tensor::zeros((1, 1024usize), dtype, &device)?;
+        for _ in 0..chain {
+            y = linear.forward(&y)?;
+        }
+        device.synchronize()?;
+    }
+    let small_matvec_chain_elapsed = started.elapsed();
+    let per_small_matvec_seconds =
+        secs(small_matvec_chain_elapsed) / (args.iterations * chain) as f64;
+
+    let dispatch_bound_tok_s =
+        1.0 / (args.assumed_dispatches as f64 * per_dispatch_seconds).max(f64::EPSILON);
+    let bandwidth_bound_tok_s = peak_copy_gbps * 1e9 / args.assumed_weight_bytes as f64;
+    let combined_tok_s = 1.0
+        / (args.assumed_dispatches as f64 * per_dispatch_seconds
+            + args.assumed_weight_bytes as f64 / (peak_copy_gbps * 1e9));
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_metal_roofline",
+        "schema_version": 1,
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "warmup": args.warmup,
+        "iterations": args.iterations,
+        "copy_bandwidth": copy_rows,
+        "peak_copy_gbps": peak_copy_gbps,
+        "matvec": matvec_rows,
+        "dispatch_chain_length": args.dispatch_chain,
+        "per_dispatch_seconds": per_dispatch_seconds,
+        "per_dispatch_microseconds": per_dispatch_seconds * 1e6,
+        "per_small_matvec_seconds": per_small_matvec_seconds,
+        "per_small_matvec_microseconds": per_small_matvec_seconds * 1e6,
+        "projections": {
+            "assumed_dispatches_per_forward": args.assumed_dispatches,
+            "assumed_weight_bytes_per_forward": args.assumed_weight_bytes,
+            "dispatch_bound_tokens_per_second": dispatch_bound_tok_s,
+            "bandwidth_bound_tokens_per_second": bandwidth_bound_tok_s,
+            "combined_projection_tokens_per_second": combined_tok_s,
+        },
+        "note": "Dependent-chain timings mirror serial decode structure; copy bandwidth counts read+write bytes. Projections use the assumed dispatch count until encoder-level counting lands.",
+    });
+    write_json_report(args.output.as_ref(), &report)
+}
+
+fn verify_table(args: VerifyTableArgs) -> Result<()> {
+    if args.iterations == 0 {
+        anyhow::bail!("--iterations must be greater than zero");
+    }
+    let mut gammas = if args.gammas.is_empty() {
+        vec![1, 2, 4, 8, 16, 32]
+    } else {
+        args.gammas.clone()
+    };
+    gammas.sort_unstable();
+    gammas.dedup();
+    if gammas.first() != Some(&1) {
+        gammas.insert(0, 1);
+    }
+    let max_gamma = *gammas.last().expect("gammas is non-empty");
+    let profiles = if args.profiles.is_empty() {
+        BenchProfile::all().to_vec()
+    } else {
+        args.profiles.clone()
+    };
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+
+    let mut rows = Vec::new();
+    for profile in &profiles {
+        let prompt_text = chat_prompt(profile.prompt(), 0, false);
+        let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+
+        // Realistic verify content: greedy continuation tokens, padded by
+        // repeating the last token if EOS arrives before max_gamma.
+        let baseline = generate_tokens(
+            &mut model,
+            &device,
+            &greedy_generation_args(max_gamma, false),
+            &prompt_tokens,
+            None::<&ProcessedImages>,
+            &args.model.downsample_mode,
+            &eos_ids,
+            |_, _, _, _| Ok(()),
+        )?;
+        let mut chunk_tokens = baseline.generated_token_ids.clone();
+        let pad = chunk_tokens.last().copied().unwrap_or(prompt_tokens[0]);
+        while chunk_tokens.len() < max_gamma {
+            chunk_tokens.push(pad);
+        }
+
+        for &gamma in &gammas {
+            let mut samples = Vec::with_capacity(args.iterations);
+            for iteration in 0..args.warmup + args.iterations {
+                model.clear_cache();
+                let prompt_input =
+                    Tensor::from_slice(&prompt_tokens, (1, prompt_tokens.len()), &device)?;
+                let _ = model.forward(
+                    &prompt_input,
+                    None::<&ProcessedImages>,
+                    &args.model.downsample_mode,
+                    0,
+                )?;
+                device.synchronize()?;
+
+                let chunk = &chunk_tokens[..gamma];
+                let chunk_input = Tensor::from_slice(chunk, (1, gamma), &device)?;
+                let started = Instant::now();
+                let logits = model.forward_all_logits(
+                    &chunk_input,
+                    None::<&ProcessedImages>,
+                    &args.model.downsample_mode,
+                    prompt_tokens.len(),
+                )?;
+                device.synchronize()?;
+                let chunk_elapsed = started.elapsed();
+                let (_, argmax_elapsed) = argmax_tokens(&logits, &device)?;
+                if iteration >= args.warmup {
+                    samples.push((secs(chunk_elapsed), secs(argmax_elapsed)));
+                }
+            }
+            let mut chunk_seconds = samples.iter().map(|(chunk, _)| *chunk).collect::<Vec<_>>();
+            let argmax_seconds = samples.iter().map(|(_, argmax)| *argmax).sum::<f64>()
+                / samples.len().max(1) as f64;
+            let median_seconds = median(&mut chunk_seconds);
+            let spread = chunk_seconds
+                .last()
+                .copied()
+                .unwrap_or(median_seconds)
+                - chunk_seconds.first().copied().unwrap_or(median_seconds);
+            rows.push(serde_json::json!({
+                "profile": profile.name(),
+                "context_tokens": prompt_tokens.len(),
+                "gamma": gamma,
+                "iterations": args.iterations,
+                "median_verify_seconds": median_seconds,
+                "spread_verify_seconds": spread,
+                "mean_argmax_seconds": argmax_seconds,
+                "verify_tokens_per_second": gamma as f64 / median_seconds.max(f64::EPSILON),
+                "samples": chunk_seconds,
+            }));
+        }
+    }
+
+    // Per-token efficiency vs the gamma=1 step within each profile.
+    let mut enriched = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let profile = row["profile"].as_str().unwrap_or_default();
+        let base = rows
+            .iter()
+            .find(|candidate| {
+                candidate["profile"].as_str() == Some(profile)
+                    && candidate["gamma"].as_u64() == Some(1)
+            })
+            .and_then(|candidate| candidate["median_verify_seconds"].as_f64());
+        let mut row = row.clone();
+        if let (Some(base), Some(seconds), Some(gamma)) = (
+            base,
+            row["median_verify_seconds"].as_f64(),
+            row["gamma"].as_u64(),
+        ) {
+            row["chunk_cost_vs_single_step"] = serde_json::json!(seconds / base);
+            row["per_token_efficiency_vs_decode"] =
+                serde_json::json!(gamma as f64 * base / seconds);
+        }
+        enriched.push(row);
+    }
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_verify_throughput_table",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "revision": args.model.revision.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
+        "gammas": gammas,
+        "concurrency": 1,
+        "concurrency_note": "single-request only; batched verify lands with batched-multi-stream-decode-runner",
+        "rows": enriched,
+        "scheduler_contract": "T_verify(gamma) per context bucket = median_verify_seconds; T_round(gamma) = T_draft + T_verify(gamma).",
+    });
+    write_json_report(args.output.as_ref(), &report)
+}
+
+fn median(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|left, right| left.total_cmp(right));
+    let mid = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[mid - 1] + values[mid]) / 2.0
+    } else {
+        values[mid]
+    }
 }
 
 fn resolve_artifacts(model: &ModelArgs) -> Result<ArtifactBundle> {

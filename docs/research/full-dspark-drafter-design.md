@@ -91,7 +91,21 @@ The candle fork audit (2026-07-10) pins down the mechanics:
 | Scheduler (single-request + batch simulation) | Rust | Runs inside the decode loop |
 | DeltaNet chunked kernels | candle fork (Metal) | Verify-chunk cost is the speedup denominator |
 
-## 6. Sequencing
+## 6. DeepSpec code-level findings (deep review, 2026-07-10)
+
+A full read of the paper (all 33 pages including Appendix A) plus a line-level review of DeepSpec pins down details the earlier sections left loose. The Rust runner must reproduce these exactly:
+
+- **Backbone forward, precisely**: draft input is `[anchor_embedding, mask_emb × (γ−1)]`; slot k predicts the token at `anchor_pos + 1 + k` and carries RoPE position `anchor_pos + k`. The fused context `hidden_norm(fc(concat(capture layers)))` is *prepended along the sequence dim to K and V in every draft layer* (never queried); attention is bidirectional (`is_causal=false`) with per-head QK-RMSNorm and `scaling = head_dim^-0.5`. Draft attention dims come from the target's GQA: for our target that is `q_proj 1024→2048`, `k/v_proj 1024→512`, `head_dim 256`, `o_proj 2048→1024` — note `num_heads·head_dim = 2048 ≠ hidden 1024`, which is legal and must not be "fixed".
+- **Markov + distributions**: step bias is `W2(W1[x_{k−1}])` added to base logits with no scaling; slot 0 conditions on the anchor token. The draft distribution `p^d` used for acceptance, CE, TV, and confidence labels is the **post-Markov** distribution.
+- **Acceptance**: DeepSpec implements true rejection sampling — `min(1, p^t(x)/p^d(x))` prefix acceptance with residual sampling `max(p^t − p^d, 0)` for the bonus token — which reduces to exact greedy match at temperature 0. Our v1 greedy gate is therefore the T=0 special case of the real rule, and the relaxed/T>0 lane later reuses the same machinery.
+- **Confidence**: `σ(Linear([h_k ; W1[x_{k−1}]]))` (input dim 1024+256). DeepSpec's eval thresholds the **raw per-position** c_k and ships no STS and no scheduler; the paper's scheduler operates on the **cumulative product**. We follow the paper: STS-calibrate the cumprod, schedule on survival probabilities.
+- **Non-anticipation (Appendix A, pp. 32–33 — verified present despite being easy to miss)**: the scheduler's prefix scan must not evaluate c_{k+1} (a function of the realized x_k) before admitting position k; early-stop at the first non-improving Θ. The appendix's concrete scenario (a₁ = 0.8, SPS = {1.0, 0.5, 0.45}) becomes a unit test: the scheduler must return ℓ = 0 without ever reading c₂.
+- **Capture layers**: strictly increasing, and the final layer is **forbidden** (HF `output_hidden_states` stores the post-norm state there while the cache stores raw layer outputs). For our 24-layer decoder: `[1, 6, 11, 16, 21]`, layer 23 excluded.
+- **Mask token**: must be an existing reserved id in the MiniCPM tokenizer (< 248094) — embeddings are frozen and copied, so adding a row breaks the shape assertions.
+- **Training memory hazard at our vocab**: the train-time draft-logits tensor is `[1, num_anchors, γ, V]` in fp32 during loss computation — ~3.5 GB at num_anchors 512, γ 7, V 248094. Reduce `num_anchors` or chunk the loss.
+- **Cache format**: target-cache v2 = `manifest.json` + `samples.idx` (fixed little-endian records) + bf16 shards holding `input_ids`/masks/`target_hidden_states [seq, 5·1024]`/`target_last_hidden_states [seq, 1024]`; the reader validates hidden size, capture layers, and target id, so caches regenerate whenever `target_layer_ids` changes.
+
+## 7. Sequencing
 
 1. **Now (parallel, board width 2):** stand up DeepSpec on Modal (clone, MiniCPM glue, smoke-train on a small corpus) under `train-dspark-semi-autoregressive-drafter`, while `profile-dspark-verification-throughput-table` measures verify-chunk cost locally for γ ∈ {2, 4, 8, 16}.
 2. **Then:** STS calibration (`calibrate-dspark-confidence-head`) off the first real drafter; block runner with state rollback (`integrate-dspark-block-runner`); DeltaNet chunk throughput work (`optimize-deltanet-chunked-prefill-and-verify-throughput`) as the table dictates.

@@ -24,3 +24,6 @@ Train a DSpark-style drafter with a parallel backbone plus lightweight semi-auto
 - Train a confidence head using per-position prefix survival labels c* = 1 - 0.5 * total-variation(draft, target).
 - Trainer runs on CUDA (Modal credits are available for corpus generation and training) as well as local MPS for smoke runs; evaluate reusing DeepSpec before writing training code from scratch.
 - Export a safetensors artifact and manifest with backbone, Markov head, confidence head, draft width, capture layers, and calibration metadata.
+- MiniCPM adaptation per the 2026-07-10 deep review: parser chat-template registration, the VLM backbone shim in prepare_target_cache (`_get_target_backbone`/`_get_target_hidden_size` — highest-risk touch point), minicpm modeling/config/trainer/evaluator registrations, and a `config/dspark/dspark_minicpm.py`.
+- `mask_token_id` is an existing reserved MiniCPM special id (embeddings are frozen copies; never add a vocab row); capture layers strictly exclude the final layer (start [1, 6, 11, 16, 21]).
+- Guard the known OOM at vocab 248094: fp32 draft-logits are [1, num_anchors, gamma, V] in the loss (~3.5 GB at defaults); reduce num_anchors or chunk the loss.
