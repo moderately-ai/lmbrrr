@@ -86,7 +86,9 @@ def _run(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> Non
     subprocess.run(cmd, cwd=cwd, env=merged_env, check=True)
 
 
-@app.function(image=image, gpu="L4", volumes=VOLUMES, secrets=[hf_secret], timeout=1800)
+# head_dim 256 flex-attention kernels need >100KB shared memory per SM, which
+# rules out L4/Ada for training; H100 matches the training environment.
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=1800)
 def smoke() -> None:
     """Synthetic forward+backward in the pinned env — the gate CPU could not run."""
     _run(
