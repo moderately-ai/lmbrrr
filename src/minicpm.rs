@@ -471,6 +471,17 @@ impl MiniCpmForConditionalGeneration {
         self.model.language_model.clear_cache();
     }
 
+    pub fn snapshot_decode_state(&self) -> crate::qwen35::DecodeStateSnapshot {
+        self.model.language_model.snapshot_decode_state()
+    }
+
+    pub fn restore_decode_state(
+        &mut self,
+        snapshot: &crate::qwen35::DecodeStateSnapshot,
+    ) -> Result<()> {
+        self.model.language_model.restore_decode_state(snapshot)
+    }
+
     pub fn set_text_profiler(&mut self, profiler: Option<Qwen35Profiler>) {
         self.model.language_model.set_profiler(profiler);
     }

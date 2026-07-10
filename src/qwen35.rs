@@ -224,6 +224,93 @@ impl RotaryEmbedding {
     }
 }
 
+/// KV cache with truncation for speculative rollback. Grows on demand
+/// (candle_nn's KvCache preallocates max_position_embeddings and cannot
+/// rewind); `truncate` just moves the length back — the buffer beyond it is
+/// overwritten by the re-advance chunk.
+#[derive(Clone, Debug)]
+struct TruncatableKvCache {
+    k: Option<Tensor>,
+    v: Option<Tensor>,
+    len: usize,
+}
+
+impl TruncatableKvCache {
+    const MIN_CAPACITY: usize = 1024;
+
+    fn new() -> Self {
+        Self {
+            k: None,
+            v: None,
+            len: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.k = None;
+        self.v = None;
+        self.len = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn truncate(&mut self, len: usize) -> Result<()> {
+        if len > self.len {
+            candle::bail!("cannot truncate KV cache from {} to {len}", self.len);
+        }
+        self.len = len;
+        Ok(())
+    }
+
+    fn ensure_capacity(slot: &mut Option<Tensor>, template: &Tensor, needed: usize, len: usize) -> Result<()> {
+        let (b, h, _, d) = template.dims4()?;
+        let current_capacity = match slot {
+            Some(buffer) => buffer.dim(2)?,
+            None => 0,
+        };
+        if current_capacity >= needed {
+            return Ok(());
+        }
+        let capacity = needed.next_power_of_two().max(Self::MIN_CAPACITY);
+        let buffer = Tensor::zeros((b, h, capacity, d), template.dtype(), template.device())?;
+        if let Some(old) = slot.as_ref() {
+            if len > 0 {
+                buffer.slice_set(&old.narrow(2, 0, len)?.contiguous()?, 2, 0)?;
+            }
+        }
+        *slot = Some(buffer);
+        Ok(())
+    }
+
+    fn append(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
+        let added = k.dim(2)?;
+        let needed = self.len + added;
+        Self::ensure_capacity(&mut self.k, k, needed, self.len)?;
+        Self::ensure_capacity(&mut self.v, v, needed, self.len)?;
+        let k_buffer = self.k.as_ref().expect("k buffer allocated");
+        let v_buffer = self.v.as_ref().expect("v buffer allocated");
+        k_buffer.slice_set(k, 2, self.len)?;
+        v_buffer.slice_set(v, 2, self.len)?;
+        self.len = needed;
+        Ok((
+            k_buffer.narrow(2, 0, self.len)?,
+            v_buffer.narrow(2, 0, self.len)?,
+        ))
+    }
+}
+
+/// Cheap per-layer decode-state snapshot: DeltaNet tensors are replaced by
+/// assignment (never mutated in place) so cloning the handles is enough; the
+/// KV cache only needs its length because rollback rewinds and the re-advance
+/// overwrites the stale slice.
+#[derive(Clone, Debug)]
+pub struct DecodeStateSnapshot {
+    deltanet: Vec<(Option<Tensor>, Option<Tensor>)>,
+    kv_lens: Vec<usize>,
+}
+
 #[derive(Clone, Debug)]
 struct Mlp {
     gate_proj: MixedLinear,
@@ -300,7 +387,7 @@ struct FullAttention {
     hidden_size: usize,
     num_kv_groups: usize,
     rotary: Arc<RotaryEmbedding>,
-    kv_cache: Arc<Mutex<candle_nn::kv_cache::KvCache>>,
+    kv_cache: Arc<Mutex<TruncatableKvCache>>,
 }
 
 impl FullAttention {
@@ -338,11 +425,22 @@ impl FullAttention {
             hidden_size: cfg.num_attention_heads * cfg.head_dim,
             num_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             rotary,
-            kv_cache: Arc::new(Mutex::new(candle_nn::kv_cache::KvCache::new(
-                2,
-                cfg.max_position_embeddings,
-            ))),
+            kv_cache: Arc::new(Mutex::new(TruncatableKvCache::new())),
         })
+    }
+
+    fn kv_len(&self) -> usize {
+        self.kv_cache
+            .lock()
+            .expect("full-attention KV cache lock poisoned")
+            .len()
+    }
+
+    fn truncate_kv(&self, len: usize) -> Result<()> {
+        self.kv_cache
+            .lock()
+            .expect("full-attention KV cache lock poisoned")
+            .truncate(len)
     }
 
     fn forward(
@@ -467,6 +565,7 @@ impl FullAttention {
             .expect("full-attention KV cache lock poisoned")
             .reset();
     }
+
 
     fn apply_quantized_text_artifact(
         &mut self,
@@ -1296,6 +1395,53 @@ impl Qwen35TextModel {
         for layer in &mut self.layers {
             layer.clear_cache();
         }
+    }
+
+    pub fn snapshot_decode_state(&self) -> DecodeStateSnapshot {
+        let mut deltanet = Vec::new();
+        let mut kv_lens = Vec::new();
+        for layer in &self.layers {
+            match &layer.mixer {
+                TokenMixer::Linear(attn) => {
+                    deltanet.push((attn.conv_state.clone(), attn.recurrent_state.clone()));
+                }
+                TokenMixer::Full(attn) => kv_lens.push(attn.kv_len()),
+            }
+        }
+        DecodeStateSnapshot { deltanet, kv_lens }
+    }
+
+    pub fn restore_decode_state(&mut self, snapshot: &DecodeStateSnapshot) -> Result<()> {
+        let mut linear_idx = 0usize;
+        let mut full_idx = 0usize;
+        for layer in &mut self.layers {
+            match &mut layer.mixer {
+                TokenMixer::Linear(attn) => {
+                    let Some((conv, recurrent)) = snapshot.deltanet.get(linear_idx) else {
+                        candle::bail!("decode-state snapshot has too few DeltaNet entries");
+                    };
+                    attn.conv_state = conv.clone();
+                    attn.recurrent_state = recurrent.clone();
+                    linear_idx += 1;
+                }
+                TokenMixer::Full(attn) => {
+                    let Some(len) = snapshot.kv_lens.get(full_idx) else {
+                        candle::bail!("decode-state snapshot has too few KV entries");
+                    };
+                    attn.truncate_kv(*len)?;
+                    full_idx += 1;
+                }
+            }
+        }
+        if linear_idx != snapshot.deltanet.len() || full_idx != snapshot.kv_lens.len() {
+            candle::bail!(
+                "decode-state snapshot layer counts do not match the model: \
+                 {linear_idx}/{} DeltaNet, {full_idx}/{} full-attention",
+                snapshot.deltanet.len(),
+                snapshot.kv_lens.len()
+            );
+        }
+        Ok(())
     }
 
     pub fn set_profiler(&mut self, profiler: Option<Qwen35Profiler>) {

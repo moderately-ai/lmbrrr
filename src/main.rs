@@ -76,6 +76,7 @@ enum Command {
     EagleRecurrentDraft(EagleRecurrentDraftArgs),
     Roofline(RooflineArgs),
     VerifyTable(VerifyTableArgs),
+    DsparkRun(DsparkRunArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -521,6 +522,34 @@ struct VerifyTableArgs {
 
     #[arg(long, default_value_t = 5)]
     iterations: usize,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct DsparkRunArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long)]
+    prompt: String,
+
+    #[arg(long, default_value_t = 8)]
+    gamma: usize,
+
+    #[arg(long, default_value_t = 128)]
+    max_new_tokens: usize,
+
+    /// Corruption periods for the stub drafter, comma separated. Each value
+    /// runs the full multi-round loop with every Nth draft token corrupted
+    /// (0 = no corruption); all runs must produce identical output, which is
+    /// the blocking state-rollback oracle.
+    #[arg(long = "corrupt-every", value_delimiter = ',', default_values_t = [0usize, 3, 5])]
+    corrupt_every: Vec<usize>,
+
+    #[arg(long)]
+    enable_thinking: bool,
 
     #[arg(long)]
     output: Option<PathBuf>,
@@ -1181,6 +1210,7 @@ fn main() -> Result<()> {
         Command::EagleRecurrentDraft(args) => eagle_recurrent_draft(args),
         Command::Roofline(args) => roofline(args),
         Command::VerifyTable(args) => verify_table(args),
+        Command::DsparkRun(args) => dspark_run(args),
     }
 }
 
@@ -4264,6 +4294,293 @@ fn verify_table(args: VerifyTableArgs) -> Result<()> {
         "scheduler_contract": "T_verify(gamma) per context bucket = median_verify_seconds; T_round(gamma) = T_draft + T_verify(gamma).",
     });
     write_json_report(args.output.as_ref(), &report)
+}
+
+#[derive(Clone, Debug)]
+struct SpecStubRun {
+    corrupt_every: usize,
+    committed: Vec<u32>,
+    rounds: usize,
+    rollbacks: usize,
+    accepted_histogram: Vec<usize>,
+    prefill_seconds: f64,
+    verify_seconds: f64,
+    readvance_seconds: f64,
+    argmax_seconds: f64,
+    wall_seconds: f64,
+}
+
+/// One full multi-round speculative pass with a stub drafter. Chunks follow
+/// the DeepSpec convention: [anchor, d1..dw] is fed, the logits at position i
+/// verify draft i+1, and the token after the last accepted draft is the bonus
+/// (= next round's anchor). On partial acceptance the decode state is
+/// restored from the pre-verify snapshot and the accepted prefix re-advanced
+/// in one chunk; on full acceptance the advanced state is kept as-is.
+#[allow(clippy::too_many_arguments)]
+fn dspark_stub_run(
+    model: &mut MiniCpmForConditionalGeneration,
+    device: &Device,
+    prompt_tokens: &[u32],
+    stub_tokens: &[u32],
+    gamma: usize,
+    max_new_tokens: usize,
+    corrupt_every: usize,
+    vocab_size: usize,
+    downsample_mode: &str,
+    eos_ids: &[u32],
+) -> Result<SpecStubRun> {
+    let wall_start = Instant::now();
+    model.clear_cache();
+    let prompt_input = Tensor::from_slice(prompt_tokens, (1, prompt_tokens.len()), device)?;
+    let prefill_start = Instant::now();
+    let prompt_logits =
+        model.forward(&prompt_input, None::<&ProcessedImages>, downsample_mode, 0)?;
+    device.synchronize()?;
+    let prefill_seconds = secs(prefill_start.elapsed());
+    let (first_token, mut argmax_elapsed) = argmax_token(&prompt_logits, device)?;
+
+    let mut committed = vec![first_token];
+    let mut anchor = first_token;
+    let mut offset = prompt_tokens.len();
+    let mut rounds = 0usize;
+    let mut rollbacks = 0usize;
+    let mut accepted_histogram = vec![0usize; gamma + 1];
+    let mut verify_seconds = 0.0f64;
+    let mut readvance_seconds = 0.0f64;
+
+    if !eos_ids.contains(&first_token) {
+        while committed.len() < max_new_tokens {
+            let available = stub_tokens.len().saturating_sub(committed.len());
+            let width = gamma.min(available);
+            let mut drafts =
+                stub_tokens[committed.len()..committed.len() + width].to_vec();
+            if corrupt_every > 0 {
+                for (j, draft) in drafts.iter_mut().enumerate() {
+                    let position = committed.len() + j;
+                    if (position + 1) % corrupt_every == 0 {
+                        let mut corrupted = (*draft + 1) % vocab_size as u32;
+                        if eos_ids.contains(&corrupted) {
+                            corrupted = (corrupted + 1) % vocab_size as u32;
+                        }
+                        *draft = corrupted;
+                    }
+                }
+            }
+
+            let snapshot = model.snapshot_decode_state();
+            let mut chunk = Vec::with_capacity(width + 1);
+            chunk.push(anchor);
+            chunk.extend_from_slice(&drafts);
+            let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), device)?;
+            let verify_start = Instant::now();
+            let logits = model.forward_all_logits(
+                &chunk_input,
+                None::<&ProcessedImages>,
+                downsample_mode,
+                offset,
+            )?;
+            device.synchronize()?;
+            verify_seconds += secs(verify_start.elapsed());
+            let (targets, chunk_argmax) = argmax_tokens(&logits, device)?;
+            argmax_elapsed += chunk_argmax;
+
+            let accepted = drafts
+                .iter()
+                .zip(targets.iter())
+                .take_while(|(draft, target)| draft == target)
+                .count();
+            let bonus = targets[accepted];
+
+            if accepted == width {
+                offset += width + 1;
+            } else {
+                model.restore_decode_state(&snapshot)?;
+                rollbacks += 1;
+                let readvance = &chunk[..accepted + 1];
+                let readvance_input =
+                    Tensor::from_slice(readvance, (1, readvance.len()), device)?;
+                let readvance_start = Instant::now();
+                let _ = model.forward_all_logits(
+                    &readvance_input,
+                    None::<&ProcessedImages>,
+                    downsample_mode,
+                    offset,
+                )?;
+                device.synchronize()?;
+                readvance_seconds += secs(readvance_start.elapsed());
+                offset += accepted + 1;
+            }
+
+            committed.extend_from_slice(&drafts[..accepted]);
+            committed.push(bonus);
+            accepted_histogram[accepted] += 1;
+            rounds += 1;
+            anchor = bonus;
+
+            if committed[committed.len() - (accepted + 1)..]
+                .iter()
+                .any(|token| eos_ids.contains(token))
+            {
+                if let Some(eos_at) = committed.iter().position(|token| eos_ids.contains(token)) {
+                    committed.truncate(eos_at + 1);
+                }
+                break;
+            }
+        }
+    }
+    committed.truncate(max_new_tokens);
+
+    Ok(SpecStubRun {
+        corrupt_every,
+        committed,
+        rounds,
+        rollbacks,
+        accepted_histogram,
+        prefill_seconds,
+        verify_seconds,
+        readvance_seconds,
+        argmax_seconds: secs(argmax_elapsed),
+        wall_seconds: secs(wall_start.elapsed()),
+    })
+}
+
+fn dspark_run(args: DsparkRunArgs) -> Result<()> {
+    if args.gamma == 0 {
+        anyhow::bail!("--gamma must be greater than zero");
+    }
+    if args.corrupt_every.is_empty() {
+        anyhow::bail!("provide at least one --corrupt-every value");
+    }
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+    let vocab_size = bundle.config.text_config.vocab_size;
+
+    // Baseline greedy pass: stub source, advisory oracle, and the speed
+    // comparator (chunk-path logits can tie-flip vs decode-path logits, so
+    // equality with the baseline is advisory; run-invariance below blocks).
+    let baseline_start = Instant::now();
+    let baseline = generate_tokens(
+        &mut model,
+        &device,
+        &greedy_generation_args(args.max_new_tokens + args.gamma + 8, args.enable_thinking),
+        &prompt_tokens,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        &eos_ids,
+        |_, _, _, _| Ok(()),
+    )?;
+    let baseline_wall = secs(baseline_start.elapsed());
+    let stub_tokens = baseline.generated_token_ids.clone();
+    if stub_tokens.is_empty() {
+        anyhow::bail!("baseline generation produced no tokens to drive the stub drafter");
+    }
+
+    let mut runs = Vec::with_capacity(args.corrupt_every.len());
+    for &corrupt_every in &args.corrupt_every {
+        runs.push(dspark_stub_run(
+            &mut model,
+            &device,
+            &prompt_tokens,
+            &stub_tokens,
+            args.gamma,
+            args.max_new_tokens,
+            corrupt_every,
+            vocab_size,
+            &args.model.downsample_mode,
+            &eos_ids,
+        )?);
+    }
+
+    // BLOCKING oracle: committed output must be identical across corruption
+    // patterns. Every committed token is target-chunk-derived under
+    // exact-match acceptance, so any divergence is a state-rollback bug.
+    let reference = &runs[0];
+    let mut invariance_passed = true;
+    let mut first_divergence: Option<serde_json::Value> = None;
+    for run in &runs[1..] {
+        if run.committed != reference.committed {
+            invariance_passed = false;
+            let index = reference
+                .committed
+                .iter()
+                .zip(run.committed.iter())
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| reference.committed.len().min(run.committed.len()));
+            first_divergence = Some(serde_json::json!({
+                "corrupt_every": run.corrupt_every,
+                "index": index,
+                "reference_len": reference.committed.len(),
+                "run_len": run.committed.len(),
+            }));
+            break;
+        }
+    }
+
+    let advisory_prefix = stub_tokens
+        .iter()
+        .zip(reference.committed.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_dspark_stub_run",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
+        "prompt": args.prompt.as_str(),
+        "prompt_tokens": prompt_tokens.len(),
+        "gamma": args.gamma,
+        "max_new_tokens": args.max_new_tokens,
+        "baseline": {
+            "generated_tokens": stub_tokens.len(),
+            "wall_seconds": baseline_wall,
+            "decode_tokens_per_second": baseline.decode_tokens_per_second(),
+            "steady_state_tokens_per_second": baseline.steady_state_tokens_per_second(),
+        },
+        "runs": runs.iter().map(|run| serde_json::json!({
+            "corrupt_every": run.corrupt_every,
+            "committed_tokens": run.committed.len(),
+            "rounds": run.rounds,
+            "rollbacks": run.rollbacks,
+            "accepted_histogram": run.accepted_histogram,
+            "mean_accepted_length": if run.rounds > 0 {
+                run.committed.len() as f64 / run.rounds as f64
+            } else {
+                0.0
+            },
+            "prefill_seconds": run.prefill_seconds,
+            "verify_seconds": run.verify_seconds,
+            "readvance_seconds": run.readvance_seconds,
+            "argmax_seconds": run.argmax_seconds,
+            "wall_seconds": run.wall_seconds,
+            "tokens_per_second": run.committed.len() as f64 / run.wall_seconds.max(f64::EPSILON),
+        })).collect::<Vec<_>>(),
+        "invariance_oracle_passed": invariance_passed,
+        "first_divergence": first_divergence,
+        "advisory_baseline_prefix_match": advisory_prefix,
+        "advisory_note": "prefix match vs decode-path baseline; tie-flips are expected occasionally, the blocking gate is run-invariance",
+        "committed_text": decode_tokens(&tokenizer, &reference.committed)?,
+    });
+    write_json_report(args.output.as_ref(), &report)?;
+    if !invariance_passed {
+        anyhow::bail!("state-rollback invariance oracle failed");
+    }
+    Ok(())
 }
 
 fn median(values: &mut [f64]) -> f64 {
