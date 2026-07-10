@@ -471,6 +471,14 @@ impl MiniCpmForConditionalGeneration {
         self.model.language_model.clear_cache();
     }
 
+    pub fn set_device_capture(&mut self, layers: Option<Vec<usize>>) {
+        self.model.language_model.set_device_capture(layers);
+    }
+
+    pub fn take_device_captures(&mut self) -> Vec<Tensor> {
+        self.model.language_model.take_device_captures()
+    }
+
     pub fn snapshot_decode_state(&self) -> crate::qwen35::DecodeStateSnapshot {
         self.model.language_model.snapshot_decode_state()
     }

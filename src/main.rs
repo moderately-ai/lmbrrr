@@ -564,6 +564,10 @@ struct DsparkRunArgs {
     #[arg(long = "corrupt-every", value_delimiter = ',', default_values_t = [0usize, 3, 5])]
     corrupt_every: Vec<usize>,
 
+    /// Run with a trained DSpark drafter checkpoint instead of the stub.
+    #[arg(long)]
+    drafter: Option<PathBuf>,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -4557,9 +4561,218 @@ fn dspark_stub_run(
     })
 }
 
+/// Multi-round speculative decoding with the trained Candle drafter inside
+/// the rollback-verified loop. Context updates use on-device capture of the
+/// target's capture layers: the verify chunk's captured states for the
+/// anchor + accepted drafts are valid regardless of rollback (they were
+/// computed under correct state), so they extend the drafter context each
+/// round.
+fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
+    use lmbrrr::dspark::DsparkDrafter;
+
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+    )?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+
+    let mut drafter = DsparkDrafter::load(drafter_dir, &device, dtype)?;
+    let gamma = args.gamma.min(drafter.config.block_size);
+    let capture_layers = drafter.config.target_layer_ids.clone();
+
+    // Greedy baseline for speed comparison and advisory text check.
+    let baseline_start = Instant::now();
+    let baseline = generate_tokens(
+        &mut model,
+        &device,
+        &greedy_generation_args(args.max_new_tokens, args.enable_thinking),
+        &prompt_tokens,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        &eos_ids,
+        |_, _, _, _| Ok(()),
+    )?;
+    let baseline_wall = secs(baseline_start.elapsed());
+
+    let wall_start = Instant::now();
+    model.clear_cache();
+    model.set_device_capture(Some(capture_layers));
+    drafter.clear_context();
+
+    let prompt_input = Tensor::from_slice(&prompt_tokens, (1, prompt_tokens.len()), &device)?;
+    let prefill_start = Instant::now();
+    let prompt_logits =
+        model.forward(&prompt_input, None::<&ProcessedImages>, &args.model.downsample_mode, 0)?;
+    device.synchronize()?;
+    let prefill_seconds = secs(prefill_start.elapsed());
+    let captures = model.take_device_captures();
+    let capture_refs = captures.iter().collect::<Vec<_>>();
+    let ctx = Tensor::cat(&capture_refs, D::Minus1)?;
+    drafter.append_context(&ctx, 0)?;
+    let (first_token, _) = argmax_token(&prompt_logits, &device)?;
+
+    let mut committed = vec![first_token];
+    let mut anchor = first_token;
+    let mut start = prompt_tokens.len();
+    let mut rounds = 0usize;
+    let mut rollbacks = 0usize;
+    let mut accepted_histogram = vec![0usize; gamma + 1];
+    let mut position_proposed = vec![0usize; gamma];
+    let mut position_accepted = vec![0usize; gamma];
+    let mut draft_seconds = 0.0f64;
+    let mut verify_seconds = 0.0f64;
+    let mut readvance_seconds = 0.0f64;
+
+    if !eos_ids.contains(&first_token) {
+        while committed.len() < args.max_new_tokens {
+            let draft_start = Instant::now();
+            let proposal = drafter.propose(anchor, start, gamma)?;
+            device.synchronize()?;
+            draft_seconds += secs(draft_start.elapsed());
+
+            let snapshot = model.snapshot_decode_state();
+            let mut chunk = Vec::with_capacity(gamma + 1);
+            chunk.push(anchor);
+            chunk.extend_from_slice(&proposal.tokens);
+            let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), &device)?;
+            let verify_start = Instant::now();
+            let logits = model.forward_all_logits(
+                &chunk_input,
+                None::<&ProcessedImages>,
+                &args.model.downsample_mode,
+                start,
+            )?;
+            device.synchronize()?;
+            verify_seconds += secs(verify_start.elapsed());
+            let (targets, _) = argmax_tokens(&logits, &device)?;
+            let chunk_captures = model.take_device_captures();
+
+            let accepted = proposal
+                .tokens
+                .iter()
+                .zip(targets.iter())
+                .take_while(|(draft, target)| draft == target)
+                .count();
+            let bonus = targets[accepted];
+            for j in 0..gamma {
+                position_proposed[j] += 1;
+                if j < accepted {
+                    position_accepted[j] += 1;
+                }
+            }
+
+            // Drafter context grows by the anchor + accepted drafts; those
+            // captured positions are valid regardless of rollback.
+            let capture_refs = chunk_captures.iter().collect::<Vec<_>>();
+            let chunk_ctx = Tensor::cat(&capture_refs, D::Minus1)?;
+            drafter.append_context(&chunk_ctx.narrow(1, 0, accepted + 1)?, start)?;
+
+            if accepted == gamma {
+                start += gamma + 1;
+            } else {
+                model.restore_decode_state(&snapshot)?;
+                rollbacks += 1;
+                let readvance = &chunk[..accepted + 1];
+                let readvance_input = Tensor::from_slice(readvance, (1, readvance.len()), &device)?;
+                let readvance_start = Instant::now();
+                let _ = model.forward_all_logits(
+                    &readvance_input,
+                    None::<&ProcessedImages>,
+                    &args.model.downsample_mode,
+                    start,
+                )?;
+                device.synchronize()?;
+                readvance_seconds += secs(readvance_start.elapsed());
+                let _ = model.take_device_captures();
+                start += accepted + 1;
+            }
+
+            committed.extend_from_slice(&proposal.tokens[..accepted]);
+            committed.push(bonus);
+            accepted_histogram[accepted] += 1;
+            rounds += 1;
+            anchor = bonus;
+
+            if committed[committed.len() - (accepted + 1)..]
+                .iter()
+                .any(|token| eos_ids.contains(token))
+            {
+                if let Some(eos_at) = committed.iter().position(|token| eos_ids.contains(token)) {
+                    committed.truncate(eos_at + 1);
+                }
+                break;
+            }
+        }
+    }
+    committed.truncate(args.max_new_tokens);
+    let wall_seconds = secs(wall_start.elapsed());
+    model.set_device_capture(None);
+
+    let mean_tau = if rounds > 0 {
+        committed.len() as f64 / rounds as f64
+    } else {
+        0.0
+    };
+    let advisory_prefix = baseline
+        .generated_token_ids
+        .iter()
+        .zip(committed.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_dspark_drafter_run",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "drafter": drafter_dir,
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
+        "prompt": args.prompt.as_str(),
+        "prompt_tokens": prompt_tokens.len(),
+        "gamma": gamma,
+        "max_new_tokens": args.max_new_tokens,
+        "committed_tokens": committed.len(),
+        "rounds": rounds,
+        "rollbacks": rollbacks,
+        "mean_accepted_length": mean_tau,
+        "accepted_histogram": accepted_histogram,
+        "position_acceptance": position_proposed.iter().zip(position_accepted.iter())
+            .map(|(p, a)| if *p > 0 { *a as f64 / *p as f64 } else { 0.0 })
+            .collect::<Vec<_>>(),
+        "prefill_seconds": prefill_seconds,
+        "draft_seconds": draft_seconds,
+        "verify_seconds": verify_seconds,
+        "readvance_seconds": readvance_seconds,
+        "wall_seconds": wall_seconds,
+        "tokens_per_second": committed.len() as f64 / wall_seconds.max(f64::EPSILON),
+        "baseline": {
+            "generated_tokens": baseline.generated_token_ids.len(),
+            "wall_seconds": baseline_wall,
+            "decode_tokens_per_second": baseline.decode_tokens_per_second(),
+        },
+        "advisory_baseline_prefix_match": advisory_prefix,
+        "committed_text": decode_tokens(&tokenizer, &committed)?,
+        "break_even_note": "measured break-even is tau ~= 4-5 with per-round rollback (docs/research/speculative-state-rollback.md)",
+    });
+    write_json_report(args.output.as_ref(), &report)
+}
+
 fn dspark_run(args: DsparkRunArgs) -> Result<()> {
     if args.gamma == 0 {
         anyhow::bail!("--gamma must be greater than zero");
+    }
+    if let Some(drafter_dir) = args.drafter.clone() {
+        return dspark_drafter_run(&args, &drafter_dir);
     }
     if args.corrupt_every.is_empty() {
         anyhow::bail!("provide at least one --corrupt-every value");

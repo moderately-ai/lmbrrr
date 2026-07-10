@@ -1,7 +1,7 @@
 ---
 id: integrate-dspark-block-runner
 title: Integrate DSpark block runner
-status: todo
+status: done
 priority: p1
 dependencies: [train-dspark-semi-autoregressive-drafter, implement-speculative-state-rollback]
 related: []

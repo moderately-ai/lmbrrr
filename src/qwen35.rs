@@ -1305,6 +1305,10 @@ pub struct Qwen35TextModel {
     dtype: DType,
     profiler: Option<Qwen35Profiler>,
     trace_recorder: Option<Qwen35TraceRecorder>,
+    // On-device capture of selected layer outputs for the DSpark drafter's
+    // fused context (full sequence, no CPU copies; ascending layer order).
+    device_capture_layers: Option<Vec<usize>>,
+    device_captures: Vec<Tensor>,
 }
 
 impl Qwen35TextModel {
@@ -1329,7 +1333,24 @@ impl Qwen35TextModel {
             dtype: vb.dtype(),
             profiler: None,
             trace_recorder: None,
+            device_capture_layers: None,
+            device_captures: Vec::new(),
         })
+    }
+
+    pub fn set_device_capture(&mut self, layers: Option<Vec<usize>>) {
+        self.device_capture_layers = layers.map(|mut layers| {
+            layers.sort_unstable();
+            layers.dedup();
+            layers
+        });
+        self.device_captures.clear();
+    }
+
+    /// Captured layer outputs of the most recent forward, ascending layer
+    /// order, each [b, seq, hidden] on device.
+    pub fn take_device_captures(&mut self) -> Vec<Tensor> {
+        std::mem::take(&mut self.device_captures)
     }
 
     pub fn embeddings(&self) -> &Tensor {
@@ -1365,6 +1386,8 @@ impl Qwen35TextModel {
         };
         let profiler = self.profiler.clone();
         let trace_recorder = self.trace_recorder.clone();
+        let capture_layers = self.device_capture_layers.clone();
+        let mut captures = Vec::new();
         let mut hidden = inputs_embeds.clone();
         for (layer_index, layer) in self.layers.iter_mut().enumerate() {
             let layer_kind = layer.kind();
@@ -1378,6 +1401,14 @@ impl Qwen35TextModel {
             if let Some(trace_recorder) = trace_recorder.as_ref() {
                 trace_recorder.record_layer(layer_index, layer_kind, &hidden, offset)?;
             }
+            if let Some(capture_layers) = capture_layers.as_ref() {
+                if capture_layers.contains(&layer_index) {
+                    captures.push(hidden.clone());
+                }
+            }
+        }
+        if capture_layers.is_some() {
+            self.device_captures = captures;
         }
         profiled(
             profiler.as_ref(),
