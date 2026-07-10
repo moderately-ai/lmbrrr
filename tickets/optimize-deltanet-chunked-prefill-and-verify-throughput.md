@@ -1,7 +1,7 @@
 ---
 id: optimize-deltanet-chunked-prefill-and-verify-throughput
 title: Optimize DeltaNet chunked prefill and verify throughput
-status: todo
+status: done
 priority: p1
 dependencies: [profile-dspark-verification-throughput-table]
 related: []

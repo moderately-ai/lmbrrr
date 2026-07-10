@@ -742,22 +742,33 @@ impl GatedDeltaNet {
         let full_len = full.dim(2)?;
         let start = full_len - l;
         let weight = self.conv_weight.squeeze(1)?;
-        let mut outs = Vec::with_capacity(l);
-        for t in start..start + l {
-            let mut acc = Tensor::zeros((b, c), xs.dtype(), xs.device())?;
-            for k in 0..self.conv_kernel_size {
-                let left = self.conv_kernel_size - 1 - k;
-                if t >= left {
-                    let src_pos = t - left;
-                    let value = full.narrow(2, src_pos, 1)?.squeeze(2)?;
-                    let w = weight.narrow(1, k, 1)?.reshape((1, c))?;
-                    acc = (acc + value.broadcast_mul(&w)?)?;
-                }
-            }
-            outs.push(acc.unsqueeze(2)?);
+        // Shifted-window depthwise conv: position t accumulates kernel taps in
+        // ascending k order, matching the original per-position loop's
+        // floating-point order exactly (left zero padding covers t < left).
+        let ksz = self.conv_kernel_size;
+        let window_len = l + ksz - 1;
+        let padded = if start >= ksz - 1 {
+            full.narrow(2, start - (ksz - 1), window_len)?
+        } else {
+            let deficit = (ksz - 1) - start;
+            Tensor::cat(
+                &[
+                    &Tensor::zeros((b, c, deficit), xs.dtype(), xs.device())?,
+                    &full.narrow(2, 0, start + l)?,
+                ],
+                2,
+            )?
+        };
+        let mut acc = padded
+            .narrow(2, 0, l)?
+            .broadcast_mul(&weight.narrow(1, 0, 1)?.reshape((1, c, 1))?)?;
+        for k in 1..ksz {
+            acc = (acc
+                + padded
+                    .narrow(2, k, l)?
+                    .broadcast_mul(&weight.narrow(1, k, 1)?.reshape((1, c, 1))?)?)?;
         }
-        let out_refs = outs.iter().collect::<Vec<_>>();
-        let out = Tensor::cat(&out_refs, 2)?.silu()?;
+        let out = acc.silu()?;
 
         self.conv_state = Some(if full_len >= self.conv_kernel_size {
             full.narrow(2, full_len - self.conv_kernel_size, self.conv_kernel_size)?
@@ -777,11 +788,135 @@ impl GatedDeltaNet {
         g: &Tensor,
         beta: &Tensor,
     ) -> Result<Tensor> {
-        let (b, l, h, k_dim) = query.dims4()?;
+        let (_, l, _, _) = query.dims4()?;
         if l == 1 {
             return self.recurrent_delta_rule_decode(query, key, value, g, beta);
         }
+        if deltanet_sequential_fallback() {
+            return self.recurrent_delta_rule_sequential(query, key, value, g, beta);
+        }
+        self.recurrent_delta_rule_chunked(query, key, value, g, beta)
+    }
 
+    /// Chunked (WY/UT-transform) gated delta rule for seq_len > 1.
+    ///
+    /// Algebraically identical to the sequential recurrence
+    /// `S_t = (I - b_t k_t k_t^T) a_t S_{t-1} + b_t k_t v_t^T`, `o_t = q_t^T S_t`
+    /// (a_t = exp(g_t) is a per-head scalar), evaluated per chunk via the
+    /// pseudo-value solve `(I + B) D = diag(b)(V - diag(gamma) K S_0)` where
+    /// `B[t,j] = b_t exp(G_t - G_j) k_t^T k_j` (strictly lower). All decay
+    /// factors are relative (`exp(G_t - G_j) <= 1` for t >= j), so nothing
+    /// overflows regardless of decay strength. `(I + B)^{-1}` is exact after
+    /// ceil(log2 C) Neumann-doubling steps because B is nilpotent.
+    fn recurrent_delta_rule_chunked(
+        &mut self,
+        query: &Tensor,
+        key: &Tensor,
+        value: &Tensor,
+        g: &Tensor,
+        beta: &Tensor,
+    ) -> Result<Tensor> {
+        const CHUNK: usize = 32;
+        let (b, l, h, k_dim) = query.dims4()?;
+        let v_dim = value.dim(D::Minus1)?;
+        let dtype = query.dtype();
+        let device = query.device().clone();
+
+        let q = (l2norm(query)?.to_dtype(DType::F32)? * (1.0 / (k_dim as f64).sqrt()))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let k = l2norm(key)?
+            .to_dtype(DType::F32)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let v = value
+            .to_dtype(DType::F32)?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let g = g.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+        let beta = beta.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+
+        let mut state = match &self.recurrent_state {
+            Some(state) if state.dtype() == DType::F32 => state.clone(),
+            Some(state) => state.to_dtype(DType::F32)?,
+            None => Tensor::zeros((b, h, k_dim, v_dim), DType::F32, &device)?,
+        };
+
+        let mut outs = Vec::with_capacity(l.div_ceil(CHUNK));
+        let mut start = 0usize;
+        while start < l {
+            let c = CHUNK.min(l - start);
+            let qc = q.narrow(2, start, c)?.contiguous()?;
+            let kc = k.narrow(2, start, c)?.contiguous()?;
+            let vc = v.narrow(2, start, c)?.contiguous()?;
+            let gc = g.narrow(2, start, c)?.contiguous()?;
+            let bc = beta.narrow(2, start, c)?.contiguous()?;
+
+            let gcs = gc.cumsum(D::Minus1)?;
+            let gamma = gcs.exp()?;
+            // rel[t, j] = exp(G_t - G_j); clamp keeps masked upper entries
+            // finite before the triangular masks zero them.
+            let rel = gcs
+                .unsqueeze(3)?
+                .broadcast_sub(&gcs.unsqueeze(2)?)?
+                .clamp(-1e30, 0.0)?
+                .exp()?;
+            let tril_incl = Tensor::tril2(c, DType::F32, &device)?;
+            let eye = Tensor::eye(c, DType::F32, &device)?;
+            let tril_strict = (&tril_incl - &eye)?;
+
+            let kk = kc.matmul(&kc.transpose(2, 3)?.contiguous()?)?;
+            let bmat = rel
+                .mul(&kk)?
+                .broadcast_mul(&tril_strict)?
+                .broadcast_mul(&bc.unsqueeze(3)?)?;
+            let ks0 = kc.matmul(&state)?;
+            let r = (vc - ks0.broadcast_mul(&gamma.unsqueeze(3)?)?)?
+                .broadcast_mul(&bc.unsqueeze(3)?)?;
+
+            let mut e = bmat.neg()?;
+            let mut x = e.broadcast_add(&eye)?;
+            let steps = if c <= 1 {
+                0
+            } else {
+                usize::BITS as usize - ((c - 1).leading_zeros() as usize)
+            };
+            for _ in 0..steps {
+                e = e.matmul(&e)?;
+                x = (&x + e.matmul(&x)?)?;
+            }
+            let delta = x.matmul(&r)?;
+
+            let qs0 = qc
+                .matmul(&state)?
+                .broadcast_mul(&gamma.unsqueeze(3)?)?;
+            let qk = qc.matmul(&kc.transpose(2, 3)?.contiguous()?)?;
+            let n = rel.mul(&qk)?.broadcast_mul(&tril_incl)?;
+            outs.push((qs0 + n.matmul(&delta)?)?);
+
+            let g_last = gcs.narrow(2, c - 1, 1)?;
+            let decay_to_end = g_last.broadcast_sub(&gcs)?.exp()?;
+            let kbar = kc.broadcast_mul(&decay_to_end.unsqueeze(3)?)?;
+            let gamma_c = g_last.exp()?.unsqueeze(3)?;
+            state = (state.broadcast_mul(&gamma_c)?
+                + kbar.transpose(2, 3)?.contiguous()?.matmul(&delta)?)?;
+            start += c;
+        }
+
+        self.recurrent_state = Some(state.to_dtype(dtype)?);
+        let out_refs = outs.iter().collect::<Vec<_>>();
+        Tensor::cat(&out_refs, 2)?.transpose(1, 2)?.to_dtype(dtype)
+    }
+
+    fn recurrent_delta_rule_sequential(
+        &mut self,
+        query: &Tensor,
+        key: &Tensor,
+        value: &Tensor,
+        g: &Tensor,
+        beta: &Tensor,
+    ) -> Result<Tensor> {
+        let (b, l, h, k_dim) = query.dims4()?;
         let v_dim = value.dim(D::Minus1)?;
         let dtype = query.dtype();
         let query = (l2norm(query)?.to_dtype(DType::F32)? * (1.0 / (k_dim as f64).sqrt()))?;
@@ -894,6 +1029,13 @@ fn profiled<T>(
     } else {
         f()
     }
+}
+
+/// Escape hatch for oracle comparisons: LMBRRR_DELTANET_SEQUENTIAL=1 restores
+/// the original per-token seq>1 recurrence.
+fn deltanet_sequential_fallback() -> bool {
+    static FALLBACK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FALLBACK.get_or_init(|| std::env::var("LMBRRR_DELTANET_SEQUENTIAL").is_ok())
 }
 
 fn l2norm(xs: &Tensor) -> Result<Tensor> {

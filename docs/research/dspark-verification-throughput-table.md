@@ -27,4 +27,8 @@ Consequence for the campaign, worked through: with today's target, a chain-DSpar
 
 ## Scheduler contract
 
-`target/verify-throughput-table.json` rows carry `median_verify_seconds` per (profile, γ); the scheduler consumes `T_round(γ) = T_draft + T_verify(γ)` and, until re-measured post-kernel-work, should use the linear fit above. Single-request only; batched verify lands with `batched-multi-stream-decode-runner`, and this table must be regenerated after the DeltaNet chunk kernel and under the q4 policy (both change the curve materially).
+`target/verify-throughput-table.json` rows carry `median_verify_seconds` per (profile, γ); the scheduler consumes `T_round(γ) = T_draft + T_verify(γ)`. Single-request only; batched verify lands with `batched-multi-stream-decode-runner`, and this table must be regenerated under the q4 policy.
+
+## Update 2026-07-10: after the chunked DeltaNet recurrence
+
+`optimize-deltanet-chunked-prefill-and-verify-throughput` landed the same day (see docs/research/deltanet-chunked-recurrence.md). The regenerated table now fits **T_verify(γ) ≈ 15.6 ms + 0.80 ms·γ** — the marginal verify token dropped 6.3 → 0.80 ms, γ=32 chunks verify at 784 tok/s (12.5× per-token efficiency), and the "speculation cannot pay" conclusion above is retired: a γ=8 round at τ=5 now projects ~158 tok/s on the BF16 target. `target/verify-throughput-table.json` holds the post-chunking numbers; the pre-chunking artifact is preserved in this note's table.
