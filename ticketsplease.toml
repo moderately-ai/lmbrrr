@@ -75,7 +75,7 @@ backend = "none"
 # The guard flags a branch that bumps the pin (matched by `repo`) or edits an
 # in-tree fork `paths` glob, against tickets declaring the same scope.
 [external_scopes]
-# "sqlparser-fork" = { repo = "tomsanbear/sqlparser", paths = [] }
+"candle-fork" = { repo = "tomsanbear/candle", paths = [] }
 
 # Tune how costly an exclusive overlap on a scope is for tracks/next
 # (--max-overlap): weight 0 = free to co-edit (an additive hub), higher =

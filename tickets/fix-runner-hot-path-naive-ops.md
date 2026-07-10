@@ -2,7 +2,7 @@
 id: fix-runner-hot-path-naive-ops
 title: Fix runner hot path naive ops
 status: todo
-priority: p2
+priority: p1
 dependencies: []
 related: []
 scopes: [runtime/candle]

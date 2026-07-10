@@ -1,7 +1,7 @@
 ---
 id: profile-dspark-verification-throughput-table
 title: Profile DSpark verification throughput table
-status: todo
+status: in-progress
 priority: p1
 dependencies: [design-full-dspark-drafter]
 related: []
@@ -9,6 +9,9 @@ scopes: [runtime/candle, runtime/metal, inference/speculative]
 shared_scopes: [docs/research]
 paths: [src/main.rs, docs/research/dspark-verification-throughput-table.md]
 tags: [speculative, dspark, benchmark]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783703003
 ---
 ## Goal
 
