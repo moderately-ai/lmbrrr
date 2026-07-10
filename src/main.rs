@@ -4417,6 +4417,12 @@ fn verify_table(args: VerifyTableArgs) -> Result<()> {
 struct SpecStubRun {
     corrupt_every: usize,
     committed: Vec<u32>,
+    /// Top-K logit values (descending) at the position that committed each
+    /// token. The invariance gate compares these trajectories across
+    /// corruption patterns: shared positions must agree within kernel noise
+    /// (state-integrity check), and a token divergence is benign only when
+    /// both runs' top-2 margins sit inside the noise (tie-flip).
+    committed_top_k: Vec<Vec<f32>>,
     rounds: usize,
     rollbacks: usize,
     accepted_histogram: Vec<usize>,
@@ -4434,6 +4440,45 @@ struct SpecStubRun {
 /// restored from the pre-verify snapshot and the accepted prefix re-advanced
 /// in one chunk; on full acceptance the advanced state is kept as-is.
 #[allow(clippy::too_many_arguments)]
+/// Top-K logit values per sequence position, descending. Logits may be [v],
+/// [l, v] or [b, l, v]; the batch dim, when present, must be 1. CPU
+/// reduction — oracle-mode only, never on the production path.
+const ORACLE_TOP_K: usize = 8;
+fn top_k_values(logits: &Tensor) -> Result<Vec<Vec<f32>>> {
+    let logits = match logits.dims().len() {
+        3 => logits.squeeze(0)?,
+        1 => logits.unsqueeze(0)?,
+        _ => logits.clone(),
+    };
+    let rows = logits.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let mut top = [f32::NEG_INFINITY; ORACLE_TOP_K];
+            for &v in row {
+                if v > top[ORACLE_TOP_K - 1] {
+                    let mut i = ORACLE_TOP_K - 1;
+                    while i > 0 && v > top[i - 1] {
+                        top[i] = top[i - 1];
+                        i -= 1;
+                    }
+                    top[i] = v;
+                }
+            }
+            top.to_vec()
+        })
+        .collect())
+}
+
+/// Logit-scale bound on legitimate chunk-split numerics. The target's logits
+/// at a committed position depend only on the prefix, not on how verify
+/// chunks split it, so across corruption patterns the top-K values at every
+/// shared position must agree to within kernel noise — measured at ~3 BF16
+/// ulps of a top logit near 32 (observed divergence-point margins 0.0 /
+/// 0.25 / 0.375) — while a real rollback bug perturbs the whole trajectory.
+/// Reports carry the observed maxima so this stays calibrated by evidence.
+const LOGIT_NOISE_BOUND: f32 = 0.75;
+
 fn dspark_stub_run(
     model: &mut MiniCpmForConditionalGeneration,
     device: &Device,
@@ -4457,6 +4502,7 @@ fn dspark_stub_run(
     let (first_token, mut argmax_elapsed) = argmax_token(&prompt_logits, device)?;
 
     let mut committed = vec![first_token];
+    let mut committed_top_k = top_k_values(&prompt_logits)?;
     let mut anchor = first_token;
     let mut offset = prompt_tokens.len();
     let mut rounds = 0usize;
@@ -4500,6 +4546,7 @@ fn dspark_stub_run(
             verify_seconds += secs(verify_start.elapsed());
             let (targets, chunk_argmax) = argmax_tokens(&logits, device)?;
             argmax_elapsed += chunk_argmax;
+            let chunk_top_k = top_k_values(&logits)?;
 
             let accepted = drafts
                 .iter()
@@ -4530,6 +4577,7 @@ fn dspark_stub_run(
 
             committed.extend_from_slice(&drafts[..accepted]);
             committed.push(bonus);
+            committed_top_k.extend_from_slice(&chunk_top_k[..=accepted]);
             accepted_histogram[accepted] += 1;
             rounds += 1;
             anchor = bonus;
@@ -4546,10 +4594,12 @@ fn dspark_stub_run(
         }
     }
     committed.truncate(max_new_tokens);
+    committed_top_k.truncate(committed.len());
 
     Ok(SpecStubRun {
         corrupt_every,
         committed,
+        committed_top_k,
         rounds,
         rollbacks,
         accepted_histogram,
@@ -4829,27 +4879,85 @@ fn dspark_run(args: DsparkRunArgs) -> Result<()> {
         )?);
     }
 
-    // BLOCKING oracle: committed output must be identical across corruption
-    // patterns. Every committed token is target-chunk-derived under
-    // exact-match acceptance, so any divergence is a state-rollback bug.
+    // BLOCKING oracle, state-integrity form. The target's logits at a
+    // committed position depend only on the prefix, never on how verify
+    // chunks split it, so across corruption patterns the top-K logit values
+    // at every shared committed position must agree to within kernel noise
+    // iff state rollback is sound — a real restore bug perturbs the whole
+    // trajectory, argmax flip or not. A committed-token divergence is benign
+    // only when both runs' top-2 margins sit inside the noise (a tie the
+    // chunk-split numerics may legitimately flip; root-caused 2026-07-10 —
+    // every kernel change re-rolls which prompts carry such ties, so bitwise
+    // stream equality can never be the gate). Streams legitimately fork
+    // after a benign tie, so comparison for that pair stops there.
     let reference = &runs[0];
     let mut invariance_passed = true;
     let mut first_divergence: Option<serde_json::Value> = None;
+    let mut benign_tie_divergences: Vec<serde_json::Value> = Vec::new();
+    let mut max_trajectory_deviation = 0.0f32;
     for run in &runs[1..] {
-        if run.committed != reference.committed {
-            invariance_passed = false;
-            let index = reference
-                .committed
+        let shared = reference
+            .committed
+            .iter()
+            .zip(run.committed.iter())
+            .position(|(a, b)| a != b);
+        let shared_len =
+            shared.unwrap_or_else(|| reference.committed.len().min(run.committed.len()));
+        // State-integrity: top-K trajectories over the shared prefix.
+        let mut worst: Option<(usize, f32)> = None;
+        for i in 0..shared_len {
+            let (Some(a), Some(b)) = (
+                reference.committed_top_k.get(i),
+                run.committed_top_k.get(i),
+            ) else {
+                continue;
+            };
+            let dev = a
                 .iter()
-                .zip(run.committed.iter())
-                .position(|(a, b)| a != b)
-                .unwrap_or_else(|| reference.committed.len().min(run.committed.len()));
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max);
+            max_trajectory_deviation = max_trajectory_deviation.max(dev);
+            if dev > LOGIT_NOISE_BOUND && worst.map_or(true, |(_, w)| dev > w) {
+                worst = Some((i, dev));
+            }
+        }
+        if let Some((index, dev)) = worst {
+            invariance_passed = false;
             first_divergence = Some(serde_json::json!({
+                "kind": "trajectory",
                 "corrupt_every": run.corrupt_every,
                 "index": index,
-                "reference_len": reference.committed.len(),
-                "run_len": run.committed.len(),
+                "top_k_deviation": dev,
+                "logit_noise_bound": LOGIT_NOISE_BOUND,
             }));
+            break;
+        }
+        // Token divergence at the end of the shared prefix: benign iff tie.
+        let Some(index) = shared else { continue };
+        let margin = |r: &SpecStubRun| {
+            r.committed_top_k
+                .get(index)
+                .map(|top| top[0] - top[1])
+        };
+        let (ref_margin, run_margin) = (margin(reference), margin(run));
+        let benign = matches!((ref_margin, run_margin), (Some(a), Some(b))
+            if a <= LOGIT_NOISE_BOUND && b <= LOGIT_NOISE_BOUND);
+        let detail = serde_json::json!({
+            "kind": "token",
+            "corrupt_every": run.corrupt_every,
+            "index": index,
+            "reference_len": reference.committed.len(),
+            "run_len": run.committed.len(),
+            "reference_margin": ref_margin,
+            "run_margin": run_margin,
+            "logit_noise_bound": LOGIT_NOISE_BOUND,
+        });
+        if benign {
+            benign_tie_divergences.push(detail);
+        } else {
+            invariance_passed = false;
+            first_divergence = Some(detail);
             break;
         }
     }
@@ -4898,6 +5006,9 @@ fn dspark_run(args: DsparkRunArgs) -> Result<()> {
         })).collect::<Vec<_>>(),
         "invariance_oracle_passed": invariance_passed,
         "first_divergence": first_divergence,
+        "benign_tie_divergences": benign_tie_divergences,
+        "max_trajectory_deviation": max_trajectory_deviation,
+        "logit_noise_bound": LOGIT_NOISE_BOUND,
         "advisory_baseline_prefix_match": advisory_prefix,
         "advisory_note": "prefix match vs decode-path baseline; tie-flips are expected occasionally, the blocking gate is run-invariance",
         "committed_text": decode_tokens(&tokenizer, &reference.committed)?,
