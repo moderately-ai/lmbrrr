@@ -16,6 +16,16 @@ Equality with the plain greedy baseline cannot be the blocking gate: chunk-path 
 
 Results (BF16, Metal, γ=8): oracle **passed** on both prompts — long run: 54/54 rounds rolled back under corrupt-every=3 with output still token-identical to the uncorrupted run; advisory baseline match 160/160 (long) and 12/13 (short — one expected tie-flip).
 
+## Oracle v2: state-integrity form (2026-07-10, later the same day)
+
+The bitwise form above is **prompt-sensitive by construction**, root-caused when a new validation prompt ("Explain how tides work.", 96 tokens) failed on every binary back to the exact commit validated above, rebuilt against crates.io candle — deterministic, identical divergence at token 69, coherent text on both sides. Bitwise cross-pattern equality holds only if no committed token in the horizon sits within kernel noise of its runner-up under *any* tested chunk split. The math prompt above happens to have no such token in 160 tokens; the tides prompt has one at 69. Any kernel change (gemv routing, fork rebase, future fusion/quantization) re-rolls which prompts carry sub-noise ties, so the bitwise gate degrades into a per-prompt coin flip precisely as the campaign changes kernels — while telling you nothing about rollback.
+
+The v2 gate (commit e4e6327) tests the property rollback must actually guarantee: **the target's logits at a committed position depend only on the prefix, never on the chunk split**, so across corruption patterns the top-8 logit values at every shared committed position must agree to within kernel noise. A real restore bug perturbs the whole trajectory (argmax flip or not) and fails loudly; a token divergence is benign only when both runs' top-2 margins sit inside the noise bound, after which the streams legitimately fork and comparison stops. This is strictly more sensitive than the bitwise form (it catches sub-argmax state corruption at every shared position) and robust to kernel churn.
+
+Measured calibration (BF16, Metal, both prompts): max top-8 trajectory deviation across all shared positions = 0.25 (tides) / 0.375 (math); every observed token divergence is a genuine tie (one side at margin 0.0, other ≤ 0.375); noise bound set at 0.75 (~6 BF16 ulps of a top logit near 32) with all measurements reported in the JSON for ongoing calibration. Verdict: **rollback machinery confirmed sound under the fork kernels** — all divergences ever observed are tie-flips, trajectories agree within 3 ulps.
+
+Protocol lesson recorded: validating a numerics-affecting change on a *new* prompt without first running the unchanged binary on that prompt (the control) wasted a full investigation cycle blaming the change for a pre-existing prompt property.
+
 ## First end-to-end speculative wall-clock (long prompt, 160 tokens)
 
 | Stub pattern | τ (mean) | rounds | rollbacks | tok/s | vs 55.7 baseline |

@@ -997,6 +997,8 @@ impl GatedDeltaNet {
             start += c;
         }
 
+        // One boundary cast per chunk is cheap; the decode path (per-token)
+        // is where the cast pair costs and keeps F32 instead.
         self.recurrent_state = Some(state.to_dtype(dtype)?);
         let out_refs = outs.iter().collect::<Vec<_>>();
         Tensor::cat(&out_refs, 2)?.transpose(1, 2)?.to_dtype(dtype)
@@ -1082,7 +1084,13 @@ impl GatedDeltaNet {
         let delta = (value - kv_mem)?.broadcast_mul(&beta)?;
         state = (state + key.unsqueeze(3)?.broadcast_mul(&delta.unsqueeze(2)?)?)?;
         let out = state.broadcast_mul(&query.unsqueeze(3)?)?.sum(2)?;
-        self.recurrent_state = Some(state.to_dtype(dtype)?);
+        // The state stays F32 across decode steps: the recurrence compounds
+        // BF16 rounding every token, and the cast pair costs 2 dispatches x
+        // 18 layers per token. Cross-path numerics (a BF16-stored chunk state
+        // feeding an F32-resident decode run, or a 1-token rollback
+        // re-advance landing here) shift logits by at most a few BF16 ulps,
+        // which the rollback oracle's logit-noise bound covers explicitly.
+        self.recurrent_state = Some(state);
         out.unsqueeze(1)?.to_dtype(dtype)
     }
 }
