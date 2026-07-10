@@ -1,7 +1,7 @@
 ---
 id: train-dspark-semi-autoregressive-drafter
 title: Train DSpark semi autoregressive drafter
-status: in-progress
+status: done
 priority: p1
 dependencies: [design-full-dspark-drafter]
 related: []
@@ -9,9 +9,6 @@ scopes: [inference/speculative, evals, runtime/candle]
 shared_scopes: [docs/research]
 paths: [evals/dspark/**, evals/eagle/**, src/main.rs, docs/research/dspark-semi-autoregressive-training.md]
 tags: [speculative, dspark, training]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783704607
 ---
 ## Goal
 
