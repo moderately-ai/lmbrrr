@@ -14,6 +14,10 @@ tags: [dspark, training, modal, campaign-1000]
 
 Iteratively scale the DSpark training corpus on Modal CUDA credits, driven by held-out accepted-length curves — the cheapest tau improvement available anywhere in the campaign. The paper trained on 1.3M samples x 10 epochs; round one starts far smaller.
 
+## Notes
+
+- Smoke-run observation (2026-07-10): the target forward in prepare_target_cache fell back to the slow torch DeltaNet path — transformers requires BOTH flash-linear-attention and causal-conv1d for the fast path, and causal-conv1d was skipped (needs nvcc at image build). Fine at 500 samples (~4 min); at full-corpus scale, switch the Modal image to a CUDA-devel base and install causal-conv1d before the big cache runs.
+
 ## Acceptance
 
 - A tau-vs-corpus-size curve (held-out, per prompt domain) with at least three corpus sizes, produced by re-running DeepSpec data-gen + training on Modal.
