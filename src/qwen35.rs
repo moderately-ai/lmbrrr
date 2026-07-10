@@ -155,6 +155,11 @@ fn unfused_rmsnorm() -> bool {
     *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_RMSNORM").is_ok_and(|v| v == "1"))
 }
 
+fn unfused_sdpa() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_SDPA").is_ok_and(|v| v == "1"))
+}
+
 #[derive(Clone, Debug)]
 struct Qwen35RmsNorm {
     // Zero-centred +1.0 pre-applied at load. Two dtype copies because the
@@ -532,7 +537,13 @@ impl FullAttention {
             },
         )?;
 
-        let (q, _k, v, k_t) = profiled(
+        // Decode (l == 1, no mask) routes to the fused SDPA vector kernel:
+        // native GQA (no repeat_kv materialization of the whole cache) and
+        // strided k/v (the cache narrows feed in directly, no k_t
+        // transpose+contiguous copy). Chunked/prefill keeps the explicit
+        // masked path. LMBRRR_UNFUSED_SDPA=1 restores the reference path.
+        let use_sdpa_vector = l == 1 && mask.is_none() && !unfused_sdpa();
+        let (q, k, v, k_t) = profiled(
             profiler,
             &device,
             Some(layer_index),
@@ -548,10 +559,13 @@ impl FullAttention {
                     .expect("full-attention KV cache lock poisoned")
                     .append(&k.contiguous()?, &v.contiguous()?)?;
                 let q = q.contiguous()?;
+                if use_sdpa_vector {
+                    return Ok((q, k, v, None));
+                }
                 let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
                 let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
                 let k_t = k.transpose(2, 3)?.contiguous()?;
-                Ok((q, k, v, k_t))
+                Ok((q, k, v, Some(k_t)))
             },
         )?;
 
@@ -565,6 +579,10 @@ impl FullAttention {
             offset,
             || {
                 let scale = 1.0 / (self.head_dim as f64).sqrt();
+                let Some(k_t) = k_t else {
+                    let out = candle_nn::ops::sdpa(&q, &k, &v, None, false, scale as f32, 1.0)?;
+                    return out.transpose(1, 2)?.reshape((b, l, self.hidden_size));
+                };
                 let mut attn = (q.matmul(&k_t)? * scale)?;
                 if let Some(mask) = mask {
                     attn = attn.broadcast_add(mask)?;
