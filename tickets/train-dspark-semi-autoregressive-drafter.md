@@ -1,7 +1,7 @@
 ---
 id: train-dspark-semi-autoregressive-drafter
 title: Train DSpark semi autoregressive drafter
-status: todo
+status: in-progress
 priority: p1
 dependencies: [design-full-dspark-drafter]
 related: []
@@ -9,10 +9,21 @@ scopes: [inference/speculative, evals, runtime/candle]
 shared_scopes: [docs/research]
 paths: [evals/dspark/**, evals/eagle/**, src/main.rs, docs/research/dspark-semi-autoregressive-training.md]
 tags: [speculative, dspark, training]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783704607
 ---
 ## Goal
 
 Train a DSpark-style drafter with a parallel backbone plus lightweight semi-autoregressive Markov head, not an EAGLE-only recurrent chain.
+
+## Progress (2026-07-10)
+
+- Every key DeepSpec file read in full (~5,500 lines: modeling/loss/markov/common, trainers, ckpt_manager, full data pipeline, eval loop, utils); no assumed semantics remain. Load-bearing facts: training REQUIRES flex_attention (block mask is a flex BlockMask), block context window is strictly kv < anchor_pos, checkpoints are standard HF safetensors via save_pretrained (Candle-loadable), verify is true rejection sampling.
+- MiniCPM adaptation committed on DeepSpec branch `minicpm-v46` (~/workspace/github.com/deepseek-ai/DeepSpec, commit 0869223): minicpm config builder (clean Qwen3Config from text_config, rope_parameters set both flat and dict forms), MiniCPMDSparkTrainer (AutoModelForImageTextToText for the frozen embed/lm_head copy — verified resolving on the wrapper), prepare_target_cache backbone shim (model_type minicpmv4_6 -> .language_model), `minicpm` chat template (loss mask verified against the real template: assistant content + <|im_end|> supervised, think scaffold excluded), config file (block 8, 2 layers, capture [1,6,11,16,21], mask_token 248077 = <unk>, num_anchors 256 for the vocab-248094 OOM guard), synthetic smoke script.
+- Local CPU smoke validated config -> 672.9M-param model (~165M trainable) -> anchor sampling -> block mask -> forward entry; FlexAttention has no CPU backward (torch limitation), so the forward+backward gate runs on a Modal GPU in the pinned env.
+- Modal: 1.5.1 installed via uv, profile `moderately-ai` authenticated; no `huggingface` secret yet (create at deploy). Image needs DeepSpec requirements + flash-linear-attention + causal-conv1d (transformers falls back to slow torch DeltaNet without them).
+- Next: Modal app in evals/dspark/ (functions: smoke on cheap GPU -> download/split prompts -> regenerate answers via transformers batch generate -> prepare_target_cache -> train), then the smoke-corpus end-to-end run.
 
 ## Acceptance
 
