@@ -35,7 +35,7 @@ Train a DSpark-style drafter with a parallel backbone plus lightweight semi-auto
 - Use the full vocabulary via the frozen shared target embedding and LM head; no observed-vocabulary output head.
 - Train with the paper's three-term objective: cross-entropy + total-variation distribution matching + confidence BCE, position-weighted by exp(-(k-1)/gamma) (default weights 0.1 / 0.9 / 1.0).
 - Train a confidence head using per-position prefix survival labels c* = 1 - 0.5 * total-variation(draft, target).
-- Trainer runs on CUDA (Modal credits are available for corpus generation and training) as well as local MPS for smoke runs; evaluate reusing DeepSpec before writing training code from scratch.
+- Trainer runs on CUDA (Modal credits are available for corpus generation and training). FALSIFIED: local MPS smoke is not viable — training requires flex-attention (BlockMask), which has no MPS support and no CPU backward; the pinned-env Modal GPU smoke replaces it (passed on H100).
 - Export a safetensors artifact and manifest with backbone, Markov head, confidence head, draft width, capture layers, and calibration metadata.
 - MiniCPM adaptation per the 2026-07-10 deep review: parser chat-template registration, the VLM backbone shim in prepare_target_cache (`_get_target_backbone`/`_get_target_hidden_size` — highest-risk touch point), minicpm modeling/config/trainer/evaluator registrations, and a `config/dspark/dspark_minicpm.py`.
 - `mask_token_id` is an existing reserved MiniCPM special id (embeddings are frozen copies; never add a vocab row); capture layers strictly exclude the final layer (start [1, 6, 11, 16, 21]).

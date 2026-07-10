@@ -16,7 +16,7 @@ Run N independent generation streams through one batched decode forward. Batchin
 
 ## Acceptance
 
-- Batch dimension threaded through the whole text decode path: batched DeltaNet conv/recurrent states, per-stream KV via a batched cache, batched greedy sampling, per-stream EOS handling. Static batching of N in {2, 4, 8, 16}; no continuous batching needed for the milestone.
+- Batch dimension threaded through the whole text decode path: batched DeltaNet conv/recurrent states, per-stream KV via a batched cache, batched greedy sampling, per-stream EOS handling. Static batching of N in {2, 4, 8, 16}; no continuous batching needed for the milestone. The in-repo TruncatableKvCache (landed with implement-speculative-state-rollback) already carries batch dims and replaces candle's fixed-262k-preallocation cache — extend it rather than reintroducing candle_nn's.
 - Remove the batch==1 assumptions found in the audit (trace recorder bail, per-row scalar readbacks).
 - Left-pad or per-stream offset handling documented and oracle-checked: each stream's batched output must exactly match its single-stream greedy output (this gate blocks — batching must not change per-stream text).
 - Report aggregate and per-stream tok/s vs N on the standard prompt matrix.
