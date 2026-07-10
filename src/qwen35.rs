@@ -649,6 +649,29 @@ impl FullAttention {
     }
 }
 
+/// Chunk intermediates retained during a verify forward so a partial accept
+/// can reconstruct the recurrent/conv state at any prefix position in closed
+/// form instead of re-advancing the prefix through the whole model:
+/// S_j = exp(G_j)·S0 + Σ_{i≤j} exp(G_j−G_i)·k_i ⊗ δ_i — the chunk-end update
+/// is exactly this formula at j = C−1, so the reconstruction shares its math.
+#[derive(Clone, Debug)]
+struct DeltaVerifyCapture {
+    /// Pre-chunk recurrent state, F32 (b, h, k_dim, v_dim).
+    s0: Tensor,
+    /// L2-normed keys, F32 (b, h, C, k_dim).
+    kc: Tensor,
+    /// WY pseudo-values, F32 (b, h, C, v_dim).
+    delta: Tensor,
+    /// Inclusive per-position log-decay cumsum, F32 (b, h, C).
+    gcs: Tensor,
+    /// Pre-conv input window cat(prev_conv_state, chunk_inputs).
+    conv_full: Tensor,
+    /// Columns of conv_full belonging to the previous conv state.
+    prev_conv_len: usize,
+    /// Storage dtype the chunked path would have used for the state.
+    dtype: DType,
+}
+
 #[derive(Clone, Debug)]
 struct GatedDeltaNet {
     in_proj_qkv: MixedLinear,
@@ -665,6 +688,13 @@ struct GatedDeltaNet {
     norm: Qwen35RmsNorm,
     conv_state: Option<Tensor>,
     recurrent_state: Option<Tensor>,
+    // Verify-state capture: enabled by the speculative runner around verify
+    // chunks; single-chunk forwards retain reconstruction intermediates.
+    verify_capture: bool,
+    verify_captured: Option<DeltaVerifyCapture>,
+    // Conv input window staged by depthwise_causal_conv (which runs before
+    // the recurrent rule in the layer forward) for capture assembly.
+    pending_conv_window: Option<(Tensor, usize)>,
     conv_kernel_size: usize,
     num_k_heads: usize,
     num_v_heads: usize,
@@ -733,6 +763,9 @@ impl GatedDeltaNet {
             )?,
             conv_state: None,
             recurrent_state: None,
+            verify_capture: false,
+            verify_captured: None,
+            pending_conv_window: None,
             conv_kernel_size: cfg.linear_conv_kernel_dim,
             num_k_heads: cfg.linear_num_key_heads,
             num_v_heads: cfg.linear_num_value_heads,
@@ -747,6 +780,53 @@ impl GatedDeltaNet {
     fn clear_cache(&mut self) {
         self.conv_state = None;
         self.recurrent_state = None;
+        self.verify_captured = None;
+        self.pending_conv_window = None;
+    }
+
+    /// Reconstructs and installs the recurrent + conv state as of the first
+    /// `prefix_len` positions of the last captured verify chunk, replacing a
+    /// restore + re-advance forward on partial accept.
+    fn select_verify_state(&mut self, prefix_len: usize) -> Result<()> {
+        let Some(cap) = self.verify_captured.take() else {
+            candle::bail!("select_verify_state without a captured verify chunk");
+        };
+        let chunk_len = cap.gcs.dim(2)?;
+        if prefix_len == 0 || prefix_len > chunk_len {
+            candle::bail!("verify-state prefix {prefix_len} outside 1..={chunk_len}");
+        }
+        let j = prefix_len - 1;
+        // S_j = exp(G_j)·S0 + Σ_{i≤j} exp(G_j−G_i)·k_i ⊗ δ_i
+        let gcs_j = cap.gcs.narrow(2, j, 1)?; // (b, h, 1)
+        let rel = gcs_j
+            .broadcast_sub(&cap.gcs.narrow(2, 0, prefix_len)?)?
+            .exp()?; // (b, h, j+1), entries ≤ 1
+        let wk = cap
+            .kc
+            .narrow(2, 0, prefix_len)?
+            .broadcast_mul(&rel.unsqueeze(3)?)?; // (b, h, j+1, k_dim)
+        let state = (wk
+            .transpose(2, 3)?
+            .contiguous()?
+            .matmul(&cap.delta.narrow(2, 0, prefix_len)?.contiguous()?)?
+            + cap
+                .s0
+                .broadcast_mul(&gcs_j.exp()?.unsqueeze(3)?)?)?;
+        // Match the dtype the chunked store (and thus a re-advance) would
+        // have produced at this boundary.
+        self.recurrent_state = Some(state.to_dtype(cap.dtype)?);
+
+        let window_len = cap.prev_conv_len + prefix_len;
+        let ksz = self.conv_kernel_size;
+        self.conv_state = Some(if window_len >= ksz {
+            cap.conv_full.narrow(2, window_len - ksz, ksz)?.copy()?
+        } else {
+            cap.conv_full
+                .narrow(2, 0, window_len)?
+                .pad_with_zeros(2, ksz - window_len, 0)?
+                .copy()?
+        });
+        Ok(())
     }
 
     fn apply_quantized_text_artifact(
@@ -892,6 +972,9 @@ impl GatedDeltaNet {
         };
         let full_len = full.dim(2)?;
         let start = full_len - l;
+        if self.verify_capture && l > 1 {
+            self.pending_conv_window = Some((full.clone(), start));
+        }
         // Shifted-window depthwise conv: position t accumulates kernel taps in
         // ascending k order, matching the original per-position loop's
         // floating-point order exactly (left zero padding covers t < left).
@@ -966,6 +1049,12 @@ impl GatedDeltaNet {
         let v_dim = value.dim(D::Minus1)?;
         let dtype = query.dtype();
         let device = query.device().clone();
+        // A fresh forward invalidates any previous chunk's capture.
+        self.verify_captured = None;
+        let capture_this = self.verify_capture && l <= CHUNK;
+        if !capture_this {
+            self.pending_conv_window = None;
+        }
 
         let q = (l2norm(query)?.to_dtype(DType::F32)? * (1.0 / (k_dim as f64).sqrt()))?
             .transpose(1, 2)?
@@ -1032,6 +1121,23 @@ impl GatedDeltaNet {
             }
             let delta = x.matmul(&r)?;
 
+            if capture_this {
+                let Some((conv_full, prev_conv_len)) = self.pending_conv_window.take() else {
+                    candle::bail!("verify capture enabled but no conv window was staged");
+                };
+                // `state` still holds S0 here; the chunk-end update below
+                // replaces the binding rather than mutating the tensor.
+                self.verify_captured = Some(DeltaVerifyCapture {
+                    s0: state.clone(),
+                    kc: kc.clone(),
+                    delta: delta.clone(),
+                    gcs: gcs.clone(),
+                    conv_full,
+                    prev_conv_len,
+                    dtype,
+                });
+            }
+
             let qs0 = qc
                 .matmul(&state)?
                 .broadcast_mul(&gamma.unsqueeze(3)?)?;
@@ -1066,6 +1172,9 @@ impl GatedDeltaNet {
         let (b, l, h, k_dim) = query.dims4()?;
         let v_dim = value.dim(D::Minus1)?;
         let dtype = query.dtype();
+        // The sequential fallback never captures verify intermediates.
+        self.verify_captured = None;
+        self.pending_conv_window = None;
         let query = (l2norm(query)?.to_dtype(DType::F32)? * (1.0 / (k_dim as f64).sqrt()))?;
         let key = l2norm(key)?.to_dtype(DType::F32)?;
         let value = value.to_dtype(DType::F32)?;
@@ -1501,6 +1610,46 @@ impl Qwen35TextModel {
             }
         }
         DecodeStateSnapshot { deltanet, kv_lens }
+    }
+
+    /// Enables/disables retention of verify-chunk reconstruction
+    /// intermediates in the DeltaNet layers (see [`DeltaVerifyCapture`]).
+    pub fn set_verify_state_capture(&mut self, on: bool) {
+        for layer in &mut self.layers {
+            if let TokenMixer::Linear(attn) = &mut layer.mixer {
+                attn.verify_capture = on;
+                if !on {
+                    attn.verify_captured = None;
+                    attn.pending_conv_window = None;
+                }
+            }
+        }
+    }
+
+    /// Partial-accept rollback without a re-advance forward: DeltaNet states
+    /// are reconstructed at `prefix_len` from the captured verify chunk, and
+    /// full-attention KV keeps the chunk's first `prefix_len` rows (they are
+    /// causally valid — each row depends only on its own position's hidden,
+    /// computed under the true pre-chunk state).
+    pub fn rollback_to_prefix(
+        &mut self,
+        snapshot: &DecodeStateSnapshot,
+        prefix_len: usize,
+    ) -> Result<()> {
+        let mut full_idx = 0usize;
+        for layer in &mut self.layers {
+            match &mut layer.mixer {
+                TokenMixer::Linear(attn) => attn.select_verify_state(prefix_len)?,
+                TokenMixer::Full(attn) => {
+                    let Some(len) = snapshot.kv_lens.get(full_idx) else {
+                        candle::bail!("decode-state snapshot has too few KV entries");
+                    };
+                    attn.truncate_kv(len + prefix_len)?;
+                    full_idx += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn restore_decode_state(&mut self, snapshot: &DecodeStateSnapshot) -> Result<()> {

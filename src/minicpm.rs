@@ -490,6 +490,20 @@ impl MiniCpmForConditionalGeneration {
         self.model.language_model.restore_decode_state(snapshot)
     }
 
+    pub fn set_verify_state_capture(&mut self, on: bool) {
+        self.model.language_model.set_verify_state_capture(on);
+    }
+
+    pub fn rollback_to_prefix(
+        &mut self,
+        snapshot: &crate::qwen35::DecodeStateSnapshot,
+        prefix_len: usize,
+    ) -> Result<()> {
+        self.model
+            .language_model
+            .rollback_to_prefix(snapshot, prefix_len)
+    }
+
     pub fn set_text_profiler(&mut self, profiler: Option<Qwen35Profiler>) {
         self.model.language_model.set_profiler(profiler);
     }

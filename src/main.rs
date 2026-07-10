@@ -4500,6 +4500,7 @@ fn dspark_stub_run(
     device.synchronize()?;
     let prefill_seconds = secs(prefill_start.elapsed());
     let (first_token, mut argmax_elapsed) = argmax_token(&prompt_logits, device)?;
+    model.set_verify_state_capture(!readvance_rollback());
 
     let mut committed = vec![first_token];
     let mut committed_top_k = top_k_values(&prompt_logits)?;
@@ -4558,19 +4559,24 @@ fn dspark_stub_run(
             if accepted == width {
                 offset += width + 1;
             } else {
-                model.restore_decode_state(&snapshot)?;
                 rollbacks += 1;
-                let readvance = &chunk[..accepted + 1];
-                let readvance_input =
-                    Tensor::from_slice(readvance, (1, readvance.len()), device)?;
                 let readvance_start = Instant::now();
-                let _ = model.forward_all_logits(
-                    &readvance_input,
-                    None::<&ProcessedImages>,
-                    downsample_mode,
-                    offset,
-                )?;
-                device.synchronize()?;
+                if readvance_rollback() {
+                    model.restore_decode_state(&snapshot)?;
+                    let readvance = &chunk[..accepted + 1];
+                    let readvance_input =
+                        Tensor::from_slice(readvance, (1, readvance.len()), device)?;
+                    let _ = model.forward_all_logits(
+                        &readvance_input,
+                        None::<&ProcessedImages>,
+                        downsample_mode,
+                        offset,
+                    )?;
+                    device.synchronize()?;
+                } else {
+                    model.rollback_to_prefix(&snapshot, accepted + 1)?;
+                    device.synchronize()?;
+                }
                 readvance_seconds += secs(readvance_start.elapsed());
                 offset += accepted + 1;
             }
@@ -4595,6 +4601,7 @@ fn dspark_stub_run(
     }
     committed.truncate(max_new_tokens);
     committed_top_k.truncate(committed.len());
+    model.set_verify_state_capture(false);
 
     Ok(SpecStubRun {
         corrupt_every,
@@ -4668,6 +4675,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let ctx = Tensor::cat(&capture_refs, D::Minus1)?;
     drafter.append_context(&ctx, 0)?;
     let (first_token, _) = argmax_token(&prompt_logits, &device)?;
+    model.set_verify_state_capture(!readvance_rollback());
 
     let mut committed = vec![first_token];
     let mut anchor = first_token;
@@ -4728,20 +4736,26 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             if accepted == gamma {
                 start += gamma + 1;
             } else {
-                model.restore_decode_state(&snapshot)?;
                 rollbacks += 1;
-                let readvance = &chunk[..accepted + 1];
-                let readvance_input = Tensor::from_slice(readvance, (1, readvance.len()), &device)?;
                 let readvance_start = Instant::now();
-                let _ = model.forward_all_logits(
-                    &readvance_input,
-                    None::<&ProcessedImages>,
-                    &args.model.downsample_mode,
-                    start,
-                )?;
-                device.synchronize()?;
+                if readvance_rollback() {
+                    model.restore_decode_state(&snapshot)?;
+                    let readvance = &chunk[..accepted + 1];
+                    let readvance_input =
+                        Tensor::from_slice(readvance, (1, readvance.len()), &device)?;
+                    let _ = model.forward_all_logits(
+                        &readvance_input,
+                        None::<&ProcessedImages>,
+                        &args.model.downsample_mode,
+                        start,
+                    )?;
+                    device.synchronize()?;
+                    let _ = model.take_device_captures();
+                } else {
+                    model.rollback_to_prefix(&snapshot, accepted + 1)?;
+                    device.synchronize()?;
+                }
                 readvance_seconds += secs(readvance_start.elapsed());
-                let _ = model.take_device_captures();
                 start += accepted + 1;
             }
 
@@ -4765,6 +4779,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     committed.truncate(args.max_new_tokens);
     let wall_seconds = secs(wall_start.elapsed());
     model.set_device_capture(None);
+    model.set_verify_state_capture(false);
 
     // Exact per-round committed tokens (accepted + bonus) from the histogram;
     // committed.len()/rounds counts the prefill token and loses EOS-truncated
@@ -5370,6 +5385,13 @@ fn analyze_verification(
         bonus_token_id,
         reconstructed_token_ids,
     })
+}
+
+/// `LMBRRR_READVANCE_ROLLBACK=1` restores the legacy restore + re-advance
+/// rollback (reference path for the state-selection mechanism).
+fn readvance_rollback() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("LMBRRR_READVANCE_ROLLBACK").is_ok_and(|v| v == "1"))
 }
 
 /// Mean committed tokens per round (accepted drafts + bonus) straight from
