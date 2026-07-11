@@ -324,6 +324,7 @@ def prepare_cache(
     train_data: str = "data/regen-smoke.jsonl",
     cache_name: str = "target-cache-smoke",
     local_batch_size: int = 8,
+    target_model: str | None = "/vol/models/minicpm-v46-fakequant-q4kft",
 ) -> None:
     """DeepSpec target cache (hidden states via hooks) for the given JSONL.
 
@@ -350,7 +351,14 @@ def prepare_cache(
             str(local_batch_size),
             "--num-workers",
             "2",
-        ],
+        ]
+        + (
+            # Deployment-config consistency: capture hidden states under the
+            # same fake-quant weights that generated the traces.
+            ["--opts", f"model.target_model_name_or_path={target_model}"]
+            if target_model
+            else []
+        ),
         cwd="/deepspec",
     )
     print(f"copying cache {build_dir} -> {output_dir}", flush=True)
