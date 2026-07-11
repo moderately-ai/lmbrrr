@@ -588,6 +588,13 @@ struct DsparkRunArgs {
     #[arg(long, value_enum)]
     drafter_quantize: Option<DrafterQuantArg>,
 
+    /// Hardware-aware prefix scheduling (paper Appendix A): per-round
+    /// admission maximizing expected tokens/sec from calibrated cumulative
+    /// survival and the measured round-cost table. Supersedes
+    /// --confidence-threshold when set.
+    #[arg(long)]
+    schedule: bool,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -4729,6 +4736,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     model.set_verify_state_capture(!readvance_rollback());
 
     let sts = StsCalibration::load(drafter_dir)?;
+    let cost_model = RoundCostModel::measured_default();
     let mut committed = vec![first_token];
     let mut anchor = first_token;
     let mut start = prompt_tokens.len();
@@ -4737,9 +4745,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mut accepted_histogram = vec![0usize; gamma + 1];
     let mut position_proposed = vec![0usize; gamma];
     let mut position_accepted = vec![0usize; gamma];
-    // Per verified position: (raw confidence logit, calibrated p, accepted).
-    // Feeds offline STS fitting and threshold sweeps.
-    let mut confidence_records: Vec<(f32, f32, bool)> = Vec::new();
+    // Per ROUND, per verified position: (position index, raw confidence
+    // logit, calibrated p, accepted). Round grouping preserves the prefix
+    // structure the cumulative-survival calibration fits on.
+    let mut confidence_records: Vec<Vec<(usize, f32, f32, bool)>> = Vec::new();
     let mut proposed_width_histogram = vec![0usize; gamma + 1];
     let mut draft_seconds = 0.0f64;
     let mut verify_seconds = 0.0f64;
@@ -4754,20 +4763,30 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             }
             draft_seconds += secs(draft_start.elapsed());
 
-            // DeepSpec inference contract: the proposal is the leading run of
-            // positions whose calibrated confidence clears the threshold;
-            // 0-draft rounds degrade to plain [anchor] verification.
-            // Floor at 1: a width-0 round pays the full draft for exactly one
-            // committed token, while the marginal chunk token costs ~0.8 ms
-            // against position-0 acceptance of 0.4-0.8 — always +EV.
-            let width = match args.confidence_threshold {
-                Some(threshold) => proposal
-                    .confidence_logits
-                    .iter()
-                    .take_while(|logit| sts.probability(**logit) >= threshold)
-                    .count()
-                    .max(1),
-                None => gamma,
+            // Width selection: the Appendix-A scheduler when --schedule,
+            // else static confidence truncation (floored at 1: a width-0
+            // round pays the full draft for one committed token), else full
+            // gamma.
+            let width = if args.schedule {
+                schedule_prefix_width(
+                    proposal
+                        .confidence_logits
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, logit)| sts.position_probability(pos, *logit) as f64),
+                    |w| cost_model.t_round_ms(w),
+                    gamma,
+                )
+            } else {
+                match args.confidence_threshold {
+                    Some(threshold) => proposal
+                        .confidence_logits
+                        .iter()
+                        .take_while(|logit| sts.probability(**logit) >= threshold)
+                        .count()
+                        .max(1),
+                    None => gamma,
+                }
             };
             proposed_width_histogram[width] += 1;
 
@@ -4824,6 +4843,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 Some(_) => 0,
             };
             let bonus = targets[accepted];
+            let mut round_records = Vec::with_capacity(width.min(accepted + 1));
             for j in 0..width {
                 position_proposed[j] += 1;
                 if j < accepted {
@@ -4835,9 +4855,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 // against a correct prefix, so stop at accepted + 1.
                 if j <= accepted {
                     let logit = proposal.confidence_logits[j];
-                    confidence_records.push((logit, sts.probability(logit), j < accepted));
+                    round_records.push((j, logit, sts.probability(logit), j < accepted));
                 }
             }
+            confidence_records.push(round_records);
 
             // Drafter context grows by the anchor + accepted drafts; those
             // captured positions are valid regardless of rollback.
@@ -4939,7 +4960,9 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "sts_calibration": { "scale": sts.scale, "shift": sts.shift },
         "proposed_width_histogram": proposed_width_histogram,
         "confidence_records": confidence_records.iter()
-            .map(|(logit, p, acc)| serde_json::json!([logit, p, acc]))
+            .map(|round| round.iter()
+                .map(|(pos, logit, p, acc)| serde_json::json!([pos, logit, p, acc]))
+                .collect::<Vec<_>>())
             .collect::<Vec<_>>(),
         "prefill_seconds": prefill_seconds,
         "draft_seconds": draft_seconds,
@@ -5535,10 +5558,21 @@ impl DrafterQuantArg {
 /// Platt-style calibration of the confidence head (we own this; absent from
 /// DeepSpec): p_accept = sigmoid(scale * logit + shift), fitted offline on
 /// (logit, accepted) records and stored as sts.json in the drafter dir.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
+struct StsPositionCalibration {
+    scale: f32,
+    shift: f32,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 struct StsCalibration {
     scale: f32,
     shift: f32,
+    /// Per-position Platt parameters (STS left-to-right fit); the scheduler's
+    /// cumulative survival is the product of these calibrated marginals —
+    /// validated reliability within ~3 points across all bins.
+    #[serde(default)]
+    positions: Vec<StsPositionCalibration>,
 }
 
 impl StsCalibration {
@@ -5546,6 +5580,7 @@ impl StsCalibration {
         Self {
             scale: 1.0,
             shift: 0.0,
+            positions: Vec::new(),
         }
     }
 
@@ -5563,6 +5598,74 @@ impl StsCalibration {
     fn probability(&self, logit: f32) -> f32 {
         1.0 / (1.0 + (-(self.scale * logit + self.shift)).exp())
     }
+
+    fn position_probability(&self, position: usize, logit: f32) -> f32 {
+        match self.positions.get(position.min(self.positions.len().saturating_sub(1))) {
+            Some(p) if !self.positions.is_empty() => {
+                1.0 / (1.0 + (-(p.scale * logit + p.shift)).exp())
+            }
+            _ => self.probability(logit),
+        }
+    }
+}
+
+/// Measured round costs (ms) for the scheduler's throughput objective.
+/// verify_ms\[l\] is the chunk cost at length l = width + 1; defaults are the
+/// post-fusion in-loop table (target/vt-gdc2.json + measured draft).
+struct RoundCostModel {
+    draft_ms: f64,
+    verify_ms: Vec<f64>,
+}
+
+impl RoundCostModel {
+    fn measured_default() -> Self {
+        Self {
+            draft_ms: 5.0,
+            // Index by chunk length l (0 unused); interpolated from the
+            // 2026-07-10 post-fusion verify table at short/medium context.
+            verify_ms: vec![
+                0.0, 6.5, 13.9, 14.2, 14.5, 14.9, 15.2, 15.5, 15.7, 16.0, 16.4, 16.8, 17.2,
+            ],
+        }
+    }
+
+    fn t_round_ms(&self, width: usize) -> f64 {
+        let l = (width + 1).min(self.verify_ms.len() - 1);
+        self.draft_ms + self.verify_ms[l]
+    }
+}
+
+/// DSpark hardware-aware prefix admission (paper Appendix A): scan positions
+/// left to right, admitting while expected throughput improves, and STOP at
+/// the first non-improving position without reading the next confidence —
+/// c_{k+1} is a function of the realized token x_k, so looking ahead would
+/// introduce retrospective selection bias. `survival_probs` must therefore
+/// be lazy; this function reads exactly `admitted + 1` items (or fewer at
+/// gamma).
+fn schedule_prefix_width(
+    mut survival_probs: impl Iterator<Item = f64>,
+    t_round_ms: impl Fn(usize) -> f64,
+    gamma: usize,
+) -> usize {
+    let mut best_width = 0usize;
+    let mut best = 1.0 / t_round_ms(0);
+    let mut survival = 1.0f64;
+    let mut expected = 1.0f64; // bonus token
+    for k in 1..=gamma {
+        let Some(p_k) = survival_probs.next() else {
+            break;
+        };
+        survival *= p_k;
+        expected += survival;
+        let f = expected / t_round_ms(k);
+        if f > best {
+            best = f;
+            best_width = k;
+        } else {
+            break;
+        }
+    }
+    best_width
 }
 
 /// `LMBRRR_LOOP_TIMING=1` re-enables the per-phase synchronize() calls in the
@@ -6101,6 +6204,40 @@ fn select_device(cpu: bool) -> Result<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Paper Appendix A non-anticipation scenario: a1 = 0.8 with SPS
+    /// throughputs {1.0, 0.5, 0.45}. f(0) = 1*1.0 = 1.0; f(1) = 1.8*0.5 =
+    /// 0.9 — non-improving, so the scheduler must return width 0 WITHOUT
+    /// ever evaluating c_2 (it is a function of the realized token x_1).
+    #[test]
+    fn scheduler_appendix_a_non_anticipation() {
+        use std::cell::Cell;
+        let reads = Cell::new(0usize);
+        let probs = [0.8f64, f64::NAN /* reading this is the bug */]
+            .into_iter()
+            .inspect(|_| reads.set(reads.get() + 1));
+        // Encode SPS as throughput via t_round = E_max_possible / SPS-style
+        // rates: t(0)=1/1.0, t(1)=1/0.5, t(2)=1/0.45.
+        let sps = [1.0f64, 0.5, 0.45];
+        let width = schedule_prefix_width(probs, |w| 1.0 / sps[w], 2);
+        assert_eq!(width, 0);
+        assert_eq!(reads.get(), 1, "c_2 must never be read");
+    }
+
+    /// Improving throughput admits positions and stops at the first decline.
+    #[test]
+    fn scheduler_admits_while_improving() {
+        // Flat costs: admitting high-probability positions always improves.
+        let width = schedule_prefix_width(
+            [0.9f64, 0.8, 0.1, 0.9].into_iter(),
+            |w| 10.0 + 0.5 * w as f64,
+            4,
+        );
+        // f grows through k=2 (0.9, then +0.72), k=3 adds only 0.072
+        // expected tokens for +0.5ms — declining; must stop at 2 and never
+        // read the fourth probability.
+        assert_eq!(width, 2);
+    }
 
     fn bench_args(profiles: Vec<BenchProfile>, prompts: Vec<String>) -> BenchArgs {
         BenchArgs {
