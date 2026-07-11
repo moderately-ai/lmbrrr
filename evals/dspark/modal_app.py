@@ -630,7 +630,8 @@ def vllm_probe(
     from openai import OpenAI
 
     cmd = [
-        "vllm",
+        "python",
+        "/lmbrrr-dspark/vllm_dense_qwen3next.py",
         "serve",
         model_path,
         "--host",
@@ -856,8 +857,12 @@ def vllm_introspect() -> None:
 
     names = [n for n in ModelRegistry.get_supported_archs() if "3_5" in n or "3_next" in n.lower() or "Next" in n]
     print("ARCHS", json.dumps(sorted(names)), flush=True)
-    from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
+    import vllm.model_executor.models.qwen3_next as qn
 
-    print("CONFIG_SIG", inspect.signature(Qwen3_5Config.__init__), flush=True)
-    src = inspect.getsource(Qwen3_5Config)
-    print("CONFIG_SRC_HEAD", src[:3000], flush=True)
+    src = inspect.getsource(qn)
+    i = src.index("No Qwen3Next layer found")
+    print("ERR_CONTEXT", src[max(0, i - 1500) : i + 200], flush=True)
+    j = src.index("linear_attention") if "linear_attention" in src else -1
+    print("HAS_linear_attention_literal", j != -1, flush=True)
+    for needle in ("layer_types", "full_attention_interval", "layers_block_type"):
+        print(needle, src.count(needle), flush=True)
