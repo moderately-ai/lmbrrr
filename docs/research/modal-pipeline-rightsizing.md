@@ -36,6 +36,12 @@ Prep phase for round-2 training per the user directive: measure and rightsize th
 
 500/500 conversations, 0 errors, 1249 padded-tok/s through the full length distribution (`/vol/data/regen-fakequant-500.jsonl`; samples verified coherent). Two hardening fixes came out of this gate: the fakequant export now backfills `chat_template.jinja`/`tokenizer_config.json` (lmbrrr's hub cache never fetches them), and batch admission is token-budgeted (32k positions) because sorted admission back-loads long conversations and HF generate materializes batch × padded-len × 248k-vocab prefill logits — the fixed-batch-128 config OOM'd at sample 414 on exactly that tail. Peak memory under budget: 22.5 GiB (budget has headroom to raise if the HF path stays the engine).
 
-## Open: continuous-batching engine probe
+## Continuous-batching engine: RESOLVED — vLLM native, 6.6k tok/s (5.3× HF)
 
-HF generate is framework-bound (~43–46% util, ~1% of the 2.6 GB model's decode-bandwidth ceiling; composite lacks `logits_to_keep`). SGLang probe in flight (CUDA-devel base; first attempt failed on deep_gemm needing CUDA_HOME, not on the architecture). If SGLang serves the hybrid composite: expect ~10×+ data-gen throughput; else vLLM transformers-backend fallback; else the HF numbers above are the engine of record and round-2 economics stand as revised.
+HF generate is framework-bound (~43–46% util, ~1% of the 2.6 GB model's decode-bandwidth ceiling; the composite lacks `logits_to_keep`). Engine probe verdicts:
+
+- **SGLang 0.5.7: no.** No Qwen3.5-hybrid implementation, and its transformers fallback rejects hybrid linear-attention models (after clearing CUDA_HOME/libnuma/registry hurdles).
+- **vLLM: yes, natively** — `MiniCPMV4_6ForConditionalGeneration` is a registered vLLM architecture. Serving the untouched fakequant composite: **6597 tok/s at concurrency 64** (192 samples in 8.8 s — too fast for the 10 s GPU sampler to catch a reading; steady-state likely higher), coherent output, 68 GiB peak. That is 5.3× the tuned HF path and ~17× round-1's config.
+- Detour with lasting value: proving the path went through extracting the text decoder and converting it to `qwen3_next` layout, **verified bitwise-identical** (max |Δlogit| 0.00000, equal greedy tokens) — the MiniCPM-V-4.6 text decoder IS a dense Qwen3-Next. The converted checkpoint (`/vol/models/minicpm-v46-qwen3next-fakequant`) is kept: any qwen3_next-capable engine can serve it, though vLLM's own Qwen3Next class assumes MoE (dense unsupported) — the composite path avoids all of that.
+
+Production regen now runs `vllm_regenerate`: vLLM server + DeepSpec's `generate_train_data.py` (OpenAI-compatible, multi-turn, resume), greedy per the round-2 plan. **Revised 100k data-gen: ~4.6 GPU-h ≈ $19** (plan said $160; tuned HF path would have been $90). Round-2 total now tracks **~$180–230**.
