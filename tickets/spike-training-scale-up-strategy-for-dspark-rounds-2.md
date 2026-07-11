@@ -1,7 +1,7 @@
 ---
 id: spike-training-scale-up-strategy-for-dspark-rounds-2
 title: "Spike: training scale-up strategy for DSpark rounds 2+"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [scale-dspark-training-corpus-modal, train-dspark-semi-autoregressive-drafter]
