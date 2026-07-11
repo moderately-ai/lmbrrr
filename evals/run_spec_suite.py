@@ -68,13 +68,14 @@ def main() -> int:
                        "--drafter", drafter, "--prompt", prompt,
                        "--max-new-tokens", str(args.max_new_tokens),
                        "--gamma", str(args.gamma),
-                       "--drafter-quantize", "q8-0",
-                       "--quantize-lm-head", "q4k",
                        "--quantized-manifest", str(ROOT / QMAN)]
-                # Per-arm extras override the default cost model (dspark-run
+                # Defaults an arm's extra flags may override (dspark-run
                 # rejects duplicate flags).
-                if "--cost-model" not in extra:
-                    cmd += ["--cost-model", str(ROOT / COST)]
+                for flag, value in [("--drafter-quantize", "q8-0"),
+                                    ("--quantize-lm-head", "q4k"),
+                                    ("--cost-model", str(ROOT / COST))]:
+                    if flag not in extra:
+                        cmd += [flag, value]
                 cmd += ["--output", str(out), *extra]
                 proc = subprocess.run(cmd, capture_output=True, cwd=ROOT,
                                       check=False, text=True)
