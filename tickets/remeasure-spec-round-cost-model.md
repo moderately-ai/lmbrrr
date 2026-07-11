@@ -1,7 +1,7 @@
 ---
 id: remeasure-spec-round-cost-model
 title: Rebuild the spec-round cost model from in-loop post-fusion measurements
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: [implement-dspark-hardware-aware-prefix-scheduler, cut-drafter-propose-cost]
@@ -9,10 +9,11 @@ scopes: [evals, inference/speculative]
 shared_scopes: [docs/research]
 paths: []
 tags: [speculative, measurement, campaign-1000]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783739755
 ---
+## Outcome (2026-07-11, closing)
+
+Artifact shipped: target/spec-round-cost-model.json (verify_ms by chunk length from vt-gdc2 short+medium averages, draft costs per config); dspark-run --cost-model loads it (built-in measured defaults otherwise) and reproduces the operating point (115.6 tok/s, 0.79x). Old table doc marked SUPERSEDED. The propose breakdown and the l=1->2 attribution (chunk-kernel phases + m=2 gemm) are recorded in the sections below; the m=2 gemm remains the open ~4ms and lives on the bf16-activation ticket as the weight-shared small-m quantized/dense matmul package.
+
 ## RESOLVED: l=1 -> l=2 doubling fully attributed (610a46e)
 
 LMBRRR_VT_PROFILE=1 component diff at ctx=27: deltanet_fused_chunk 8.68ms vs deltanet_fused_decode 5.03 (+3.65 — the chunk kernel's sequential phase-4/5 tg_sum barrier chains are ~2x the decode kernel per token; restructure to simdgroup-parallel positions or cooperative B-matrix computation), mlp 4.70 -> 8.85 (+4.15 — m=2 tile-gemm inefficiency is REAL for MLP shapes even though the skinny-gemm v1 design lost; a v2 with multi-column simdgroups for B reuse is the shape of the fix), remainder ~1.9ms across attention/norms. Two scoped fork-kernel tasks worth ~7.5ms/round combined — these are the L2 completion path to verify ~9ms.

@@ -595,6 +595,11 @@ struct DsparkRunArgs {
     #[arg(long)]
     schedule: bool,
 
+    /// Round-cost artifact for the scheduler (target/spec-round-cost-model
+    /// .json shape). Falls back to the built-in measured defaults.
+    #[arg(long)]
+    cost_model: Option<PathBuf>,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -4736,7 +4741,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     model.set_verify_state_capture(!readvance_rollback());
 
     let sts = StsCalibration::load(drafter_dir)?;
-    let cost_model = RoundCostModel::measured_default();
+    let cost_model = match &args.cost_model {
+        Some(path) => RoundCostModel::load(path)?,
+        None => RoundCostModel::measured_default(),
+    };
     let mut committed = vec![first_token];
     let mut anchor = first_token;
     let mut start = prompt_tokens.len();
@@ -5618,6 +5626,26 @@ struct RoundCostModel {
 }
 
 impl RoundCostModel {
+    fn load(path: &Path) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct Artifact {
+            default_draft_ms: f64,
+            verify_ms_by_chunk_len: Vec<f64>,
+        }
+        let artifact: Artifact = serde_json::from_reader(
+            std::fs::File::open(path)
+                .with_context(|| format!("open cost model {}", path.display()))?,
+        )
+        .with_context(|| format!("parse cost model {}", path.display()))?;
+        if artifact.verify_ms_by_chunk_len.len() < 3 {
+            anyhow::bail!("cost model needs verify_ms for chunk lengths >= 2");
+        }
+        Ok(Self {
+            draft_ms: artifact.default_draft_ms,
+            verify_ms: artifact.verify_ms_by_chunk_len,
+        })
+    }
+
     fn measured_default() -> Self {
         Self {
             draft_ms: 5.0,
