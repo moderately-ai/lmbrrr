@@ -63,7 +63,6 @@ image = (
         "datasets==4.8.5",
         "openai==2.6.1",
         "flash-linear-attention",
-        "gguf==0.17.1",
     )
     .env(
         {
@@ -558,75 +557,8 @@ def train_probe(
     )
 
 
-@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=3 * 3600, cpu=8, memory=64 * 1024)
-def build_fakequant_checkpoint(
-    output_name: str = "minicpm-v46-fakequant-q4kft",
-) -> None:
-    """Deployment-config trace generator prep: quantize->dequantize every
-    text linear per the q4k-full-text policy (GGML Q4_K reference via
-    gguf-py) so regenerated traces carry the deployed target's weight noise.
-    The lm_head stays dense (tied embedding; deployment quantizes only the
-    head copy — recorded residual mismatch). Streams safetensors shards; no
-    model class needed."""
-    import shutil
-    from pathlib import Path
-
-    import numpy as np
-    import torch
-    from gguf import GGMLQuantizationType, quants
-    from huggingface_hub import snapshot_download
-    from safetensors import safe_open
-    from safetensors.torch import save_file
-
-    src = Path(snapshot_download(TARGET_MODEL))
-    dst = Path(f"/vol/models/{output_name}")
-    dst.mkdir(parents=True, exist_ok=True)
-
-    def eligible(name: str, shape) -> bool:
-        if not name.endswith(".weight") or len(shape) != 2:
-            return False
-        if ".layers." not in name:
-            return False
-        if not (".mlp." in name or ".self_attn." in name or ".linear_attn." in name):
-            return False
-        if name.endswith(".in_proj_a.weight") or name.endswith(".in_proj_b.weight"):
-            return False
-        # Q4_K needs rows divisible by the 256-element superblock.
-        return shape[-1] % 256 == 0
-
-    quantized = 0
-    skipped = 0
-    max_shift = 0.0
-    for shard in sorted(src.glob("*.safetensors")):
-        tensors = {}
-        with safe_open(shard, framework="pt") as handle:
-            for name in handle.keys():
-                tensor = handle.get_tensor(name)
-                if eligible(name, tensor.shape):
-                    data = tensor.to(torch.float32).numpy()
-                    packed = quants.quantize(data, GGMLQuantizationType.Q4_K)
-                    restored = quants.dequantize(packed, GGMLQuantizationType.Q4_K)
-                    shift = float(np.abs(restored - data).max())
-                    max_shift = max(max_shift, shift)
-                    tensors[name] = torch.from_numpy(restored).to(tensor.dtype)
-                    quantized += 1
-                else:
-                    tensors[name] = tensor
-                    skipped += 1
-        save_file(tensors, dst / shard.name, metadata={"format": "pt"})
-        print(f"wrote {shard.name}: {quantized} quantized so far", flush=True)
-    for extra in src.iterdir():
-        if extra.suffix != ".safetensors" and extra.is_file():
-            shutil.copy2(extra, dst / extra.name)
-    print(
-        json.dumps(
-            {
-                "output": str(dst),
-                "quantized_tensors": quantized,
-                "passthrough_tensors": skipped,
-                "max_abs_weight_shift": max_shift,
-            }
-        ),
-        flush=True,
-    )
-    volume.commit()
+# Fake-quant checkpoint generation moved to the Rust side (`lmbrrr
+# fakequant-export`): gguf-py implements k-quant DEquantize only, while
+# candle carries the deployment's own Q4_K quantizer — strictly more
+# faithful. Build locally, then `modal volume put` the directory to
+# /vol/models/.

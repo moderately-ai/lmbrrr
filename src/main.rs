@@ -81,6 +81,22 @@ enum Command {
     MultiBench(MultiBenchArgs),
     TreeCheck(TreeCheckArgs),
     VisionCheck(VisionCheckArgs),
+    FakequantExport(FakequantExportArgs),
+}
+
+/// Deployment-config trace-generator prep: rewrite the HF checkpoint with
+/// every q4k-full-text-policy tensor passed through candle's own Q4_K
+/// quantize->dequantize, so CUDA-side data generation carries the deployed
+/// target's weight noise. The lm_head stays dense (tied embedding;
+/// deployment quantizes only the runtime head copy — residual mismatch,
+/// documented in the corpus-scaling plan).
+#[derive(Parser, Debug)]
+struct FakequantExportArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long, default_value = "target/minicpm-v46-fakequant-q4kft")]
+    output_dir: PathBuf,
 }
 
 /// Vision feature parity gate: merged image features (vision tower + merger)
@@ -1376,7 +1392,79 @@ fn main() -> Result<()> {
         Command::MultiBench(args) => multi_bench(args),
         Command::TreeCheck(args) => tree_check(args),
         Command::VisionCheck(args) => vision_check(args),
+        Command::FakequantExport(args) => fakequant_export(args),
     }
+}
+
+fn fakequant_export(args: FakequantExportArgs) -> Result<()> {
+    use candle::quantized::{GgmlDType, QTensor};
+
+    let bundle = resolve_artifacts(&args.model)?;
+    fs::create_dir_all(&args.output_dir)?;
+
+    let eligible = |name: &str, shape: &[usize]| -> bool {
+        name.ends_with(".weight")
+            && shape.len() == 2
+            && name.contains(".layers.")
+            && (name.contains(".mlp.")
+                || name.contains(".self_attn.")
+                || name.contains(".linear_attn."))
+            && !name.ends_with(".in_proj_a.weight")
+            && !name.ends_with(".in_proj_b.weight")
+            && shape[shape.len() - 1] % 256 == 0
+    };
+
+    let mut quantized = 0usize;
+    let mut passthrough = 0usize;
+    let mut max_shift = 0f32;
+    for shard in &bundle.artifacts.weights {
+        let tensors = candle::safetensors::load(shard, &Device::Cpu)?;
+        let mut out = std::collections::HashMap::new();
+        for (name, tensor) in tensors {
+            if eligible(&name, tensor.dims()) {
+                let f32_tensor = tensor.to_dtype(DType::F32)?;
+                let q = QTensor::quantize(&f32_tensor, GgmlDType::Q4K)?;
+                let restored = q.dequantize(&Device::Cpu)?;
+                let shift = (&restored - &f32_tensor)?
+                    .abs()?
+                    .max_all()?
+                    .to_scalar::<f32>()?;
+                max_shift = max_shift.max(shift);
+                out.insert(name, restored.to_dtype(tensor.dtype())?);
+                quantized += 1;
+            } else {
+                out.insert(name, tensor);
+                passthrough += 1;
+            }
+        }
+        let file_name = shard
+            .file_name()
+            .context("weight shard has no file name")?;
+        candle::safetensors::save(&out, args.output_dir.join(file_name))?;
+        println!(
+            "wrote {}: {} quantized so far",
+            file_name.to_string_lossy(),
+            quantized
+        );
+    }
+    // Sidecar configs the generator needs (tokenizer, configs, index).
+    if let Some(dir) = bundle.artifacts.weights.first().and_then(|p| p.parent()) {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if path.is_file() && !name.ends_with(".safetensors") {
+                fs::copy(&path, args.output_dir.join(&name))?;
+            }
+        }
+    }
+    println!(
+        "fakequant export: {} quantized, {} passthrough, max |Δw| {:.5} -> {}",
+        quantized,
+        passthrough,
+        max_shift,
+        args.output_dir.display()
+    );
+    Ok(())
 }
 
 fn vision_check(args: VisionCheckArgs) -> Result<()> {
