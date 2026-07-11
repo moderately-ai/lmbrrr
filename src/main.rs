@@ -661,6 +661,20 @@ struct DsparkRunArgs {
     #[arg(long)]
     cost_model: Option<PathBuf>,
 
+    /// Two-branch tree verification: draft the runner-up branch at position
+    /// 1 (propose_branching) and verify both paths in one flattened forward,
+    /// committing the longer-accepted one. Caps effective width at 5 so the
+    /// flattened chunk fits the l <= 12 kernel.
+    #[arg(long)]
+    tree: bool,
+
+    /// Branch only when the calibrated position-0 survival lands in this
+    /// inclusive band (lo,hi): outside it the runner-up carries too little
+    /// mass (high) or the whole draft is doomed (low). Chain rounds
+    /// otherwise.
+    #[arg(long, value_delimiter = ',', default_values_t = [0.0f32, 1.0])]
+    tree_band: Vec<f32>,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -5022,6 +5036,9 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     // probe again periodically instead of degrading to greedy-minus-draft.
     let mut consecutive_zero_widths = 0usize;
     let mut skipped_drafts = 0usize;
+    let mut tree_rounds = 0usize;
+    let mut alt_wins = 0usize;
+    let mut alt_tokens_gained = 0usize;
     const SKIP_DRAFT_AFTER: usize = 3;
     const PROBE_EVERY: usize = 8;
 
@@ -5035,7 +5052,11 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 None
             } else {
                 let draft_start = Instant::now();
-                let p = drafter.propose(anchor, start, gamma)?;
+                let p = if args.tree {
+                    drafter.propose_branching(anchor, start, gamma)?
+                } else {
+                    drafter.propose(anchor, start, gamma)?
+                };
                 if loop_timing() {
                     device.synchronize()?;
                 }
@@ -5079,6 +5100,128 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             let draft_tokens: &[u32] = proposal.as_ref().map_or(&[], |p| &p.tokens);
             let draft_confidences: &[f32] =
                 proposal.as_ref().map_or(&[], |p| &p.confidence_logits);
+
+            // Two-branch tree round: verify [anchor, a_1..a_w, b_1..b_w] in
+            // one flattened forward and commit the longer-accepted path. Only
+            // worth branching when the runner-up is live (distinct token, and
+            // position-0 survival inside the configured band).
+            let tree_width = width.min(5);
+            let tree_round = args.tree
+                && tree_width >= 1
+                && proposal.as_ref().is_some_and(|p| {
+                    p.alt_tokens.len() >= tree_width && p.alt_tokens[0] != p.tokens[0]
+                })
+                && draft_confidences
+                    .first()
+                    .map(|logit| sts.position_probability(0, *logit) as f32)
+                    .is_some_and(|p0| p0 >= args.tree_band[0] && p0 <= args.tree_band[1]);
+            if tree_round {
+                let w = tree_width;
+                let p = proposal.as_ref().expect("tree round requires a proposal");
+                let a = &p.tokens[..w];
+                let b = &p.alt_tokens[..w];
+                let snapshot = model.snapshot_decode_state();
+                let mut flat = Vec::with_capacity(1 + 2 * w);
+                flat.push(anchor);
+                flat.extend_from_slice(a);
+                flat.extend_from_slice(b);
+                let flat_input = Tensor::from_slice(&flat, (1, flat.len()), &device)?;
+                let verify_start = Instant::now();
+                let logits = model.forward_tree_all_logits(&flat_input, start, w)?;
+                if loop_timing() {
+                    device.synchronize()?;
+                }
+                verify_seconds += secs(verify_start.elapsed());
+                let (targets, _) = argmax_tokens(&logits, &device)?;
+                let chunk_captures = model.take_device_captures();
+
+                let main_accepted = a
+                    .iter()
+                    .zip(targets[..w].iter())
+                    .take_while(|(draft, target)| draft == target)
+                    .count();
+                // The alternate root is checked against the same anchor-row
+                // target; its continuation rows sit after the main branch's.
+                let alt_accepted = if targets[0] == b[0] {
+                    1 + b[1..]
+                        .iter()
+                        .zip(targets[w + 1..].iter())
+                        .take_while(|(draft, target)| draft == target)
+                        .count()
+                } else {
+                    0
+                };
+                let on_alt = alt_accepted > main_accepted;
+                let accepted = main_accepted.max(alt_accepted);
+                let winner: &[u32] = if on_alt { b } else { a };
+                let bonus_row = if on_alt { w + alt_accepted } else { main_accepted };
+                let bonus = targets[bonus_row];
+
+                // Calibration records stay on the main chain (the fit's
+                // population); tau_eff shows up in the accepted histogram.
+                let mut round_records = Vec::new();
+                for j in 0..w {
+                    position_proposed[j] += 1;
+                    if j < main_accepted {
+                        position_accepted[j] += 1;
+                    }
+                    if j <= main_accepted {
+                        let logit = draft_confidences[j];
+                        round_records.push((j, logit, sts.probability(logit), j < main_accepted));
+                    }
+                }
+                confidence_records.push(round_records);
+
+                let capture_refs = chunk_captures.iter().collect::<Vec<_>>();
+                let chunk_ctx = Tensor::cat(&capture_refs, D::Minus1)?;
+                let ctx_rows = if on_alt {
+                    Tensor::cat(
+                        &[
+                            chunk_ctx.narrow(1, 0, 1)?,
+                            chunk_ctx.narrow(1, w + 1, accepted)?,
+                        ],
+                        1,
+                    )?
+                    .contiguous()?
+                } else {
+                    chunk_ctx.narrow(1, 0, accepted + 1)?
+                };
+                drafter.append_context(&ctx_rows, start)?;
+
+                // Winner install is unconditional: even a full main accept
+                // must drop the alternate's KV rows.
+                model.rollback_tree(&snapshot, w, on_alt, accepted)?;
+                if loop_timing() {
+                    device.synchronize()?;
+                }
+                if accepted < w {
+                    rollbacks += 1;
+                }
+                start += accepted + 1;
+                committed.extend_from_slice(&winner[..accepted]);
+                committed.push(bonus);
+                accepted_histogram[accepted] += 1;
+                rounds += 1;
+                tree_rounds += 1;
+                if on_alt {
+                    alt_wins += 1;
+                    alt_tokens_gained += alt_accepted.saturating_sub(main_accepted);
+                }
+                anchor = bonus;
+
+                if committed[committed.len() - (accepted + 1)..]
+                    .iter()
+                    .any(|token| eos_ids.contains(token))
+                {
+                    if let Some(eos_at) =
+                        committed.iter().position(|token| eos_ids.contains(token))
+                    {
+                        committed.truncate(eos_at + 1);
+                    }
+                    break;
+                }
+                continue;
+            }
 
             let snapshot = model.snapshot_decode_state();
             let mut chunk = Vec::with_capacity(width + 1);
@@ -5250,6 +5393,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "sts_calibration": { "scale": sts.scale, "shift": sts.shift },
         "proposed_width_histogram": proposed_width_histogram,
         "skipped_drafts": skipped_drafts,
+        "tree": args.tree,
+        "tree_rounds": tree_rounds,
+        "tree_alt_wins": alt_wins,
+        "tree_alt_tokens_gained": alt_tokens_gained,
         "confidence_records": confidence_records.iter()
             .map(|round| round.iter()
                 .map(|(pos, logit, p, acc)| serde_json::json!([pos, logit, p, acc]))

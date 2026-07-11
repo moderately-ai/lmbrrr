@@ -495,7 +495,12 @@ impl DsparkDrafter {
         if branch && gamma > 0 {
             let step0 = corrected[0].to_dtype(DType::F32)?.squeeze(0)?;
             let neg = Tensor::full(-1e30f32, 1, &self.device)?;
-            let second = step0.index_add(&token_tensors[0], &neg, 0)?.argmax(0)?;
+            // Keep the id rank-1 like the main chain's argmax(Minus1) output:
+            // markov_w1.index_select rejects rank-0 indices.
+            let second = step0
+                .index_add(&token_tensors[0], &neg, 0)?
+                .argmax(0)?
+                .unsqueeze(0)?;
             let mut prev = second.clone();
             alt_token_tensors.push(second);
             for k in 0..gamma {

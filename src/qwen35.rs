@@ -2083,6 +2083,8 @@ impl Qwen35TextModel {
             mask: self.tree_mask(w, offset)?,
         };
         let profiler = self.profiler.clone();
+        let capture_layers = self.device_capture_layers.clone();
+        let mut captures = Vec::new();
         let mut hidden = inputs_embeds.clone();
         for (layer_index, layer) in self.layers.iter_mut().enumerate() {
             hidden = layer.forward(
@@ -2093,6 +2095,14 @@ impl Qwen35TextModel {
                 profiler.as_ref(),
                 Some(&tree),
             )?;
+            if let Some(capture_layers) = capture_layers.as_ref() {
+                if capture_layers.contains(&layer_index) {
+                    captures.push(hidden.clone());
+                }
+            }
+        }
+        if capture_layers.is_some() {
+            self.device_captures = captures;
         }
         self.norm.forward(&hidden)
     }
