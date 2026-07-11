@@ -1242,14 +1242,32 @@ def round3_stage1_regen() -> None:
 def round3_stage2_prep() -> None:
     """Target cache for the round-3 corpus (same body as prepare_cache with a
     20h window: 60k took well under 6h, 120k gets 3x headroom), then spawns
-    training."""
-    if os.path.exists(f"/vol/cache/{R3_CACHE}/manifest.json"):
-        print(f"cache {R3_CACHE} exists; skipping prep", flush=True)
+    training.
+
+    Completion is judged by a _COMPLETE sentinel written only after the
+    whole volume copy succeeds — manifest.json existence is NOT proof (a
+    partial copytree can include it; the 2026-07-11 ENOSPC failure would
+    have made a manifest-based skip hand the trainer a truncated cache).
+    Any directory without the sentinel is a partial copy and is removed
+    before rebuilding."""
+    import shutil
+
+    cache_dir = f"/vol/cache/{R3_CACHE}"
+    sentinel = f"{cache_dir}/_COMPLETE"
+    if os.path.exists(sentinel):
+        print(f"cache {R3_CACHE} complete; skipping prep", flush=True)
     else:
+        if os.path.exists(cache_dir):
+            print(f"removing partial cache {cache_dir}", flush=True)
+            shutil.rmtree(cache_dir)
+            volume.commit()
         prepare_cache.local(
             train_data=f"data/{R3_REGEN}",
             cache_name=R3_CACHE,
         )
+        with open(sentinel, "w") as f:
+            f.write("ok\n")
+        volume.commit()
     round3_stage3_train.spawn()
 
 
