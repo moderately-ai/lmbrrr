@@ -308,3 +308,46 @@ def train(
         cmd.extend(["--opts", f"exp_name={exp_name}"])
     _run(cmd, cwd="/deepspec", env=env)
     volume.commit()
+
+
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=4 * 3600)
+def evaluate(
+    checkpoint: str = "runs/dspark_block8_minicpm_v46/step_380",
+    tasks: str = "gsm8k:20,mt-bench:10",
+    max_new_tokens: int = 512,
+    temperature: float = 0.0,
+    confidence_threshold: float = 0.0,
+) -> None:
+    """Run the DeepSpec DSpark evaluator (tau, accept_rate@k, confidence
+    reliability artifacts) against a checkpoint on the volume.
+
+    The MiniCPM evaluator re-forwards the accepted prefix per round (the
+    hybrid text decoder has no croppable HF cache), so counts are kept small
+    by default; artifacts land under the checkpoint's tensorboard dir.
+    """
+    ckpt = f"/vol/{checkpoint}"
+    tb_dir = f"{ckpt}/eval-tensorboard"
+    cmd = [
+        "python",
+        "/deepspec/eval.py",
+        "--target_name_or_path",
+        TARGET_MODEL,
+        "--draft_name_or_path",
+        ckpt,
+        "--evaluator",
+        "minicpm",
+        "--tasks",
+        tasks,
+        "--max-new-tokens",
+        str(max_new_tokens),
+        "--temperature",
+        str(temperature),
+        "--confidence-threshold",
+        str(confidence_threshold),
+        "--tensorboard-dir",
+        tb_dir,
+        "--step",
+        "0",
+    ]
+    _run(cmd, cwd="/deepspec")
+    volume.commit()
