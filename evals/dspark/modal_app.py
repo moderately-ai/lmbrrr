@@ -366,21 +366,20 @@ def prepare_cache(
     volume.commit()
 
 
-@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=1024 * 1024)
-def train(
-    cache_name: str = "target-cache-smoke",
-    global_batch_size: int | None = None,
-    num_train_epochs: int | None = None,
-    logging_steps: int | None = 1,
-    torch_compile: bool = True,
-    exp_name: str | None = None,
-    local_batch_size: int = 2,
-    stage_local: bool = True,
-    draft_init_checkpoint: str | None = None,
-    lr: float | None = None,
-    target_model: str = "/vol/models/minicpm-v46-fakequant-q4kft",
+def _train_impl(
+    cache_name: str,
+    global_batch_size: int | None,
+    num_train_epochs: int | None,
+    logging_steps: int | None,
+    torch_compile: bool,
+    exp_name: str | None,
+    local_batch_size: int,
+    stage_local: bool,
+    draft_init_checkpoint: str | None,
+    lr: float | None,
+    target_model: str,
 ) -> None:
-    """Train the drafter on a prepared cache; checkpoints land in /vol/runs.
+    """Shared trainer invocation for the H100:4 and H100:8 entrypoints.
 
     Rightsizing (2026-07-11): volume random reads starve the GPU (180 s/step
     at gb=64); staging the cache to container NVMe (694 MB/s copy) plus
@@ -423,6 +422,68 @@ def train(
         cmd.extend(["--opts", f"exp_name={exp_name}"])
     _run(cmd, cwd="/deepspec", env=env)
     volume.commit()
+
+
+@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=1024 * 1024)
+def train(
+    cache_name: str = "target-cache-smoke",
+    global_batch_size: int | None = None,
+    num_train_epochs: int | None = None,
+    logging_steps: int | None = 1,
+    torch_compile: bool = True,
+    exp_name: str | None = None,
+    local_batch_size: int = 2,
+    stage_local: bool = True,
+    draft_init_checkpoint: str | None = None,
+    lr: float | None = None,
+    target_model: str = "/vol/models/minicpm-v46-fakequant-q4kft",
+) -> None:
+    """Train the drafter on a prepared cache (4x H100); see _train_impl."""
+    _train_impl(
+        cache_name,
+        global_batch_size,
+        num_train_epochs,
+        logging_steps,
+        torch_compile,
+        exp_name,
+        local_batch_size,
+        stage_local,
+        draft_init_checkpoint,
+        lr,
+        target_model,
+    )
+
+
+@app.function(image=image, gpu="H100:8", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=1024 * 1024)
+def train8(
+    cache_name: str = "target-cache-smoke",
+    global_batch_size: int | None = None,
+    num_train_epochs: int | None = None,
+    logging_steps: int | None = 1,
+    torch_compile: bool = True,
+    exp_name: str | None = None,
+    local_batch_size: int = 2,
+    stage_local: bool = True,
+    draft_init_checkpoint: str | None = None,
+    lr: float | None = None,
+    target_model: str = "/vol/models/minicpm-v46-fakequant-q4kft",
+) -> None:
+    """8x H100 variant of train (same recipe, fixed global batch: pure DDP
+    speedup). First use: a 1-epoch probe on the 40k cache to measure the
+    real s/step before the round-3 500k run commits to the scaling math."""
+    _train_impl(
+        cache_name,
+        global_batch_size,
+        num_train_epochs,
+        logging_steps,
+        torch_compile,
+        exp_name,
+        local_batch_size,
+        stage_local,
+        draft_init_checkpoint,
+        lr,
+        target_model,
+    )
 
 
 @app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=4 * 3600)
@@ -1048,3 +1109,173 @@ def token_frequency(
         _json.dump(out, f)
     print(f"wrote {output_name}: pinned {len(pinned)}, curve {curve}")
     volume.commit()
+
+
+@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=3600)
+def contamination_scan(
+    corpus_names: str = "perfectblend_train_600k.jsonl,regen-r2-40k.jsonl",
+    ngram_words: int = 13,
+) -> None:
+    """Eval-set decontamination check: word-13-gram overlap between the
+    training corpora and (a) the gsm8k test split, (b) the vendored
+    Spec-Bench questions. Reports hit counts and example row ids; a nonzero
+    gsm8k hit rate means the measured tau slope could be partly
+    memorization and the corpus needs filtering before round 3."""
+    import json as _json
+    import re
+
+    from datasets import load_dataset
+
+    def norm_ngrams(text: str) -> set:
+        words = re.sub(r"[^a-z0-9 ]", " ", text.lower()).split()
+        return {
+            " ".join(words[i : i + ngram_words])
+            for i in range(len(words) - ngram_words + 1)
+        }
+
+    eval_grams: set = set()
+    gsm = load_dataset("openai/gsm8k", "main", split="test")
+    for row in gsm:
+        eval_grams |= norm_ngrams(row["question"])
+    n_gsm = len(eval_grams)
+    with open("/vol/data/spec_bench_question.jsonl") as f:
+        for line in f:
+            d = _json.loads(line)
+            for turn in d["turns"]:
+                eval_grams |= norm_ngrams(turn)
+    print(f"eval n-grams: gsm8k {n_gsm}, +spec-bench -> {len(eval_grams)}")
+
+    for name in corpus_names.split(","):
+        hits = 0
+        rows = 0
+        examples = []
+        with open(f"/vol/data/{name}") as f:
+            for i, line in enumerate(f):
+                row = _json.loads(line)
+                texts = [
+                    m.get("content", "") for m in row.get("conversations", [])
+                ] or [str(row.get("prompt", "")) + " " + str(row.get("text", ""))]
+                rows += 1
+                if any(norm_ngrams(t) & eval_grams for t in texts if t):
+                    hits += 1
+                    if len(examples) < 5:
+                        examples.append(i)
+        print(f"{name}: rows {rows}, contaminated {hits} ({hits/max(1,rows)*100:.3f}%), first hits {examples}")
+
+
+# --------------------------- round-3 detached chain ---------------------------
+# Laptop-free execution: each stage is idempotent (skips finished work) and
+# .spawn()s its successor, so `modal run --detach ::round3_stage0_pool` drives
+# pool-filter -> regen -> cache prep -> train -> eval end to end in the cloud.
+# Any failure resumes by re-running the failed stage; completed outputs skip.
+
+R3_POOL = "perfectblend_train_120k_clean.jsonl"
+R3_REGEN = "regen-r3-120k.jsonl"
+R3_CACHE = "target-cache-r3-120k"
+R3_EXP = "dspark_r3_fresh120k"
+R3_SAMPLES = 120000
+
+
+@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=3600)
+def round3_stage0_pool() -> None:
+    """Filtered round-3 pool: first R3_SAMPLES rows of the 600k pool that
+    share no word-13-gram with gsm8k test or the Spec-Bench questions
+    (measured contamination 0.030% — filtering is hygiene, not correction)."""
+    import json as _json
+    import re
+
+    from datasets import load_dataset
+
+    out_path = f"/vol/data/{R3_POOL}"
+    if os.path.exists(out_path):
+        print(f"{R3_POOL} exists; skipping filter", flush=True)
+    else:
+        def norm_ngrams(text: str, n: int = 13) -> set:
+            words = re.sub(r"[^a-z0-9 ]", " ", text.lower()).split()
+            return {" ".join(words[i : i + n]) for i in range(len(words) - n + 1)}
+
+        eval_grams: set = set()
+        for row in load_dataset("openai/gsm8k", "main", split="test"):
+            eval_grams |= norm_ngrams(row["question"])
+        with open("/vol/data/spec_bench_question.jsonl") as f:
+            for line in f:
+                for turn in _json.loads(line)["turns"]:
+                    eval_grams |= norm_ngrams(turn)
+
+        kept = 0
+        dropped = 0
+        with open("/vol/data/perfectblend_train_600k.jsonl") as src, open(
+            out_path + ".tmp", "w"
+        ) as dst:
+            for line in src:
+                if kept >= R3_SAMPLES:
+                    break
+                row = _json.loads(line)
+                texts = [m.get("content", "") for m in row.get("conversations", [])]
+                if any(norm_ngrams(t) & eval_grams for t in texts if t):
+                    dropped += 1
+                    continue
+                dst.write(line)
+                kept += 1
+        os.rename(out_path + ".tmp", out_path)
+        print(f"pool: kept {kept}, dropped {dropped} contaminated", flush=True)
+        volume.commit()
+    round3_stage1_regen.spawn()
+
+
+@app.function(image=vllm_image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=8 * 3600)
+def round3_stage1_regen() -> None:
+    """Regenerate assistant turns for the round-3 pool (vLLM, greedy,
+    deployment-config target), then spawn cache prep."""
+    if os.path.exists(f"/vol/data/{R3_REGEN}"):
+        print(f"{R3_REGEN} exists; skipping regen", flush=True)
+    else:
+        vllm_regenerate.local(
+            num_samples=R3_SAMPLES,
+            input_name=R3_POOL,
+            output_name=R3_REGEN,
+        )
+    round3_stage2_prep.spawn()
+
+
+@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=20 * 3600, ephemeral_disk=1024 * 1024)
+def round3_stage2_prep() -> None:
+    """Target cache for the round-3 corpus (same body as prepare_cache with a
+    20h window: 60k took well under 6h, 120k gets 3x headroom), then spawns
+    training."""
+    if os.path.exists(f"/vol/cache/{R3_CACHE}/manifest.json"):
+        print(f"cache {R3_CACHE} exists; skipping prep", flush=True)
+    else:
+        prepare_cache.local(
+            train_data=f"data/{R3_REGEN}",
+            cache_name=R3_CACHE,
+        )
+    round3_stage3_train.spawn()
+
+
+@app.function(image=image, gpu="H100:8", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=1024 * 1024)
+def round3_stage3_train() -> None:
+    """Fresh 120k train at the validated B recipe (lr 6e-4, lbs 2, fixed
+    global batch; 10 epochs with per-epoch checkpoints for the plateau
+    stop), then spawns the evaluator on the final checkpoint."""
+    final_ckpt = f"/vol/runs/checkpoints/lmbrrr/{R3_EXP}/step_latest"
+    if os.path.exists(f"{final_ckpt}/model.safetensors"):
+        print(f"{R3_EXP} final checkpoint exists; skipping train", flush=True)
+    else:
+        _train_impl(
+            cache_name=R3_CACHE,
+            global_batch_size=None,
+            num_train_epochs=10,
+            logging_steps=1,
+            torch_compile=True,
+            exp_name=R3_EXP,
+            local_batch_size=2,
+            stage_local=True,
+            draft_init_checkpoint=None,
+            lr=6e-4,
+            target_model="/vol/models/minicpm-v46-fakequant-q4kft",
+        )
+    evaluate.spawn(
+        checkpoint=f"runs/checkpoints/lmbrrr/{R3_EXP}/step_latest",
+        target_model="/vol/models/minicpm-v46-fakequant-q4kft",
+    )
