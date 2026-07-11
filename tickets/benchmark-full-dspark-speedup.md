@@ -1,7 +1,7 @@
 ---
 id: benchmark-full-dspark-speedup
 title: Benchmark full DSpark speedup
-status: todo
+status: done
 priority: p1
 dependencies: [integrate-dspark-block-runner, implement-dspark-hardware-aware-prefix-scheduler]
 related: []
