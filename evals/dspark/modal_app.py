@@ -489,7 +489,7 @@ def regen_bench(
     print("SUMMARY", json.dumps(rows, indent=2), flush=True)
 
 
-@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=2 * 3600, ephemeral_disk=400 * 1024)
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=2 * 3600, ephemeral_disk=512 * 1024)
 def train_probe(
     cache_name: str = "target-cache-round1",
     stage_local: bool = False,
