@@ -1,7 +1,7 @@
 ---
 id: bf16-activation-quantized-matmul-metal
 title: BF16 activation quantized matmul on Metal
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [quantize-full-text-decoder-q4-incl-lm-head, cut-drafter-propose-cost, batched-multi-stream-decode-runner]
@@ -9,6 +9,9 @@ scopes: [runtime/metal, runtime/candle, candle-fork]
 shared_scopes: [docs/research]
 paths: [Cargo.toml, Cargo.lock, src/quantized_linear.rs, docs/research/bf16-qmatmul-metal.md]
 tags: [kernels, quantization, campaign-1000, fork]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783757709
 ---
 ## Micro-bench observation (2026-07-11, TREAT WITH CAUTION)
 
