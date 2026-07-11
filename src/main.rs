@@ -568,6 +568,13 @@ struct DsparkRunArgs {
     #[arg(long)]
     drafter: Option<PathBuf>,
 
+    /// Truncate each proposal to the leading positions whose calibrated
+    /// confidence stays at or above this probability (DeepSpec inference
+    /// contract; 0-draft rounds allowed). Calibration comes from sts.json
+    /// in the drafter dir when present. Off when unset: full gamma.
+    #[arg(long)]
+    confidence_threshold: Option<f32>,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -4677,6 +4684,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let (first_token, _) = argmax_token(&prompt_logits, &device)?;
     model.set_verify_state_capture(!readvance_rollback());
 
+    let sts = StsCalibration::load(drafter_dir)?;
     let mut committed = vec![first_token];
     let mut anchor = first_token;
     let mut start = prompt_tokens.len();
@@ -4685,6 +4693,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mut accepted_histogram = vec![0usize; gamma + 1];
     let mut position_proposed = vec![0usize; gamma];
     let mut position_accepted = vec![0usize; gamma];
+    // Per verified position: (raw confidence logit, calibrated p, accepted).
+    // Feeds offline STS fitting and threshold sweeps.
+    let mut confidence_records: Vec<(f32, f32, bool)> = Vec::new();
+    let mut proposed_width_histogram = vec![0usize; gamma + 1];
     let mut draft_seconds = 0.0f64;
     let mut verify_seconds = 0.0f64;
     let mut readvance_seconds = 0.0f64;
@@ -4696,10 +4708,23 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             device.synchronize()?;
             draft_seconds += secs(draft_start.elapsed());
 
+            // DeepSpec inference contract: the proposal is the leading run of
+            // positions whose calibrated confidence clears the threshold;
+            // 0-draft rounds degrade to plain [anchor] verification.
+            let width = match args.confidence_threshold {
+                Some(threshold) => proposal
+                    .confidence_logits
+                    .iter()
+                    .take_while(|logit| sts.probability(**logit) >= threshold)
+                    .count(),
+                None => gamma,
+            };
+            proposed_width_histogram[width] += 1;
+
             let snapshot = model.snapshot_decode_state();
-            let mut chunk = Vec::with_capacity(gamma + 1);
+            let mut chunk = Vec::with_capacity(width + 1);
             chunk.push(anchor);
-            chunk.extend_from_slice(&proposal.tokens);
+            chunk.extend_from_slice(&proposal.tokens[..width]);
             let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), &device)?;
             let verify_start = Instant::now();
             let logits = model.forward_all_logits(
@@ -4713,17 +4738,24 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             let (targets, _) = argmax_tokens(&logits, &device)?;
             let chunk_captures = model.take_device_captures();
 
-            let accepted = proposal
-                .tokens
+            let accepted = proposal.tokens[..width]
                 .iter()
                 .zip(targets.iter())
                 .take_while(|(draft, target)| draft == target)
                 .count();
             let bonus = targets[accepted];
-            for j in 0..gamma {
+            for j in 0..width {
                 position_proposed[j] += 1;
                 if j < accepted {
                     position_accepted[j] += 1;
+                }
+                // A verified position is a labeled calibration sample; only
+                // the first rejection is a true negative for prefix
+                // acceptance, positions past it were never target-checked
+                // against a correct prefix, so stop at accepted + 1.
+                if j <= accepted {
+                    let logit = proposal.confidence_logits[j];
+                    confidence_records.push((logit, sts.probability(logit), j < accepted));
                 }
             }
 
@@ -4733,8 +4765,8 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             let chunk_ctx = Tensor::cat(&capture_refs, D::Minus1)?;
             drafter.append_context(&chunk_ctx.narrow(1, 0, accepted + 1)?, start)?;
 
-            if accepted == gamma {
-                start += gamma + 1;
+            if accepted == width {
+                start += width + 1;
             } else {
                 rollbacks += 1;
                 let readvance_start = Instant::now();
@@ -4812,6 +4844,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "accepted_histogram": accepted_histogram,
         "position_acceptance": position_proposed.iter().zip(position_accepted.iter())
             .map(|(p, a)| if *p > 0 { *a as f64 / *p as f64 } else { 0.0 })
+            .collect::<Vec<_>>(),
+        "confidence_threshold": args.confidence_threshold,
+        "sts_calibration": { "scale": sts.scale, "shift": sts.shift },
+        "proposed_width_histogram": proposed_width_histogram,
+        "confidence_records": confidence_records.iter()
+            .map(|(logit, p, acc)| serde_json::json!([logit, p, acc]))
             .collect::<Vec<_>>(),
         "prefill_seconds": prefill_seconds,
         "draft_seconds": draft_seconds,
@@ -5385,6 +5423,39 @@ fn analyze_verification(
         bonus_token_id,
         reconstructed_token_ids,
     })
+}
+
+/// Platt-style calibration of the confidence head (we own this; absent from
+/// DeepSpec): p_accept = sigmoid(scale * logit + shift), fitted offline on
+/// (logit, accepted) records and stored as sts.json in the drafter dir.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+struct StsCalibration {
+    scale: f32,
+    shift: f32,
+}
+
+impl StsCalibration {
+    fn identity() -> Self {
+        Self {
+            scale: 1.0,
+            shift: 0.0,
+        }
+    }
+
+    fn load(drafter_dir: &Path) -> Result<Self> {
+        let path = drafter_dir.join("sts.json");
+        if !path.exists() {
+            return Ok(Self::identity());
+        }
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("open sts calibration {}", path.display()))?;
+        Ok(serde_json::from_reader(file)
+            .with_context(|| format!("parse sts calibration {}", path.display()))?)
+    }
+
+    fn probability(&self, logit: f32) -> f32 {
+        1.0 / (1.0 + (-(self.scale * logit + self.shift)).exp())
+    }
 }
 
 /// `LMBRRR_READVANCE_ROLLBACK=1` restores the legacy restore + re-advance
