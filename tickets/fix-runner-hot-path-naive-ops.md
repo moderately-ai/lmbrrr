@@ -1,7 +1,7 @@
 ---
 id: fix-runner-hot-path-naive-ops
 title: Fix runner hot path naive ops
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: []
@@ -9,13 +9,14 @@ scopes: [runtime/candle]
 shared_scopes: [docs/research]
 paths: []
 tags: [performance]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783717719
 ---
 ## Goal
 
 Clean up the per-token/per-layer naive ops found in the 2026-07-10 full-source audit that burn Metal dispatches on every decode step, each gated by strict logits parity and a no-regression bench.
+
+## Progress (2026-07-10, pass 4 — closing)
+
+Drafter-side audit items landed (commit 5218684): ctx KV-cache reuse (b.2, O(T^2) cat pattern gone), SDPA-full for block attention (native GQA, strided cache views), single packed readback (b.4), diagnostics gated (b.5). With the fused DeltaNet decode+chunk kernels, SDPA, rms_norm, gemv, and prefill-narrow all landed, this ticket's campaign is effectively complete: decode 60 -> 136-146 tok/s across the day. Remaining minor items (MixedLinear F32 round-trip -> quant lane; rope cat-branch; packed projection gemv) tracked on their owning tickets.
 
 ## Progress (2026-07-10, pass 3)
 
