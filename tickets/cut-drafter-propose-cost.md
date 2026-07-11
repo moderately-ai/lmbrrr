@@ -1,7 +1,7 @@
 ---
 id: cut-drafter-propose-cost
 title: Cut drafter propose cost (8.7 ms/round > a full greedy token for a 2-layer drafter)
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [bf16-activation-quantized-matmul-metal, remeasure-spec-round-cost-model]
@@ -9,7 +9,14 @@ scopes: [inference/speculative, runtime/candle]
 shared_scopes: [docs/research]
 paths: []
 tags: [speculative, performance, campaign-1000]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783738814
 ---
+## Progress (2026-07-10 late, commit ca4715c)
+
+Landed: --drafter-quantize (q8_0/q4k/q6k post-hoc head quantization; tau-IDENTICAL at q8 on math — the risk didn't materialize), width>=1 floor, and the measured operating point gamma=4 + threshold 0.3: math ratio 0.51 -> 0.62 (91.4 tok/s, draft 5.3 ms). SURPRISE FINDING: q8 heads are time-NEUTRAL today (draft 4.7 vs 5.3 bf16) because the F32-cast + per-row quantized-mv taxes eat the byte win; gamma=8+q8 draft ballooned to 21 ms — a live measurement of the fork's per-row mv dispatch loop (fwd_mv re-dispatching per row). q8 flips clearly positive when bf16-activation-quantized-matmul-metal lands (now measurably the gating item for BOTH quant lanes). Remaining scope: Markov row-norm pruning (stretch, ~-1 ms), and re-A/B q8 after the fork work.
+
 ## Goal
 
 Propose costs 8.7 ms/round — more than a full 24-layer greedy token (6.9 ms) for a 2-layer drafter — almost certainly dominated by the 248k-vocab reads: lm_head [248094,1024] bf16 (508 MB) once per proposal plus markov_w2 [248094,256] (127 MB) per Markov step. At the chain cap of ~2.27 tokens/round, every ms off propose is ~13 tok/s of spec throughput. None of these levers touch output correctness: drafts are verified, so a marginally worse draft distribution costs only tau.
