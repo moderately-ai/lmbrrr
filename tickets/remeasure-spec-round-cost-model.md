@@ -13,6 +13,10 @@ claimed_from: todo
 assignee: claude
 lease_expires_at: 1783739755
 ---
+## RESOLVED: l=1 -> l=2 doubling fully attributed (610a46e)
+
+LMBRRR_VT_PROFILE=1 component diff at ctx=27: deltanet_fused_chunk 8.68ms vs deltanet_fused_decode 5.03 (+3.65 — the chunk kernel's sequential phase-4/5 tg_sum barrier chains are ~2x the decode kernel per token; restructure to simdgroup-parallel positions or cooperative B-matrix computation), mlp 4.70 -> 8.85 (+4.15 — m=2 tile-gemm inefficiency is REAL for MLP shapes even though the skinny-gemm v1 design lost; a v2 with multi-column simdgroups for B reuse is the shape of the fix), remainder ~1.9ms across attention/norms. Two scoped fork-kernel tasks worth ~7.5ms/round combined — these are the L2 completion path to verify ~9ms.
+
 ## Update: skinny-gemm hypothesis FALSIFIED (fb3f80f)
 
 Built the skinny kernel (fork 5edb0903, opt-in CANDLE_SKINNY_GEMM=1): even function-constant-specialized it LOSES to the mlx tile gemm at m=2-12 (gamma8 verify 23.6 vs 17.1 ms) — the tile kernel's B reuse wins; the "~150 GB/s tile inefficiency" read was wrong in composition. The l=1 -> l=2 verify doubling (6.5 -> 13.8 ms) remains UNEXPLAINED and needs per-component attribution (Instruments capture or Qwen35Profiler through a chunk forward) before any further kernel work. Candidates: lm_head mm at m=2 specifically, fused-chunk-kernel occupancy at small l, mask/cat overheads, allocator effects. This is now the ticket's core remaining question — the answer is worth ~5 ms/round.
