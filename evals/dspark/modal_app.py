@@ -609,6 +609,7 @@ vllm_image = (
             "CUDA_HOME": "/usr/local/cuda",
         }
     )
+    .add_local_dir(LMBRRR_DSPARK_LOCAL_PATH, remote_path="/lmbrrr-dspark")
 )
 
 
