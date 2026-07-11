@@ -2154,10 +2154,20 @@ impl Qwen35TextModel {
             candle::bail!("accepted {accepted} exceeds branch width {branch_width}");
         }
         let prefix_in_segment = if on_alt { accepted } else { accepted + 1 };
+        // Full main accept: forward_tree already left the DeltaNet states at
+        // the main segment's kernel chunk end — exact, no reconstruction
+        // needed (or wanted: the closed form carries rollback-class FP noise).
+        let full_main = !on_alt && accepted == branch_width;
         let mut full_idx = 0usize;
         for layer in &mut self.layers {
             match &mut layer.mixer {
-                TokenMixer::Linear(attn) => attn.select_tree_state(on_alt, prefix_in_segment)?,
+                TokenMixer::Linear(attn) => {
+                    if full_main {
+                        attn.tree_captured = None;
+                    } else {
+                        attn.select_tree_state(on_alt, prefix_in_segment)?;
+                    }
+                }
                 TokenMixer::Full(attn) => {
                     let Some(history) = snapshot.kv_lens.get(full_idx) else {
                         candle::bail!("decode-state snapshot has too few KV entries");
