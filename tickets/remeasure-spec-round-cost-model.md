@@ -13,6 +13,10 @@ claimed_from: todo
 assignee: claude
 lease_expires_at: 1783739755
 ---
+## Update: skinny-gemm hypothesis FALSIFIED (fb3f80f)
+
+Built the skinny kernel (fork 5edb0903, opt-in CANDLE_SKINNY_GEMM=1): even function-constant-specialized it LOSES to the mlx tile gemm at m=2-12 (gamma8 verify 23.6 vs 17.1 ms) — the tile kernel's B reuse wins; the "~150 GB/s tile inefficiency" read was wrong in composition. The l=1 -> l=2 verify doubling (6.5 -> 13.8 ms) remains UNEXPLAINED and needs per-component attribution (Instruments capture or Qwen35Profiler through a chunk forward) before any further kernel work. Candidates: lm_head mm at m=2 specifically, fused-chunk-kernel occupancy at small l, mask/cat overheads, allocator effects. This is now the ticket's core remaining question — the answer is worth ~5 ms/round.
+
 ## Findings (2026-07-10 late — the headline discovery)
 
 Post-fusion isolated table (target/verify-table-postfusion.json, short profile): T_verify by CHUNK LENGTH l: 1=6.5ms, 2=13.7, 4=14.9, 8=17.1, 16=31.0, 32=35.0. In-loop timed round (LMBRRR_LOOP_TIMING=1, gamma 4 thr 0.3): draft 5.1 + verify 14.9 + rollback 1.2 = 22.3ms wall — table and loop now agree. Bisection (env-flag reruns): the l=1 -> l=2 doubling is NOT the fused DeltaNet chunk kernel (unfused l2=23.4, the kernel already saves 10ms) and NOT SDPA (unchanged) — it is SMALL-M GEMM: at m=1 every projection routes to the gemv kernel (~350 GB/s); at m>=2 they hit the mlx GEMM 32x32 tile at ~150 GB/s effective, so the whole 1.5 GB weight sweep runs at half bandwidth for exactly the chunk sizes verification uses. FIX: skinny-GEMM Metal kernel in the fork (B streamed once per threadgroup, m<=12 activation rows resident) -> verify ~8-9 ms projected; also unblocks small-batch decode for batched-multi-stream-decode-runner.
