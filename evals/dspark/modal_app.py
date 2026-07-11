@@ -966,3 +966,85 @@ def vllm_regenerate(
     finally:
         server.terminate()
     volume.commit()
+
+
+@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=3600)
+def token_frequency(
+    input_name: str = "regen-r2-40k.jsonl",
+    top_k: int = 65536,
+    output_name: str = "frspec/assistant_ranked_ids.json",
+) -> None:
+    """FR-Spec vocabulary ranking per the literature review on the ticket:
+    unigram frequency over ASSISTANT SPANS ONLY of the target-regenerated
+    conversations (VocabTrim's calibration-source ablation: target
+    generations beat raw/all text), emitting a long rank-ordered id list
+    (smaller profiles are prefixes) plus the cumulative coverage curve for
+    principled size selection. Chat-template/EOS/control tokens are pinned
+    to the front regardless of corpus rank (turn-boundary tokens missing
+    from the set would collapse tau at every end-of-turn)."""
+    import json as _json
+    import os
+    from collections import Counter
+
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(TARGET_MODEL, trust_remote_code=True)
+    counts: Counter = Counter()
+    n = 0
+    with open(f"/vol/data/{input_name}") as f:
+        for line in f:
+            row = _json.loads(line)
+            # regenerate_answers.py writes {"id", "conversations": [{"role",
+            # "content"}, ...], "status"} per row; error rows carry no
+            # conversations key. Only assistant spans are counted: the
+            # drafter only ever proposes continuation tokens.
+            texts = [
+                m.get("content", "")
+                for m in row.get("conversations", [])
+                if m.get("role") == "assistant"
+            ]
+            for t in texts:
+                counts.update(tok(t, add_special_tokens=False)["input_ids"])
+            n += 1
+            if n % 5000 == 0:
+                print(f"{n} rows, {len(counts)} distinct tokens")
+
+    total = sum(counts.values())
+    # Pinned control tokens first: tokenizer specials plus every added/special
+    # vocab entry (chat template, tool, vision placeholders live there).
+    pinned: list[int] = []
+    seen = set()
+    for special in list(tok.all_special_ids) + [
+        tok.convert_tokens_to_ids(t) for t in tok.get_added_vocab()
+    ]:
+        if isinstance(special, int) and special >= 0 and special not in seen:
+            pinned.append(special)
+            seen.add(special)
+    ranked = pinned + [tid for tid, _ in counts.most_common() if tid not in seen]
+    ranked = ranked[:top_k]
+
+    # Cumulative occurrence coverage at candidate profile sizes.
+    curve = {}
+    running = 0
+    checkpoints = {4096, 8192, 16384, 24576, 32768, 49152, 65536}
+    for i, tid in enumerate(ranked, 1):
+        running += counts.get(tid, 0)
+        if i in checkpoints:
+            curve[str(i)] = round(running / max(1, total), 5)
+
+    os.makedirs("/vol/data/frspec", exist_ok=True)
+    out = {
+        "source": input_name,
+        "counting": "assistant_spans_only",
+        "rows": n,
+        "distinct": len(counts),
+        "total_occurrences": total,
+        "pinned_control_tokens": len(pinned),
+        "top_k": top_k,
+        "coverage_curve": curve,
+        "ids": ranked,
+    }
+    with open(f"/vol/data/{output_name}", "w") as f:
+        _json.dump(out, f)
+    print(f"wrote {output_name}: pinned {len(pinned)}, curve {curve}")
+    volume.commit()
