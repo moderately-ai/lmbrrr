@@ -92,8 +92,9 @@ struct MultiBenchArgs {
     #[arg(long)]
     prompt: String,
 
-    #[arg(long, default_value_t = 8)]
-    streams: usize,
+    /// Stream counts to sweep, comma separated; the model loads once.
+    #[arg(long, value_delimiter = ',', default_values_t = [8usize])]
+    streams: Vec<usize>,
 
     #[arg(long, default_value_t = 128)]
     max_new_tokens: usize,
@@ -5324,8 +5325,8 @@ fn load_model(
 /// the tensor path — dispatch counts amortize across streams, which is the
 /// aggregate lane's core economics; kernel batching is the follow-up.
 fn multi_bench(args: MultiBenchArgs) -> Result<()> {
-    if args.streams == 0 {
-        anyhow::bail!("--streams must be greater than zero");
+    if args.streams.is_empty() || args.streams.contains(&0) {
+        anyhow::bail!("--streams must contain positive stream counts");
     }
     let bundle = resolve_artifacts(&args.model)?;
     let device = select_device(args.model.cpu)?;
@@ -5341,12 +5342,12 @@ fn multi_bench(args: MultiBenchArgs) -> Result<()> {
         args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
-    let n = args.streams;
     let len = prompt_tokens.len();
 
     // Single-stream reference for the equivalence check (advisory: batched
     // numerics can tie-flip).
     model.clear_cache();
+    let mut rows = Vec::new();
     let reference = generate_tokens(
         &mut model,
         &device,
@@ -5358,6 +5359,7 @@ fn multi_bench(args: MultiBenchArgs) -> Result<()> {
         |_, _, _, _| Ok(()),
     )?;
 
+    for &n in &args.streams {
     model.clear_cache();
     let mut batched: Vec<u32> = Vec::with_capacity(n * len);
     for _ in 0..n {
@@ -5418,6 +5420,23 @@ fn multi_bench(args: MultiBenchArgs) -> Result<()> {
         .take_while(|(a, b)| a == b)
         .count();
 
+    rows.push(serde_json::json!({
+        "streams": n,
+        "decode_steps": steps,
+        "total_generated_tokens": total_tokens,
+        "prefill_seconds": secs(prefill_elapsed),
+        "decode_seconds": secs(decode_elapsed),
+        "aggregate_tokens_per_second": aggregate_tps,
+        "per_stream_tokens_per_second": aggregate_tps / n as f64,
+        "single_stream_equivalence_prefix": equiv,
+        "stream0_text_head": decode_tokens(&tokenizer, &streams[0][..streams[0].len().min(32)])?,
+    }));
+    eprintln!(
+        "streams={n}: aggregate {aggregate_tps:.0} tok/s ({:.1}/stream)",
+        aggregate_tps / n as f64
+    );
+    }
+
     let report = serde_json::json!({
         "kind": "lmbrrr_multi_bench",
         "schema_version": 1,
@@ -5427,17 +5446,9 @@ fn multi_bench(args: MultiBenchArgs) -> Result<()> {
         "load_seconds": secs(load_elapsed),
         "quantized_load": quantized_load_json(&quantized_load),
         "prompt_tokens": len,
-        "streams": n,
         "max_new_tokens": args.max_new_tokens,
-        "decode_steps": steps,
-        "total_generated_tokens": total_tokens,
-        "prefill_seconds": secs(prefill_elapsed),
-        "decode_seconds": secs(decode_elapsed),
-        "aggregate_tokens_per_second": aggregate_tps,
-        "per_stream_tokens_per_second": aggregate_tps / n as f64,
-        "single_stream_equivalence_prefix": equiv,
         "single_stream_reference_tokens": reference.generated_token_ids.len(),
-        "stream0_text": decode_tokens(&tokenizer, &streams[0])?,
+        "rows": rows,
     });
     write_json_report(args.output.as_ref(), &report)
 }
