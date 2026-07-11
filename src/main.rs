@@ -1457,6 +1457,17 @@ fn fakequant_export(args: FakequantExportArgs) -> Result<()> {
             }
         }
     }
+    // lmbrrr's hub cache never fetches the chat template or tokenizer
+    // config (the Rust runner doesn't need them), but transformers-side
+    // generation does; backfill from the vendored model dir.
+    let vendored = Path::new("docs/research/models/minicpm-v-4.6/hf-model");
+    for name in ["chat_template.jinja", "tokenizer_config.json"] {
+        let target = args.output_dir.join(name);
+        let source = vendored.join(name);
+        if !target.exists() && source.exists() {
+            fs::copy(&source, &target)?;
+        }
+    }
     println!(
         "fakequant export: {} quantized, {} passthrough, max |Δw| {:.5} -> {}",
         quantized,
