@@ -486,3 +486,72 @@ def regen_bench(
             )
             print("ROW", json.dumps(rows[-1]), flush=True)
     print("SUMMARY", json.dumps(rows, indent=2), flush=True)
+
+
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=2 * 3600, ephemeral_disk=400 * 1024)
+def train_probe(
+    cache_name: str = "target-cache-round1",
+    stage_local: bool = False,
+    local_batch_size: int = 1,
+    global_batch_size: int = 64,
+    steps: int = 10,
+    num_workers: int = 4,
+    torch_compile: bool = False,
+) -> None:
+    """Training rightsizing probe on ONE H100: a few optimizer steps with the
+    GPU monitor live, optionally staging the target cache onto container-local
+    NVMe first — attributes step time between volume IO and compute, and
+    tests micro-batch sizes > 1."""
+    import time
+
+    cache_path = f"/vol/cache/{cache_name}"
+    if stage_local:
+        started = time.monotonic()
+        _run(["cp", "-r", cache_path, "/tmp/cache-staged"])
+        elapsed = time.monotonic() - started
+        size_bytes = int(
+            subprocess.run(
+                ["du", "-sb", "/tmp/cache-staged"], capture_output=True, text=True
+            ).stdout.split()[0]
+        )
+        print(
+            f"staged {size_bytes/2**30:.1f} GiB in {elapsed:.0f}s "
+            f"({size_bytes/2**20/elapsed:.0f} MB/s)",
+            flush=True,
+        )
+        cache_path = "/tmp/cache-staged"
+
+    monitor = GpuMonitor(tag=f"train-lbs{local_batch_size}-{'nvme' if stage_local else 'vol'}")
+    monitor.start()
+    started = time.monotonic()
+    cmd = ["python", "/deepspec/train.py", "--config", TRAIN_CONFIG]
+    for opt in [
+        f"data.target_cache_path={cache_path}",
+        f"data.num_workers={num_workers}",
+        f"train.local_batch_size={local_batch_size}",
+        f"train.global_batch_size={global_batch_size}",
+        f"train.max_train_steps={steps}",
+        f"train.torch_compile={'true' if torch_compile else 'false'}",
+        "logging.logging_steps=1",
+        "exp_name=train_probe_scratch",
+    ]:
+        cmd.extend(["--opts", opt])
+    _run(cmd, cwd="/deepspec")
+    stats = monitor.stop()
+    wall = time.monotonic() - started
+    print(
+        "PROBE",
+        json.dumps(
+            {
+                "cache": cache_path,
+                "stage_local": stage_local,
+                "local_batch_size": local_batch_size,
+                "global_batch_size": global_batch_size,
+                "steps": steps,
+                "wall_s": round(wall, 1),
+                "s_per_step_incl_startup": round(wall / max(steps, 1), 2),
+                **stats,
+            }
+        ),
+        flush=True,
+    )
