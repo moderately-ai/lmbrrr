@@ -4361,6 +4361,16 @@ fn verify_table(args: VerifyTableArgs) -> Result<()> {
 
                 let chunk = &chunk_tokens[..gamma];
                 let chunk_input = Tensor::from_slice(chunk, (1, gamma), &device)?;
+                // LMBRRR_VT_PROFILE=1 attaches the component profiler to the
+                // final iteration so the chunk cost decomposes (used to chase
+                // the l=1 -> l=2 doubling). Host-side attribution: encode +
+                // queue backpressure per component, not GPU time.
+                let profile_this = std::env::var("LMBRRR_VT_PROFILE").is_ok_and(|v| v == "1")
+                    && iteration + 1 == args.warmup + args.iterations;
+                let vt_profiler = profile_this.then(Qwen35Profiler::new);
+                if let Some(p) = &vt_profiler {
+                    model.set_text_profiler(Some(p.clone()));
+                }
                 let started = Instant::now();
                 let logits = model.forward_all_logits(
                     &chunk_input,
@@ -4370,6 +4380,15 @@ fn verify_table(args: VerifyTableArgs) -> Result<()> {
                 )?;
                 device.synchronize()?;
                 let chunk_elapsed = started.elapsed();
+                if let Some(p) = &vt_profiler {
+                    model.set_text_profiler(None);
+                    let events = p.events();
+                    eprintln!(
+                        "vt-profile gamma={gamma} ctx={}: {}",
+                        prompt_tokens.len(),
+                        serde_json::to_string(&aggregate_profile_events(&events))?
+                    );
+                }
                 let (_, argmax_elapsed) = argmax_tokens(&logits, &device)?;
                 if iteration >= args.warmup {
                     samples.push((secs(chunk_elapsed), secs(argmax_elapsed)));
