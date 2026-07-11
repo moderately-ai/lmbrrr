@@ -2,7 +2,7 @@
 id: single-command-buffer-decode-forward
 title: Single command buffer decode forward
 status: todo
-priority: p1
+priority: p2
 dependencies: []
 related: [fuse-deltanet-decode-step-kernel, measure-metal-roofline-and-dispatch-overhead]
 scopes: [runtime/candle, runtime/metal]

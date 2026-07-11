@@ -1,17 +1,14 @@
 ---
 id: scale-dspark-training-corpus-modal
 title: Scale DSpark training corpus on Modal
-status: in-progress
-priority: p1
+status: todo
+priority: p3
 dependencies: [train-dspark-semi-autoregressive-drafter]
 related: [benchmark-full-dspark-speedup]
 scopes: [evals]
 shared_scopes: [docs/research]
 paths: [evals/dspark/**, docs/research/dspark-corpus-scaling.md]
 tags: [dspark, training, modal, campaign-1000]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783710717
 ---
 ## Goal
 

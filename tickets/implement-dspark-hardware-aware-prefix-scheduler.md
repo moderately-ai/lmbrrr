@@ -3,13 +3,17 @@ id: implement-dspark-hardware-aware-prefix-scheduler
 title: Implement DSpark hardware aware prefix scheduler
 status: todo
 priority: p1
-dependencies: [calibrate-dspark-confidence-head, profile-dspark-verification-throughput-table]
+dependencies: [calibrate-dspark-confidence-head, remeasure-spec-round-cost-model]
 related: []
 scopes: [inference/speculative, runtime/candle, evals]
 shared_scopes: [docs/research]
 paths: [src/main.rs, evals/dspark/**, docs/research/dspark-hardware-aware-prefix-scheduler.md]
 tags: [speculative, dspark, scheduler]
 ---
+## Board revision (2026-07-10 evening)
+
+Dependency repointed from the dead pre-fusion table (T_verify ~= 11 + 6.3*gamma — ~5x off; verify is now 13.2 ms/round total) to remeasure-spec-round-cost-model. Incumbent to beat: the static --confidence-threshold 0.4 truncation (87 tok/s math / 77 tides vs 146 greedy) — report wall tok/s against it, not against unscheduled gamma=8.
+
 ## Goal
 
 Implement the DSpark scheduler as a throughput optimization problem using calibrated prefix survival probabilities and measured local verification throughput.

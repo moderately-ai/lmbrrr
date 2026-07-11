@@ -2,7 +2,7 @@
 id: validate-minicpm-vision-feature-parity
 title: Validate MiniCPM vision feature parity
 status: todo
-priority: p2
+priority: p3
 dependencies: [port-minicpm-v46-full-path, validate-minicpm-image-parity]
 related: []
 scopes: [model/minicpm, model/vision, evals]

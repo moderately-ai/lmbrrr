@@ -4,15 +4,19 @@ title: Tree speculation over DSpark
 status: todo
 priority: p1
 dependencies: [integrate-dspark-block-runner]
-related: [profile-dspark-verification-throughput-table]
+related: [remeasure-spec-round-cost-model]
 scopes: [inference/speculative, runtime/candle, evals]
 shared_scopes: [docs/research]
 paths: [src/main.rs, src/qwen35.rs, evals/dspark/**, docs/research/tree-speculation-dspark.md]
 tags: [speculative, dspark, campaign-1000]
 ---
+## Board revision (2026-07-10 evening)
+
+With tau frozen at ~2.1 (position acceptance [0.63,0.28,0.21,0.11,0.04], chain cap ~2.27 tokens/round), this is the largest no-training tokens-per-round lever. Target reset: tau_eff >= 3.0 (the old 4.5 assumed a stronger drafter); compute the go/no-go from the rebuilt cost table, not the superseded one. The target is BF16, not quantized — the premise stands because the fused chunk kernel (l<=12) made verify tokens cheap, but note it handles LINEAR chunks: tree verification multiplies chunk cost per flattened path, so the "measure both" clause below is the crux. Add: rederive the trajectory-oracle noise bound if tree verification changes numerics (envelope already 0.5/0.75).
+
 ## Goal
 
-Raise effective accepted length past chain tau by verifying a tree of DSpark candidates per round. On a bandwidth-bound quantized target, verifying 16-32 tree tokens costs barely more than one token, so branching where the Markov head is uncertain converts nearly-free verify compute into accepted tokens.
+Raise effective accepted length past chain tau by verifying a tree of DSpark candidates per round. Post-fusion, verify chunk marginal cost is small, so branching where the Markov head is uncertain converts cheap verify compute into accepted tokens.
 
 ## Acceptance
 

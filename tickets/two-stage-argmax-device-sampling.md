@@ -2,7 +2,7 @@
 id: two-stage-argmax-device-sampling
 title: Two-stage argmax over 248k vocab + device-resident sampled token
 status: todo
-priority: p2
+priority: p3
 dependencies: []
 related: []
 scopes: [runtime/candle, candle-fork]
