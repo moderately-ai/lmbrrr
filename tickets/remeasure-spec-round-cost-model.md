@@ -1,7 +1,7 @@
 ---
 id: remeasure-spec-round-cost-model
 title: Rebuild the spec-round cost model from in-loop post-fusion measurements
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [implement-dspark-hardware-aware-prefix-scheduler, cut-drafter-propose-cost]
@@ -9,7 +9,14 @@ scopes: [evals, inference/speculative]
 shared_scopes: [docs/research]
 paths: []
 tags: [speculative, measurement, campaign-1000]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783739755
 ---
+## Findings (2026-07-10 late — the headline discovery)
+
+Post-fusion isolated table (target/verify-table-postfusion.json, short profile): T_verify by CHUNK LENGTH l: 1=6.5ms, 2=13.7, 4=14.9, 8=17.1, 16=31.0, 32=35.0. In-loop timed round (LMBRRR_LOOP_TIMING=1, gamma 4 thr 0.3): draft 5.1 + verify 14.9 + rollback 1.2 = 22.3ms wall — table and loop now agree. Bisection (env-flag reruns): the l=1 -> l=2 doubling is NOT the fused DeltaNet chunk kernel (unfused l2=23.4, the kernel already saves 10ms) and NOT SDPA (unchanged) — it is SMALL-M GEMM: at m=1 every projection routes to the gemv kernel (~350 GB/s); at m>=2 they hit the mlx GEMM 32x32 tile at ~150 GB/s effective, so the whole 1.5 GB weight sweep runs at half bandwidth for exactly the chunk sizes verification uses. FIX: skinny-GEMM Metal kernel in the fork (B streamed once per threadgroup, m<=12 activation rows resident) -> verify ~8-9 ms projected; also unblocks small-batch decode for batched-multi-stream-decode-runner.
+
 ## Goal
 
 The scheduler's declared input (docs/research/dspark-verification-throughput-table.md, T_verify ~= 11 + 6.3*gamma, 67 ms at gamma=8) is ~5x off post-fusion reality (verify 13.2 ms/round total) and would drive systematic under-verification. Rebuild the cost model from IN-LOOP measurements: T_verify(width) and T_propose(gamma) for width/gamma in 1..=12 across context lengths, plus fixed per-round overheads (syncs, capture concat, ctx append, from_slice uploads). Record where the 8.7 ms propose goes (backbone vs per-Markov-step lm_head/markov_w2 reads vs readback) — that breakdown decides cut-drafter-propose-cost's shape.
