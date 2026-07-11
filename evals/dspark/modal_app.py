@@ -615,7 +615,7 @@ vllm_image = (
 
 @app.function(image=vllm_image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=2 * 3600)
 def vllm_probe(
-    model_path: str = "/vol/models/minicpm-v46-qwen3next-fakequant",
+    model_path: str = "/vol/models/minicpm-v46-fakequant-q4kft",
     concurrency: int = 64,
     samples: int = 192,
     max_tokens: int = 512,
@@ -631,8 +631,7 @@ def vllm_probe(
     from openai import OpenAI
 
     cmd = [
-        "python",
-        "/lmbrrr-dspark/vllm_dense_qwen3next.py",
+        "vllm",
         "serve",
         model_path,
         "--host",
