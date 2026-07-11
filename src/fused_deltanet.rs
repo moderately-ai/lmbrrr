@@ -8,7 +8,38 @@
 use anyhow::{Context, Result};
 use candle::op::BackpropOp;
 use candle::{DType, Device, Storage, Tensor};
-use candle_metal_kernels::kernels::{call_gated_delta_decode, GatedDeltaParams};
+use candle_metal_kernels::kernels::{
+    call_gated_delta_chunk, call_gated_delta_decode, GatedDeltaParams,
+};
+
+/// Rollback-capture tensors emitted by the fused chunk kernel, matching the
+/// tensor-path intermediates consumed by closed-form state selection.
+pub struct FusedChunkCapture {
+    /// F32 (1, heads, l, dk) l2-normed keys.
+    pub kc: Tensor,
+    /// F32 (1, heads, l, dv) WY pseudo-values.
+    pub delta: Tensor,
+    /// F32 (1, heads, l) inclusive log-decay cumsum.
+    pub gcs: Tensor,
+}
+
+/// The kernels want offset-0 contiguous buffers. Hot-path tensors already
+/// are; anything narrowed/offset (e.g. the post-prefill conv window)
+/// materializes once here.
+fn offset0(t: &Tensor) -> Result<Tensor> {
+    let needs_fix = {
+        let (_guard, layout) = t.storage_and_layout();
+        !layout.is_contiguous() || layout.start_offset() != 0
+    };
+    Ok(if !needs_fix {
+        t.clone()
+    } else if !t.is_contiguous() {
+        t.contiguous()?
+    } else {
+        // Contiguous but offset: force a fresh offset-0 buffer.
+        t.affine(1.0, 0.0)?
+    })
+}
 
 pub struct GatedDeltaDims {
     pub heads: usize,
@@ -18,6 +49,141 @@ pub struct GatedDeltaDims {
     pub key_dim: usize,
     pub value_dim: usize,
     pub ksz: usize,
+}
+
+/// Runs the fused chunk step (2 <= l <= 12). `proj` is the packed
+/// per-position projection [l, qkv | z | b | a]. Returns the gated output
+/// [1, l, value_dim], updated states, and the rollback capture.
+#[allow(clippy::too_many_arguments)]
+pub fn gated_delta_chunk(
+    proj: &Tensor,
+    seq_len: usize,
+    conv_state: &Tensor,
+    recurrent_state: &Tensor,
+    conv_weight: &Tensor,
+    dt_bias_f32: &Tensor,
+    a_log_exp_f32: &Tensor,
+    norm_weight_f32: &Tensor,
+    dims: &GatedDeltaDims,
+    l2_eps: f32,
+    norm_eps: f32,
+) -> Result<(Tensor, Tensor, Tensor, FusedChunkCapture)> {
+    let Device::Metal(device) = proj.device() else {
+        anyhow::bail!("fused gated-delta chunk requires a Metal device");
+    };
+    let sanitized = [
+        offset0(proj)?,
+        offset0(conv_state)?,
+        offset0(recurrent_state)?,
+        offset0(conv_weight)?,
+        offset0(dt_bias_f32)?,
+        offset0(a_log_exp_f32)?,
+        offset0(norm_weight_f32)?,
+    ];
+    let dtypes = [
+        DType::BF16,
+        DType::BF16,
+        DType::F32,
+        DType::BF16,
+        DType::F32,
+        DType::F32,
+        DType::F32,
+    ];
+    let mut guards = Vec::with_capacity(sanitized.len());
+    for (t, dtype) in sanitized.iter().zip(dtypes.iter()) {
+        if t.dtype() != *dtype {
+            anyhow::bail!("fused gated-delta chunk: dtype mismatch {:?} vs {dtype:?}", t.dtype());
+        }
+        let (storage, _) = t.storage_and_layout();
+        guards.push(storage);
+    }
+    let buffer = |i: usize| -> Result<_> {
+        match &*guards[i] {
+            Storage::Metal(ms) => Ok(ms.buffer().clone()),
+            _ => anyhow::bail!("fused gated-delta chunk: input {i} not on Metal"),
+        }
+    };
+    let bufs: Vec<_> = (0..sanitized.len()).map(&buffer).collect::<Result<_>>()?;
+
+    let alloc = |count: usize, dtype: DType, label: &str| {
+        device
+            .new_buffer_builder()
+            .with_size_for(count, dtype)
+            .with_label(label)
+            .build()
+    };
+    let l = seq_len;
+    let out_buf = alloc(l * dims.value_dim, DType::BF16, "gdc_out")?;
+    let conv_out_buf = alloc(dims.conv_dim * dims.ksz, DType::BF16, "gdc_conv")?;
+    let state_out_buf = alloc(dims.heads * dims.dk * dims.dv, DType::F32, "gdc_state")?;
+    let cap_k_buf = alloc(dims.heads * l * dims.dk, DType::F32, "gdc_cap_k")?;
+    let cap_delta_buf = alloc(dims.heads * l * dims.dv, DType::F32, "gdc_cap_delta")?;
+    let cap_gcs_buf = alloc(dims.heads * l, DType::F32, "gdc_cap_gcs")?;
+
+    let encoder = device.command_encoder()?;
+    call_gated_delta_chunk(
+        device.metal_device(),
+        &encoder,
+        device.kernels(),
+        GatedDeltaParams {
+            heads: dims.heads as u32,
+            dk: dims.dk as u32,
+            dv: dims.dv as u32,
+            conv_dim: dims.conv_dim as u32,
+            key_dim: dims.key_dim as u32,
+            value_dim: dims.value_dim as u32,
+            ksz: dims.ksz as u32,
+            l2_eps,
+            norm_eps,
+        },
+        l,
+        &bufs[0],
+        &bufs[1],
+        &bufs[2],
+        &bufs[3],
+        &bufs[4],
+        &bufs[5],
+        &bufs[6],
+        &out_buf,
+        &conv_out_buf,
+        &state_out_buf,
+        &cap_k_buf,
+        &cap_delta_buf,
+        &cap_gcs_buf,
+    )
+    .map_err(candle::Error::wrap)
+    .context("fused gated-delta chunk dispatch")?;
+    drop(encoder);
+    drop(guards);
+
+    let mk = |buf, count: usize, dtype, shape: Vec<usize>| -> Tensor {
+        let storage = candle::MetalStorage::new(buf, device.clone(), count, dtype);
+        Tensor::from_storage(Storage::Metal(storage), shape, BackpropOp::none(), false)
+    };
+    let out = mk(out_buf, l * dims.value_dim, DType::BF16, vec![1, l, dims.value_dim]);
+    let conv_out = mk(
+        conv_out_buf,
+        dims.conv_dim * dims.ksz,
+        DType::BF16,
+        vec![1, dims.conv_dim, dims.ksz],
+    );
+    let state_out = mk(
+        state_out_buf,
+        dims.heads * dims.dk * dims.dv,
+        DType::F32,
+        vec![1, dims.heads, dims.dk, dims.dv],
+    );
+    let capture = FusedChunkCapture {
+        kc: mk(cap_k_buf, dims.heads * l * dims.dk, DType::F32, vec![1, dims.heads, l, dims.dk]),
+        delta: mk(
+            cap_delta_buf,
+            dims.heads * l * dims.dv,
+            DType::F32,
+            vec![1, dims.heads, l, dims.dv],
+        ),
+        gcs: mk(cap_gcs_buf, dims.heads * l, DType::F32, vec![1, dims.heads, l]),
+    };
+    Ok((out, conv_out, state_out, capture))
 }
 
 /// Runs the fused decode step. `proj` is the packed projection
@@ -40,23 +206,6 @@ pub fn gated_delta_decode(
         anyhow::bail!("fused gated-delta decode requires a Metal device");
     };
 
-    // The kernel wants offset-0 contiguous buffers. Hot-path tensors already
-    // are; anything narrowed/offset (e.g. the post-prefill conv window)
-    // materializes once here.
-    fn offset0(t: &Tensor) -> Result<Tensor> {
-        let needs_fix = {
-            let (_guard, layout) = t.storage_and_layout();
-            !layout.is_contiguous() || layout.start_offset() != 0
-        };
-        Ok(if !needs_fix {
-            t.clone()
-        } else if !t.is_contiguous() {
-            t.contiguous()?
-        } else {
-            // Contiguous but offset: force a fresh offset-0 buffer.
-            t.affine(1.0, 0.0)?
-        })
-    }
     let proj = offset0(proj)?;
     let conv_state = offset0(conv_state)?;
     let recurrent_state = offset0(recurrent_state)?;

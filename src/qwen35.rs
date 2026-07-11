@@ -940,6 +940,92 @@ impl GatedDeltaNet {
             && self.head_v_dim <= 256
     }
 
+    #[cfg(feature = "metal")]
+    fn fused_chunk_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
+        b == 1
+            && (2..=12).contains(&l)
+            && !unfused_deltanet()
+            && matches!(xs.device(), Device::Metal(_))
+            && xs.dtype() == DType::BF16
+            && self.conv_state.is_some()
+            && self.num_k_heads == self.num_v_heads
+            && self.head_k_dim == 128
+            && self.head_v_dim == 128
+    }
+
+    /// Whole-layer fused chunk step (one dispatch, 2 <= l <= 12) with
+    /// rollback-capture assembly matching the tensor path's semantics.
+    #[cfg(feature = "metal")]
+    fn forward_fused_chunk(&mut self, xs: &Tensor, l: usize) -> Result<Tensor> {
+        let qkv = self.in_proj_qkv.forward(xs)?;
+        let z = self.in_proj_z.forward(xs)?;
+        let b_in = self.in_proj_b.forward(xs)?;
+        let a_in = self.in_proj_a.forward(xs)?;
+        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
+        let conv_state = self
+            .conv_state
+            .as_ref()
+            .expect("fused chunk requires a populated conv state")
+            .clone();
+        let recurrent_state = match &self.recurrent_state {
+            Some(state) if state.dtype() == DType::F32 => state.clone(),
+            Some(state) => state.to_dtype(DType::F32)?,
+            None => Tensor::zeros(
+                (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                DType::F32,
+                xs.device(),
+            )?,
+        };
+        let dims = crate::fused_deltanet::GatedDeltaDims {
+            heads: self.num_v_heads,
+            dk: self.head_k_dim,
+            dv: self.head_v_dim,
+            conv_dim: self.conv_dim,
+            key_dim: self.key_dim,
+            value_dim: self.value_dim,
+            ksz: self.conv_kernel_size,
+        };
+        let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_chunk(
+            &proj.flatten_to(1)?,
+            l,
+            &conv_state,
+            &recurrent_state.contiguous()?,
+            &self.conv_weight_full,
+            &self.dt_bias_f32.flatten_all()?,
+            &self.a_log_exp_f32.flatten_all()?,
+            &self.norm.weight_f32,
+            &dims,
+            1e-6,
+            self.norm.eps as f32,
+        )
+        .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
+
+        if self.verify_capture {
+            // Same reconstruction contract as the tensor path; the conv
+            // window is rebuilt from the pre-conv inputs + previous state.
+            let mixed_t = proj
+                .narrow(D::Minus1, 0, self.conv_dim)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let conv_full = Tensor::cat(&[&conv_state, &mixed_t], 2)?;
+            let prev_conv_len = conv_state.dim(2)?;
+            self.verify_captured = Some(DeltaVerifyCapture {
+                s0: recurrent_state,
+                kc: cap.kc,
+                delta: cap.delta,
+                gcs: cap.gcs,
+                conv_full,
+                prev_conv_len,
+                dtype: xs.dtype(),
+            });
+        } else {
+            self.verify_captured = None;
+        }
+        self.conv_state = Some(conv_new);
+        self.recurrent_state = Some(state_new);
+        self.out_proj.forward(&out)
+    }
+
     fn forward(
         &mut self,
         xs: &Tensor,
@@ -960,6 +1046,19 @@ impl GatedDeltaNet {
                 l,
                 offset,
                 || self.forward_fused_decode(xs),
+            );
+        }
+        #[cfg(feature = "metal")]
+        if self.fused_chunk_eligible(xs, b, l) {
+            return profiled(
+                profiler,
+                &device,
+                Some(layer_index),
+                Some("linear_attention"),
+                "deltanet_fused_chunk",
+                l,
+                offset,
+                || self.forward_fused_chunk(xs, l),
             );
         }
         let mixed = profiled(
