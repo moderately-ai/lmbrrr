@@ -4,12 +4,16 @@ title: BF16 activation quantized matmul on Metal
 status: todo
 priority: p1
 dependencies: []
-related: [quantize-full-text-decoder-q4-incl-lm-head, fix-runner-hot-path-naive-ops]
+related: [quantize-full-text-decoder-q4-incl-lm-head, cut-drafter-propose-cost, batched-multi-stream-decode-runner]
 scopes: [runtime/metal, runtime/candle, candle-fork]
 shared_scopes: [docs/research]
 paths: [Cargo.toml, Cargo.lock, src/quantized_linear.rs, docs/research/bf16-qmatmul-metal.md]
 tags: [kernels, quantization, campaign-1000, fork]
 ---
+## Board revision (2026-07-10 evening, agent-verified)
+
+Quantified: under q4k-full-text the F32 round-trip is ~374 extra dispatches/token across 187 quantized projections ~= 0.8 ms (~11% of the 7ms token) — worth about as much as quantizing the whole attention stack. The per-row mv dispatch loop (metal.rs:324-338; every mv kernel is a *_f32 variant, kernels/quantized.rs:127-141) makes this ticket a HARD PREREQUISITE for the aggregate lane: 8-stream quantized decode would pay ~1500 gemv dispatches/step without the batched (ne11=m) single-dispatch fix. New consumer: cut-drafter-propose-cost (quantized drafter heads eat the same cast tax). Stage gate re-derived: >= 250 forwards/s is reachable but edge — depends on the Q4K mv kernel sustaining ~250 GB/s at these shapes; re-bench quant-matmul-bench (post-gemv-routing) before promising, and custom mv tiling is the contingency fork work.
+
 ## Goal
 
 Remove the F32 activation round-trip around every quantized matmul on Metal. candle's Metal mm path hard-asserts F32 activations (candle-core/src/quantized/metal.rs:390) and the mv path dispatches once per batch row; lmbrrr's `MixedLinear` casts BF16->F32->BF16 on every call. This work lands in the candle fork (~/workspace/github.com/huggingface/candle) and lmbrrr pins to the fork rev.

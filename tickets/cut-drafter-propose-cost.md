@@ -14,6 +14,10 @@ tags: [speculative, performance, campaign-1000]
 
 Propose costs 8.7 ms/round — more than a full 24-layer greedy token (6.9 ms) for a 2-layer drafter — almost certainly dominated by the 248k-vocab reads: lm_head [248094,1024] bf16 (508 MB) once per proposal plus markov_w2 [248094,256] (127 MB) per Markov step. At the chain cap of ~2.27 tokens/round, every ms off propose is ~13 tok/s of spec throughput. None of these levers touch output correctness: drafts are verified, so a marginally worse draft distribution costs only tau.
 
+## Cost model (agent-verified, 2026-07-10 evening)
+
+markov_w1 stays BF16 (index_select gather, 512 B/row — same rule as the target embedding); confidence head [1,1280] stays dense. Implementation shape: switch lm_head (dspark.rs:261) and markov_w2 (263-266) slots to MixedLinear with a load-time `quantize_heads: Option<GgmlDType>` running quantize_onto on the mmapped checkpoint tensors — no artifact/manifest, no retraining. Risk is tau, not correctness (a flipped argmax at dspark.rs:430 cascades through prev_id and the confidence feature at 432): measure tau before/after on the fixed prompts; per-head q8_0/q6k fallback; break-even roughly delta-tau <= 0.25 per ms saved at the current round shape.
+
 ## Levers (shape decided by remeasure-spec-round-cost-model's breakdown)
 
 - Quantize the frozen drafter's lm_head and markov_w2 post-hoc (q4k/q8, no retraining); relates bf16-activation-quantized-matmul-metal (else the F32 cast tax eats the win).
