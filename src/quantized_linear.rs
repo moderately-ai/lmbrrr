@@ -21,6 +21,9 @@ pub enum MixedLinear {
     QMatMul {
         matmul: Arc<QMatMul>,
         force_f32_input: bool,
+        // The fork's Metal kernels take BF16 activations directly for these
+        // block dtypes, skipping the input-cast dispatch per call.
+        bf16_direct: bool,
     },
 }
 
@@ -33,13 +36,20 @@ impl MixedLinear {
         Self::QMatMul {
             matmul: Arc::new(QMatMul::Tensor(weight)),
             force_f32_input: false,
+            bf16_direct: false,
         }
     }
 
     pub fn from_qtensor(weight: QTensor) -> candle::Result<Self> {
+        use candle::quantized::GgmlDType;
+        let bf16_direct = matches!(
+            weight.dtype(),
+            GgmlDType::Q8_0 | GgmlDType::Q4K | GgmlDType::Q6K
+        );
         Ok(Self::QMatMul {
             matmul: Arc::new(QMatMul::from_qtensor(weight)?),
             force_f32_input: true,
+            bf16_direct,
         })
     }
 
@@ -49,11 +59,18 @@ impl MixedLinear {
             Self::QMatMul {
                 matmul,
                 force_f32_input,
+                bf16_direct,
             } => {
                 if *force_f32_input && xs.dtype() != DType::F32 {
-                    matmul
-                        .forward(&xs.to_dtype(DType::F32)?)?
-                        .to_dtype(xs.dtype())
+                    if *bf16_direct && xs.dtype() == DType::BF16 && xs.device().is_metal() {
+                        // Kernel accumulates and writes F32; only the output
+                        // hop back to BF16 remains.
+                        matmul.forward(xs)?.to_dtype(xs.dtype())
+                    } else {
+                        matmul
+                            .forward(&xs.to_dtype(DType::F32)?)?
+                            .to_dtype(xs.dtype())
+                    }
                 } else {
                     matmul.forward(xs)
                 }
