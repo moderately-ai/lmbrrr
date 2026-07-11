@@ -844,3 +844,20 @@ def sglang_probe(
         print("SAMPLE", sample.choices[0].message.content[:400], flush=True)
     finally:
         server.terminate()
+
+
+@app.function(image=vllm_image, timeout=600)
+def vllm_introspect() -> None:
+    """Ground truth on vLLM's qwen3_5 support: registered architectures,
+    config class shape, and whether a text-only entry exists."""
+    import inspect
+
+    from vllm.model_executor.models.registry import ModelRegistry
+
+    names = [n for n in ModelRegistry.get_supported_archs() if "3_5" in n or "3_next" in n.lower() or "Next" in n]
+    print("ARCHS", json.dumps(sorted(names)), flush=True)
+    from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
+
+    print("CONFIG_SIG", inspect.signature(Qwen3_5Config.__init__), flush=True)
+    src = inspect.getsource(Qwen3_5Config)
+    print("CONFIG_SRC_HEAD", src[:3000], flush=True)
