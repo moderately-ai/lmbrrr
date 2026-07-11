@@ -1,7 +1,7 @@
 ---
 id: validate-minicpm-vision-feature-parity
 title: Validate MiniCPM vision feature parity
-status: in-progress
+status: done
 priority: p3
 dependencies: [port-minicpm-v46-full-path, validate-minicpm-image-parity]
 related: []
@@ -9,9 +9,6 @@ scopes: [model/minicpm, model/vision, evals]
 shared_scopes: []
 paths: [src/minicpm.rs, tests/minicpm_v46_text_parity.rs, evals/minicpm_v46_image_oracle.py, docs/research/minicpm-v46-image-parity.md]
 tags: [parity, vision, minicpm]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783766236
 ---
 ## Goal
 
