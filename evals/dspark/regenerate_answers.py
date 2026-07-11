@@ -35,6 +35,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-context-tokens", type=int, default=3072)
+    parser.add_argument(
+        "--sort-by-length",
+        action="store_true",
+        help=(
+            "Admit conversations in ascending prompt-length order so batches "
+            "are length-homogeneous: model.generate runs every batch to its "
+            "slowest member, so mixed batches burn compute on pad-waiting."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -110,10 +119,15 @@ def main() -> int:
                 continue
             pending.append(ActiveConversation(row_id=row.get("id", line_no), user_turns=turns))
     print(f"loaded {len(pending)} conversations ({skipped} skipped)", flush=True)
+    if args.sort_by_length:
+        pending.sort(key=lambda conv: sum(len(turn) for turn in conv.user_turns))
 
     finished: list[ActiveConversation] = []
     error_rows: list[dict] = []
     total_generated_tokens = 0
+    import time as _time
+
+    decode_start = _time.monotonic()
 
     with open(args.output, "w", encoding="utf-8") as out_handle:
         while pending:
@@ -196,9 +210,12 @@ def main() -> int:
         with open(error_path, "w", encoding="utf-8") as handle:
             for row in error_rows:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    elapsed = _time.monotonic() - decode_start
     print(
         f"done: {len(finished)} success, {len(error_rows)} errors, "
-        f"~{total_generated_tokens} generated tokens",
+        f"~{total_generated_tokens} generated tokens, "
+        f"{elapsed:.1f}s generation wall, "
+        f"{total_generated_tokens / max(elapsed, 1e-9):.1f} padded-tok/s",
         flush=True,
     )
     return 0

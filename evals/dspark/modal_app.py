@@ -22,6 +22,7 @@ huggingface --from-dotenv ...`; never bake tokens into images or code.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 
@@ -84,6 +85,72 @@ def _run(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> Non
     if env:
         merged_env.update(env)
     subprocess.run(cmd, cwd=cwd, env=merged_env, check=True)
+
+
+class GpuMonitor:
+    """Background nvidia-smi sampler: prints live load/memory lines every
+    `interval` seconds (so logs show headroom over time) and returns summary
+    stats on stop(). Cheap enough to leave on for every GPU stage."""
+
+    def __init__(self, tag: str = "gpu", interval: float = 10.0):
+        import threading
+
+        self.tag = tag
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self.utils: list[float] = []
+        self.mems: list[float] = []
+        self.mem_total: float = float("nan")
+
+    def _sample(self):
+        text = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        util, used, total = (float(v) for v in text.splitlines()[0].split(","))
+        return util, used, total
+
+    def _loop(self):
+        import time
+
+        while not self._stop.is_set():
+            try:
+                util, used, total = self._sample()
+                self.utils.append(util)
+                self.mems.append(used)
+                self.mem_total = total
+                print(
+                    f"[gpu:{self.tag}] util {util:5.1f}%  mem {used/1024:6.2f}/"
+                    f"{total/1024:.2f} GiB  headroom {(total-used)/1024:6.2f} GiB",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            self._stop.wait(self.interval)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self) -> dict:
+        self._stop.set()
+        self._thread.join(timeout=self.interval + 5)
+        if not self.utils:
+            return {}
+        return {
+            "mean_gpu_util_pct": round(sum(self.utils) / len(self.utils), 1),
+            "max_gpu_util_pct": round(max(self.utils), 1),
+            "peak_mem_gib": round(max(self.mems) / 1024, 2),
+            "mem_total_gib": round(self.mem_total / 1024, 2),
+            "min_headroom_gib": round((self.mem_total - max(self.mems)) / 1024, 2),
+        }
 
 
 # head_dim 256 flex-attention kernels need >100KB shared memory per SM, which
@@ -351,3 +418,71 @@ def evaluate(
     ]
     _run(cmd, cwd="/deepspec")
     volume.commit()
+
+
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=3 * 3600)
+def regen_bench(
+    samples: int = 96,
+    batches: str = "16,64,128",
+    max_new_tokens: int = 1024,
+    input_name: str = "perfectblend_train.jsonl",
+) -> None:
+    """Data-gen rightsizing probe: sweep generate batch size (plain vs
+    length-sorted admission) on a fixed sample slice, recording wall time,
+    padded tokens/s, and mean GPU utilization per configuration."""
+    import re
+    import time
+
+    rows = []
+    for batch in [int(b) for b in batches.split(",")]:
+        for sorted_mode in (False, True):
+            monitor = GpuMonitor(tag=f"b{batch}-{'sorted' if sorted_mode else 'plain'}")
+            monitor.start()
+            started = time.monotonic()
+            cmd = [
+                "python",
+                "/lmbrrr-dspark/regenerate_answers.py",
+                "--model",
+                TARGET_MODEL,
+                "--input",
+                f"/vol/data/{input_name}",
+                "--output",
+                f"/tmp/regen-bench-b{batch}-{'sorted' if sorted_mode else 'plain'}.jsonl",
+                "--num-samples",
+                str(samples),
+                "--max-new-tokens",
+                str(max_new_tokens),
+                "--batch-size",
+                str(batch),
+            ]
+            if sorted_mode:
+                cmd.append("--sort-by-length")
+            print("+", " ".join(cmd), flush=True)
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            stats = monitor.stop()
+            wall = time.monotonic() - started
+            tail = (proc.stdout or "").strip().splitlines()
+            done_line = next(
+                (line for line in reversed(tail) if line.startswith("done:")), ""
+            )
+            tokens = 0
+            match = re.search(r"~(\d+) generated tokens", done_line)
+            if match:
+                tokens = int(match.group(1))
+            if proc.returncode != 0:
+                print(proc.stdout[-2000:], flush=True)
+                print(proc.stderr[-4000:], flush=True)
+                raise RuntimeError(f"bench run failed (batch={batch})")
+            rows.append(
+                {
+                    "batch": batch,
+                    "sorted": sorted_mode,
+                    "wall_s": round(wall, 1),
+                    "padded_tokens": tokens,
+                    "padded_tok_per_s": round(tokens / max(wall, 1e-9), 1),
+                    **stats,
+                    "done_line": done_line,
+                }
+            )
+            print("ROW", json.dumps(rows[-1]), flush=True)
+    print("SUMMARY", json.dumps(rows, indent=2), flush=True)
