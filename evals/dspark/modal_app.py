@@ -602,6 +602,10 @@ sglang_image = (
     modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.12")
     .apt_install("libnuma1", "numactl")
     .uv_pip_install("sglang[all]==0.5.7", "openai==2.6.1")
+    # SGLang 0.5.7 pins an older transformers that predates qwen3_5_text;
+    # force the pin we use everywhere else and let the probe judge whether
+    # sglang tolerates it.
+    .uv_pip_install("transformers==5.10.2")
     .env(
         {
             "HF_HOME": "/vol/hf",
@@ -615,7 +619,7 @@ sglang_image = (
 
 @app.function(image=sglang_image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=2 * 3600)
 def sglang_probe(
-    model_path: str = "/vol/models/minicpm-v46-fakequant-q4kft",
+    model_path: str = "/vol/models/minicpm-v46-textonly-fakequant",
     concurrency: int = 64,
     samples: int = 192,
     max_tokens: int = 512,
