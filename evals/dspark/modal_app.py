@@ -376,6 +376,7 @@ def train(
     exp_name: str | None = None,
     local_batch_size: int = 2,
     stage_local: bool = True,
+    draft_init_checkpoint: str | None = None,
 ) -> None:
     """Train the drafter on a prepared cache; checkpoints land in /vol/runs.
 
@@ -395,6 +396,9 @@ def train(
         f"data.target_cache_path={cache_path}",
         f"train.local_batch_size={local_batch_size}",
     ]
+    if draft_init_checkpoint:
+        # Weights-only warm start (DeepSpec db36013); fresh schedule.
+        opts.append(f"model.draft_init_checkpoint={draft_init_checkpoint}")
     if global_batch_size is not None:
         opts.append(f"train.global_batch_size={global_batch_size}")
     if num_train_epochs is not None:
