@@ -1,7 +1,7 @@
 ---
 id: quantize-full-text-decoder-q4-incl-lm-head
 title: Quantize full text decoder to Q4 including lm_head
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: [bf16-activation-quantized-matmul-metal]
@@ -9,9 +9,6 @@ scopes: [quantization, runtime/candle, evals]
 shared_scopes: [docs/research]
 paths: [src/quant_convert.rs, src/quant_sensitivity.rs, src/quantized_linear.rs, src/main.rs, evals/**, docs/research/q4-full-decoder-policy.md]
 tags: [quantization, performance, campaign-1000]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783750287
 ---
 ## Outcome (2026-07-11, commit 660d0c1 — core landed)
 
