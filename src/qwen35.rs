@@ -160,6 +160,11 @@ fn unfused_sdpa() -> bool {
     *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_SDPA").is_ok_and(|v| v == "1"))
 }
 
+fn unfused_deltanet() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_DELTANET").is_ok_and(|v| v == "1"))
+}
+
 #[derive(Clone, Debug)]
 struct Qwen35RmsNorm {
     // Zero-centred +1.0 pre-applied at load. Two dtype copies because the
@@ -683,6 +688,8 @@ struct GatedDeltaNet {
     // narrow+reshape of the raw (conv_dim, 1, ksz) weight is non-contiguous
     // and would run a copy kernel per tap per decode step.
     conv_taps: Vec<Tensor>,
+    // Squeezed (conv_dim, ksz) weight for the fused decode kernel.
+    conv_weight_full: Tensor,
     dt_bias_f32: Tensor,
     a_log_exp_f32: Tensor,
     norm: Qwen35RmsNorm,
@@ -720,6 +727,7 @@ impl GatedDeltaNet {
         let conv_taps = (0..cfg.linear_conv_kernel_dim)
             .map(|k| conv_weight.narrow(1, k, 1)?.reshape((1, conv_dim, 1)))
             .collect::<candle::Result<Vec<_>>>()?;
+        let conv_weight_full = conv_weight.contiguous()?;
         let a_log = vb.get(cfg.linear_num_value_heads, "A_log")?;
         let a_log_exp_f32 =
             a_log
@@ -753,6 +761,7 @@ impl GatedDeltaNet {
                 vb.pp("out_proj"),
             )?),
             conv_taps,
+            conv_weight_full,
             dt_bias_f32,
             a_log_exp_f32,
             norm: Qwen35RmsNorm::new(
@@ -864,6 +873,73 @@ impl GatedDeltaNet {
         Ok(replaced)
     }
 
+    /// Whole-layer fused decode step (one Metal dispatch after the packed
+    /// projection cat); requires the shapes the kernel supports and a
+    /// populated conv state (i.e. any step after prefill).
+    #[cfg(feature = "metal")]
+    fn forward_fused_decode(&mut self, xs: &Tensor) -> Result<Tensor> {
+        let qkv = self.in_proj_qkv.forward(xs)?;
+        let z = self.in_proj_z.forward(xs)?;
+        let b_in = self.in_proj_b.forward(xs)?;
+        let a_in = self.in_proj_a.forward(xs)?;
+        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?
+            .flatten_all()?
+            .contiguous()?;
+        let conv_state = self
+            .conv_state
+            .as_ref()
+            .expect("fused decode requires a populated conv state")
+            .clone();
+        let recurrent_state = match &self.recurrent_state {
+            Some(state) if state.dtype() == DType::F32 => state.clone(),
+            Some(state) => state.to_dtype(DType::F32)?,
+            None => Tensor::zeros(
+                (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                DType::F32,
+                xs.device(),
+            )?,
+        };
+        let dims = crate::fused_deltanet::GatedDeltaDims {
+            heads: self.num_v_heads,
+            dk: self.head_k_dim,
+            dv: self.head_v_dim,
+            conv_dim: self.conv_dim,
+            key_dim: self.key_dim,
+            value_dim: self.value_dim,
+            ksz: self.conv_kernel_size,
+        };
+        let (out, conv_new, state_new) = crate::fused_deltanet::gated_delta_decode(
+            &proj,
+            &conv_state,
+            &recurrent_state.contiguous()?,
+            &self.conv_weight_full,
+            &self.dt_bias_f32.flatten_all()?,
+            &self.a_log_exp_f32.flatten_all()?,
+            &self.norm.weight_f32,
+            &dims,
+            1e-6,
+            self.norm.eps as f32,
+        )
+        .map_err(|e| candle::Error::wrap(e))?;
+        self.conv_state = Some(conv_new);
+        self.recurrent_state = Some(state_new);
+        self.out_proj.forward(&out)
+    }
+
+    #[cfg(feature = "metal")]
+    fn fused_decode_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
+        b == 1
+            && l == 1
+            && !unfused_deltanet()
+            && matches!(xs.device(), Device::Metal(_))
+            && xs.dtype() == DType::BF16
+            && self.conv_state.is_some()
+            && self.num_k_heads == self.num_v_heads
+            && self.head_k_dim == self.head_v_dim
+            && self.head_v_dim % 32 == 0
+            && self.head_v_dim <= 256
+    }
+
     fn forward(
         &mut self,
         xs: &Tensor,
@@ -873,6 +949,19 @@ impl GatedDeltaNet {
     ) -> Result<Tensor> {
         let (b, l, _) = xs.dims3()?;
         let device = xs.device().clone();
+        #[cfg(feature = "metal")]
+        if self.fused_decode_eligible(xs, b, l) {
+            return profiled(
+                profiler,
+                &device,
+                Some(layer_index),
+                Some("linear_attention"),
+                "deltanet_fused_decode",
+                l,
+                offset,
+                || self.forward_fused_decode(xs),
+            );
+        }
         let mixed = profiled(
             profiler,
             &device,

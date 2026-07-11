@@ -11,7 +11,7 @@ apple-optimized = ["metal", "accelerate"]
 cuda = ["candle/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 cudnn = ["cuda", "candle/cudnn", "candle-nn/cudnn", "candle-transformers/cudnn"]
 flash-attn = ["candle-transformers/flash-attn"]
-metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal"]
+metal = ["candle/metal", "candle-nn/metal", "candle-transformers/metal", "dep:candle-metal-kernels"]
 metal-debug-labels = [
   "metal",
   "candle/metal-debug-labels",
@@ -24,9 +24,10 @@ mkl = ["candle/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
 anyhow = { version = "1", features = ["backtrace"] }
 # Fork branch `lmbrrr` carries Metal kernel additions ahead of upstream
 # (i32 casts); pinned by rev, upstreamed as PRs when stable.
-candle = { package = "candle-core", git = "https://github.com/tomsanbear/candle.git", rev = "733bfcfd0cddd4493a5f62faa73c0f477e67709d" }
-candle-nn = { git = "https://github.com/tomsanbear/candle.git", rev = "733bfcfd0cddd4493a5f62faa73c0f477e67709d" }
-candle-transformers = { git = "https://github.com/tomsanbear/candle.git", rev = "733bfcfd0cddd4493a5f62faa73c0f477e67709d" }
+candle = { package = "candle-core", git = "https://github.com/tomsanbear/candle.git", rev = "fdd06d7c5912c5658c6f1b2e843d2db0cc274f97" }
+candle-nn = { git = "https://github.com/tomsanbear/candle.git", rev = "fdd06d7c5912c5658c6f1b2e843d2db0cc274f97" }
+candle-transformers = { git = "https://github.com/tomsanbear/candle.git", rev = "fdd06d7c5912c5658c6f1b2e843d2db0cc274f97" }
+candle-metal-kernels = { git = "https://github.com/tomsanbear/candle.git", rev = "fdd06d7c5912c5658c6f1b2e843d2db0cc274f97", optional = true }
 clap = { version = "4.2.4", features = ["derive"] }
 crossterm = "0.28"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
