@@ -44,6 +44,17 @@ def parse_args() -> argparse.Namespace:
             "slowest member, so mixed batches burn compute on pad-waiting."
         ),
     )
+    parser.add_argument(
+        "--prefill-token-budget",
+        type=int,
+        default=32768,
+        help=(
+            "Cap batch_size * padded_prompt_len: HF generate materializes "
+            "full-sequence prefill logits (batch x len x 248k vocab fp32), "
+            "so long-prompt batches must shrink. 32768 positions ~= 32 GiB "
+            "of prefill logits."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -131,13 +142,16 @@ def main() -> int:
 
     with open(args.output, "w", encoding="utf-8") as out_handle:
         while pending:
-            batch = pending[: args.batch_size]
-            prompts = []
-            for conv in batch:
+            # Token-budget admission: build prompts for a candidate window,
+            # measure real token lengths, and take the longest prefix whose
+            # padded footprint (n * max_len) fits the prefill-logits budget.
+            window = pending[: args.batch_size]
+            window_prompts = []
+            for conv in window:
                 messages = conv.messages + [
                     {"role": "user", "content": conv.user_turns[conv.next_turn]}
                 ]
-                prompts.append(
+                window_prompts.append(
                     tokenizer.apply_chat_template(
                         messages,
                         tokenize=False,
@@ -145,6 +159,20 @@ def main() -> int:
                         enable_thinking=False,
                     )
                 )
+            lengths = [
+                min(len(ids), args.max_context_tokens)
+                for ids in tokenizer(window_prompts, add_special_tokens=False)["input_ids"]
+            ]
+            take = 1
+            max_len = lengths[0]
+            for i in range(1, len(window)):
+                candidate_max = max(max_len, lengths[i])
+                if (i + 1) * candidate_max > args.prefill_token_budget:
+                    break
+                max_len = candidate_max
+                take = i + 1
+            batch = window[:take]
+            prompts = window_prompts[:take]
             encoded = tokenizer(
                 prompts,
                 return_tensors="pt",
@@ -197,7 +225,7 @@ def main() -> int:
                     )
                 else:
                     still_pending.append(conv)
-            pending = still_pending + pending[args.batch_size :]
+            pending = still_pending + pending[take:]
             out_handle.flush()
             print(
                 f"progress: finished={len(finished)} pending={len(pending)} "

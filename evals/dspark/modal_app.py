@@ -237,7 +237,8 @@ def regenerate(
             str(max_new_tokens),
             "--batch-size",
             str(batch_size),
-        ]
+        ],
+        env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
     )
     print("REGEN_GPU", json.dumps(monitor.stop()), flush=True)
     volume.commit()
