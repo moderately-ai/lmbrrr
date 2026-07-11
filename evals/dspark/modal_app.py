@@ -609,6 +609,7 @@ vllm_image = (
             "CUDA_HOME": "/usr/local/cuda",
         }
     )
+    .add_local_dir(DEEPSPEC_LOCAL_PATH, remote_path="/deepspec")
     .add_local_dir(LMBRRR_DSPARK_LOCAL_PATH, remote_path="/lmbrrr-dspark")
 )
 
@@ -866,3 +867,82 @@ def vllm_introspect() -> None:
     print("HAS_linear_attention_literal", j != -1, flush=True)
     for needle in ("layer_types", "full_attention_interval", "layers_block_type"):
         print(needle, src.count(needle), flush=True)
+
+
+@app.function(image=vllm_image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=8 * 3600)
+def vllm_regenerate(
+    num_samples: int = 500,
+    max_tokens: int = 1024,
+    concurrency: int = 96,
+    temperature: float = 0.0,
+    model_path: str = "/vol/models/minicpm-v46-fakequant-q4kft",
+    input_name: str = "perfectblend_train.jsonl",
+    output_name: str = "regen-vllm-500.jsonl",
+) -> None:
+    """Deployment-config trace generation via vLLM's native
+    MiniCPMV4_6ForConditionalGeneration (measured 6.6k tok/s vs 1.25k on the
+    HF path). Drives DeepSpec's generate_train_data.py against a local
+    server; greedy by default per the round-2 plan."""
+    import time
+    import urllib.request
+
+    server = subprocess.Popen(
+        [
+            "vllm",
+            "serve",
+            model_path,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "30000",
+            "--dtype",
+            "bfloat16",
+            "--gpu-memory-utilization",
+            "0.85",
+            "--limit-mm-per-prompt",
+            '{"image": 0, "video": 0}',
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 1200
+        while True:
+            if server.poll() is not None:
+                raise RuntimeError(f"vllm server exited early: {server.returncode}")
+            try:
+                urllib.request.urlopen("http://127.0.0.1:30000/health", timeout=5)
+                break
+            except Exception:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("vllm server never became healthy")
+                time.sleep(5)
+        print("server healthy", flush=True)
+        monitor = GpuMonitor(tag="vllm-regen", interval=30)
+        monitor.start()
+        _run(
+            [
+                "python",
+                "/deepspec/scripts/data/generate_train_data.py",
+                "--model",
+                model_path,
+                "--server-address",
+                "127.0.0.1:30000",
+                "--input-file-path",
+                f"/vol/data/{input_name}",
+                "--output-file-path",
+                f"/vol/data/{output_name}",
+                "--concurrency",
+                str(concurrency),
+                "--temperature",
+                str(temperature),
+                "--max-tokens",
+                str(max_tokens),
+                "--num-samples",
+                str(num_samples),
+                "--disable-thinking",
+            ],
+            cwd="/deepspec",
+        )
+        print("REGEN_GPU", json.dumps(monitor.stop()), flush=True)
+    finally:
+        server.terminate()
+    volume.commit()
