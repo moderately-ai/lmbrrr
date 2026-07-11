@@ -204,18 +204,27 @@ def download_prompts(
 def regenerate(
     num_samples: int = 500,
     max_new_tokens: int = 1024,
-    batch_size: int = 16,
+    batch_size: int = 128,
     input_name: str = "perfectblend_train.jsonl",
     output_name: str = "regen-smoke.jsonl",
     skip_samples: int = 0,
+    model: str = TARGET_MODEL,
 ) -> None:
-    """Replace assistant turns with target-model generations (non-thinking)."""
+    """Replace assistant turns with target-model generations (non-thinking).
+
+    Defaults from the 2026-07-11 rightsizing sweep: batch 128 + length-sorted
+    admission = 3.65x the old batch-16 config (192 OOMs on prefill logits at
+    this vocab). Pass model=/vol/models/minicpm-v46-fakequant-q4kft for
+    deployment-config traces."""
+    monitor = GpuMonitor(tag=f"regen-b{batch_size}")
+    monitor.start()
     _run(
         [
             "python",
             "/lmbrrr-dspark/regenerate_answers.py",
+            "--sort-by-length",
             "--model",
-            TARGET_MODEL,
+            model,
             "--input",
             f"/vol/data/{input_name}",
             "--output",
@@ -230,6 +239,7 @@ def regenerate(
             str(batch_size),
         ]
     )
+    print("REGEN_GPU", json.dumps(monitor.stop()), flush=True)
     volume.commit()
 
 
@@ -347,7 +357,7 @@ def prepare_cache(
     volume.commit()
 
 
-@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600)
+@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=1024 * 1024)
 def train(
     cache_name: str = "target-cache-smoke",
     global_batch_size: int | None = None,
@@ -355,9 +365,27 @@ def train(
     logging_steps: int | None = 1,
     torch_compile: bool = True,
     exp_name: str | None = None,
+    local_batch_size: int = 2,
+    stage_local: bool = True,
 ) -> None:
-    """Train the drafter on a prepared cache; checkpoints land in /vol/runs."""
-    opts = [f"data.target_cache_path=/vol/cache/{cache_name}"]
+    """Train the drafter on a prepared cache; checkpoints land in /vol/runs.
+
+    Rightsizing (2026-07-11): volume random reads starve the GPU (180 s/step
+    at gb=64); staging the cache to container NVMe (694 MB/s copy) plus
+    micro-batching gives ~5 s/step. lbs=4 peaked at 76.7/79.7 GiB, so 2 is
+    the safe default for 4k-token tails."""
+    cache_path = f"/vol/cache/{cache_name}"
+    if stage_local:
+        import time
+
+        started = time.monotonic()
+        _run(["cp", "-r", cache_path, "/tmp/cache-staged"])
+        print(f"staged cache in {time.monotonic()-started:.0f}s", flush=True)
+        cache_path = "/tmp/cache-staged"
+    opts = [
+        f"data.target_cache_path={cache_path}",
+        f"train.local_batch_size={local_batch_size}",
+    ]
     if global_batch_size is not None:
         opts.append(f"train.global_batch_size={global_batch_size}")
     if num_train_epochs is not None:
@@ -368,7 +396,7 @@ def train(
     cmd = ["python", "/deepspec/train.py", "--config", TRAIN_CONFIG]
     for opt in opts:
         cmd.extend(["--opts", opt])
-    env = {}
+    env = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
     if exp_name is not None:
         # exp_name is a top-level config key; --opts requires existing keys, so
         # pass through the config module contract instead of inventing one.
