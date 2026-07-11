@@ -1,7 +1,7 @@
 ---
 id: cut-drafter-propose-cost
 title: Cut drafter propose cost (8.7 ms/round > a full greedy token for a 2-layer drafter)
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: [bf16-activation-quantized-matmul-metal, remeasure-spec-round-cost-model]
@@ -9,9 +9,6 @@ scopes: [inference/speculative, runtime/candle]
 shared_scopes: [docs/research]
 paths: []
 tags: [speculative, performance, campaign-1000]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783738814
 ---
 ## Outcome update (2026-07-10 night)
 
