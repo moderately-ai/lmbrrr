@@ -165,6 +165,14 @@ fn unfused_deltanet() -> bool {
     *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_DELTANET").is_ok_and(|v| v == "1"))
 }
 
+/// v2 fused DeltaNet (re-gridded decode/chunk kernels, transposed state
+/// layout). Opt-out: default on; LMBRRR_DELTANET_V2=0 restores the v1
+/// kernels for A/B and drift attribution.
+fn deltanet_v2() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| !std::env::var("LMBRRR_DELTANET_V2").is_ok_and(|v| v == "0"))
+}
+
 #[derive(Clone, Debug)]
 struct Qwen35RmsNorm {
     // Zero-centred +1.0 pre-applied at load. Two dtype copies because the
@@ -404,7 +412,7 @@ impl TruncatableKvCache {
 /// overwrites the stale slice.
 #[derive(Clone, Debug)]
 pub struct DecodeStateSnapshot {
-    deltanet: Vec<(Option<Tensor>, Option<Tensor>)>,
+    deltanet: Vec<(Option<Tensor>, Option<Tensor>, bool)>,
     kv_lens: Vec<usize>,
 }
 
@@ -785,6 +793,9 @@ struct DeltaVerifyCapture {
     prev_conv_len: usize,
     /// Storage dtype the chunked path would have used for the state.
     dtype: DType,
+    /// Whether `s0` (and thus the reconstructed state) is in the v2
+    /// transposed layout (b, h, v_dim, k_dim) instead of (b, h, k_dim, v_dim).
+    transposed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -805,6 +816,11 @@ struct GatedDeltaNet {
     norm: Qwen35RmsNorm,
     conv_state: Option<Tensor>,
     recurrent_state: Option<Tensor>,
+    // Layout of recurrent_state: false = v1 (b, h, dk, dv); true = v2
+    // transposed (b, h, dv, dk). Same shape at dk == dv, so this flag is the
+    // only record of which one the tensor holds. v2 kernel paths transpose
+    // lazily on entry; v1/tensor paths transpose back.
+    state_transposed: bool,
     // Verify-state capture: enabled by the speculative runner around verify
     // chunks; single-chunk forwards retain reconstruction intermediates.
     verify_capture: bool,
@@ -885,6 +901,7 @@ impl GatedDeltaNet {
             )?,
             conv_state: None,
             recurrent_state: None,
+            state_transposed: false,
             verify_capture: false,
             verify_captured: None,
             tree_captured: None,
@@ -903,6 +920,7 @@ impl GatedDeltaNet {
     fn clear_cache(&mut self) {
         self.conv_state = None;
         self.recurrent_state = None;
+        self.state_transposed = false;
         self.verify_captured = None;
         self.tree_captured = None;
         self.pending_conv_window = None;
@@ -930,13 +948,21 @@ impl GatedDeltaNet {
             .kc
             .narrow(2, 0, prefix_len)?
             .broadcast_mul(&rel.unsqueeze(3)?)?; // (b, h, j+1, k_dim)
-        let state = (wk
-            .transpose(2, 3)?
-            .contiguous()?
-            .matmul(&cap.delta.narrow(2, 0, prefix_len)?.contiguous()?)?
-            + cap
-                .s0
-                .broadcast_mul(&gcs_j.exp()?.unsqueeze(3)?)?)?;
+        // v2 stores S transposed; (Σ wk_i ⊗ δ_i)^T = δ^T · wk, so the same
+        // capture tensors reconstruct either layout.
+        let state = if cap.transposed {
+            (cap.delta
+                .narrow(2, 0, prefix_len)?
+                .transpose(2, 3)?
+                .contiguous()?
+                .matmul(&wk.contiguous()?)?
+                + cap.s0.broadcast_mul(&gcs_j.exp()?.unsqueeze(3)?)?)?
+        } else {
+            (wk.transpose(2, 3)?
+                .contiguous()?
+                .matmul(&cap.delta.narrow(2, 0, prefix_len)?.contiguous()?)?
+                + cap.s0.broadcast_mul(&gcs_j.exp()?.unsqueeze(3)?)?)?
+        };
         // Match the dtype the chunked store (and thus a re-advance) would
         // have produced at this boundary.
         let recurrent = state.to_dtype(cap.dtype)?;
@@ -960,9 +986,11 @@ impl GatedDeltaNet {
         let Some(cap) = self.verify_captured.take() else {
             candle::bail!("select_verify_state without a captured verify chunk");
         };
+        let transposed = cap.transposed;
         let (recurrent, conv) =
             Self::reconstruct_capture_state(&cap, prefix_len, self.conv_kernel_size)?;
         self.recurrent_state = Some(recurrent);
+        self.state_transposed = transposed;
         self.conv_state = Some(conv);
         Ok(())
     }
@@ -976,9 +1004,11 @@ impl GatedDeltaNet {
             candle::bail!("select_tree_state without a captured tree forward");
         };
         let cap = if on_alt { cap_alt } else { cap_main };
+        let transposed = cap.transposed;
         let (recurrent, conv) =
             Self::reconstruct_capture_state(&cap, prefix_in_segment, self.conv_kernel_size)?;
         self.recurrent_state = Some(recurrent);
+        self.state_transposed = transposed;
         self.conv_state = Some(conv);
         Ok(())
     }
@@ -1023,6 +1053,7 @@ impl GatedDeltaNet {
     /// populated conv state (i.e. any step after prefill).
     #[cfg(feature = "metal")]
     fn forward_fused_decode(&mut self, xs: &Tensor) -> Result<Tensor> {
+        self.ensure_v1_state_layout()?;
         let qkv = self.in_proj_qkv.forward(xs)?;
         let z = self.in_proj_z.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
@@ -1104,6 +1135,7 @@ impl GatedDeltaNet {
     /// rollback-capture assembly matching the tensor path's semantics.
     #[cfg(feature = "metal")]
     fn forward_fused_chunk(&mut self, xs: &Tensor, l: usize) -> Result<Tensor> {
+        self.ensure_v1_state_layout()?;
         let qkv = self.in_proj_qkv.forward(xs)?;
         let z = self.in_proj_z.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
@@ -1164,9 +1196,132 @@ impl GatedDeltaNet {
                 conv_full,
                 prev_conv_len,
                 dtype: xs.dtype(),
+                transposed: false,
             });
         } else {
             self.verify_captured = None;
+        }
+        self.conv_state = Some(conv_new);
+        self.recurrent_state = Some(state_new);
+        self.out_proj.forward(&out)
+    }
+
+    /// Converts `recurrent_state` to the layout a v1 (or tensor) path
+    /// expects, transposing back from the v2 layout if needed. dk == dv makes
+    /// the shapes identical, so the flag is the only source of truth.
+    fn ensure_v1_state_layout(&mut self) -> Result<()> {
+        if self.state_transposed {
+            if let Some(state) = &self.recurrent_state {
+                self.recurrent_state = Some(state.transpose(2, 3)?.contiguous()?);
+            }
+            self.state_transposed = false;
+        }
+        Ok(())
+    }
+
+    /// F32, offset-0, v2-transposed (b, h, dv, dk) copy of the live state
+    /// for the v2 kernels; flips the layout flag.
+    #[cfg(feature = "metal")]
+    fn take_state_for_v2(&mut self, b: usize, device: &Device) -> Result<Tensor> {
+        let state = match &self.recurrent_state {
+            Some(state) if state.dtype() == DType::F32 => state.clone(),
+            Some(state) => state.to_dtype(DType::F32)?,
+            None => Tensor::zeros(
+                (b, self.num_v_heads, self.head_v_dim, self.head_k_dim),
+                DType::F32,
+                device,
+            )?,
+        };
+        let state = if self.state_transposed || self.recurrent_state.is_none() {
+            state
+        } else {
+            state.transpose(2, 3)?.contiguous()?
+        };
+        self.state_transposed = true;
+        Ok(state)
+    }
+
+    #[cfg(feature = "metal")]
+    fn fused_v2_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
+        // Chunks only: the re-gridded core wins there and compounds with l
+        // (measured -7%/-8% at l=8/12), but the three-dispatch structure
+        // costs ~0.8 ms on a single-token step where the v1 whole-layer
+        // kernel is ~0.9 ms total — decode stays on v1.
+        deltanet_v2()
+            && !unfused_deltanet()
+            && b == 1
+            && (2..=12).contains(&l)
+            && matches!(xs.device(), Device::Metal(_))
+            && xs.dtype() == DType::BF16
+            && self.conv_state.is_some()
+            && self.num_k_heads == self.num_v_heads
+            && self.head_k_dim == 128
+            && self.head_v_dim == 128
+    }
+
+    /// v2 fused path: unified decode/chunk with the re-gridded kernels and
+    /// transposed state. Mirrors forward_fused_decode (l == 1: captures
+    /// untouched, exactly like the v1 decode route) and forward_fused_chunk
+    /// (l >= 2: capture assembly) semantics.
+    #[cfg(feature = "metal")]
+    fn forward_fused_v2(&mut self, xs: &Tensor, b: usize, l: usize) -> Result<Tensor> {
+        let qkv = self.in_proj_qkv.forward(xs)?;
+        let z = self.in_proj_z.forward(xs)?;
+        let b_in = self.in_proj_b.forward(xs)?;
+        let a_in = self.in_proj_a.forward(xs)?;
+        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?;
+        let conv_state = self
+            .conv_state
+            .as_ref()
+            .expect("fused v2 requires a populated conv state")
+            .clone();
+        let recurrent_state_t = self.take_state_for_v2(b, xs.device())?;
+        let dims = crate::fused_deltanet::GatedDeltaDims {
+            heads: self.num_v_heads,
+            dk: self.head_k_dim,
+            dv: self.head_v_dim,
+            conv_dim: self.conv_dim,
+            key_dim: self.key_dim,
+            value_dim: self.value_dim,
+            ksz: self.conv_kernel_size,
+        };
+        let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_v2(
+            &proj.flatten_all()?.contiguous()?,
+            l,
+            b,
+            &conv_state,
+            &recurrent_state_t.contiguous()?,
+            &self.conv_weight_full,
+            &self.dt_bias_f32.flatten_all()?,
+            &self.a_log_exp_f32.flatten_all()?,
+            &self.norm.weight_f32,
+            &dims,
+            1e-6,
+            self.norm.eps as f32,
+        )
+        .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
+
+        if l >= 2 {
+            if self.verify_capture {
+                let mixed_t = proj
+                    .narrow(D::Minus1, 0, self.conv_dim)?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let conv_full = Tensor::cat(&[&conv_state, &mixed_t], 2)?;
+                let prev_conv_len = conv_state.dim(2)?;
+                self.verify_captured = Some(DeltaVerifyCapture {
+                    s0: recurrent_state_t,
+                    kc: cap.kc,
+                    delta: cap.delta,
+                    gcs: cap.gcs,
+                    conv_full,
+                    prev_conv_len,
+                    dtype: xs.dtype(),
+                    transposed: true,
+                });
+            } else {
+                self.verify_captured = None;
+            }
         }
         self.conv_state = Some(conv_new);
         self.recurrent_state = Some(state_new);
@@ -1190,6 +1345,10 @@ impl GatedDeltaNet {
         if !self.fused_chunk_eligible(xs, xs.dim(0)?, seg1) {
             candle::bail!("tree forward requires the fused chunk path (metal, BF16, w+1 <= 12)");
         }
+        // The tree runs on the same kernel generation as chain verifies so
+        // the tree-check equivalence gate compares like with like: v2 chunk
+        // kernels (transposed state) when active, else v1.
+        let use_v2 = deltanet_v2();
         let qkv = self.in_proj_qkv.forward(xs)?;
         let z = self.in_proj_z.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
@@ -1200,14 +1359,19 @@ impl GatedDeltaNet {
             .as_ref()
             .expect("tree forward requires a populated conv state")
             .clone();
-        let s0 = match &self.recurrent_state {
-            Some(state) if state.dtype() == DType::F32 => state.clone(),
-            Some(state) => state.to_dtype(DType::F32)?,
-            None => Tensor::zeros(
-                (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
-                DType::F32,
-                xs.device(),
-            )?,
+        let s0 = if use_v2 {
+            self.take_state_for_v2(1, xs.device())?
+        } else {
+            self.ensure_v1_state_layout()?;
+            match &self.recurrent_state {
+                Some(state) if state.dtype() == DType::F32 => state.clone(),
+                Some(state) => state.to_dtype(DType::F32)?,
+                None => Tensor::zeros(
+                    (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                    DType::F32,
+                    xs.device(),
+                )?,
+            }
         };
         let dims = crate::fused_deltanet::GatedDeltaDims {
             heads: self.num_v_heads,
@@ -1218,25 +1382,46 @@ impl GatedDeltaNet {
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
         };
+        // Both segments run whichever kernel generation is active; captures
+        // record the state layout so reconstruction matches.
         let run_segment = |proj_seg: &Tensor,
                            seg_len: usize,
                            conv: &Tensor,
                            state: &Tensor|
          -> Result<(Tensor, Tensor, Tensor, DeltaVerifyCapture)> {
-            let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_chunk(
-                &proj_seg.flatten_to(1)?.contiguous()?,
-                seg_len,
-                conv,
-                &state.contiguous()?,
-                &self.conv_weight_full,
-                &self.dt_bias_f32.flatten_all()?,
-                &self.a_log_exp_f32.flatten_all()?,
-                &self.norm.weight_f32,
-                &dims,
-                1e-6,
-                self.norm.eps as f32,
-            )
-            .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
+            let flat = proj_seg.flatten_to(1)?.contiguous()?;
+            let (out, conv_new, state_new, cap) = if use_v2 {
+                crate::fused_deltanet::gated_delta_v2(
+                    &flat.flatten_all()?.contiguous()?,
+                    seg_len,
+                    1,
+                    conv,
+                    &state.contiguous()?,
+                    &self.conv_weight_full,
+                    &self.dt_bias_f32.flatten_all()?,
+                    &self.a_log_exp_f32.flatten_all()?,
+                    &self.norm.weight_f32,
+                    &dims,
+                    1e-6,
+                    self.norm.eps as f32,
+                )
+                .map_err(|e| candle::Error::msg(format!("{e:#}")))?
+            } else {
+                crate::fused_deltanet::gated_delta_chunk(
+                    &flat,
+                    seg_len,
+                    conv,
+                    &state.contiguous()?,
+                    &self.conv_weight_full,
+                    &self.dt_bias_f32.flatten_all()?,
+                    &self.a_log_exp_f32.flatten_all()?,
+                    &self.norm.weight_f32,
+                    &dims,
+                    1e-6,
+                    self.norm.eps as f32,
+                )
+                .map_err(|e| candle::Error::msg(format!("{e:#}")))?
+            };
             let mixed_t = proj_seg
                 .narrow(D::Minus1, 0, self.conv_dim)?
                 .transpose(1, 2)?
@@ -1250,6 +1435,7 @@ impl GatedDeltaNet {
                 conv_full,
                 prev_conv_len: conv.dim(2)?,
                 dtype: xs.dtype(),
+                transposed: use_v2,
             };
             Ok((out, conv_new, state_new, capture))
         };
@@ -1287,6 +1473,19 @@ impl GatedDeltaNet {
     ) -> Result<Tensor> {
         let (b, l, _) = xs.dims3()?;
         let device = xs.device().clone();
+        #[cfg(feature = "metal")]
+        if self.fused_v2_eligible(xs, b, l) {
+            return profiled(
+                profiler,
+                &device,
+                Some(layer_index),
+                Some("linear_attention"),
+                if l == 1 { "deltanet_fused_v2_decode" } else { "deltanet_fused_v2_chunk" },
+                l,
+                offset,
+                || self.forward_fused_v2(xs, b, l),
+            );
+        }
         #[cfg(feature = "metal")]
         if self.fused_decode_eligible(xs, b, l) {
             return profiled(
@@ -1485,6 +1684,7 @@ impl GatedDeltaNet {
         beta: &Tensor,
     ) -> Result<Tensor> {
         const CHUNK: usize = 32;
+        self.ensure_v1_state_layout()?;
         let (b, l, h, k_dim) = query.dims4()?;
         let v_dim = value.dim(D::Minus1)?;
         let dtype = query.dtype();
@@ -1575,6 +1775,7 @@ impl GatedDeltaNet {
                     conv_full,
                     prev_conv_len,
                     dtype,
+                    transposed: false,
                 });
             }
 
@@ -1609,6 +1810,7 @@ impl GatedDeltaNet {
         g: &Tensor,
         beta: &Tensor,
     ) -> Result<Tensor> {
+        self.ensure_v1_state_layout()?;
         let (b, l, h, k_dim) = query.dims4()?;
         let v_dim = value.dim(D::Minus1)?;
         let dtype = query.dtype();
@@ -1659,6 +1861,7 @@ impl GatedDeltaNet {
         g: &Tensor,
         beta: &Tensor,
     ) -> Result<Tensor> {
+        self.ensure_v1_state_layout()?;
         let (b, _, h, k_dim) = query.dims4()?;
         let v_dim = value.dim(D::Minus1)?;
         let dtype = query.dtype();
@@ -2196,7 +2399,11 @@ impl Qwen35TextModel {
         for layer in &self.layers {
             match &layer.mixer {
                 TokenMixer::Linear(attn) => {
-                    deltanet.push((attn.conv_state.clone(), attn.recurrent_state.clone()));
+                    deltanet.push((
+                        attn.conv_state.clone(),
+                        attn.recurrent_state.clone(),
+                        attn.state_transposed,
+                    ));
                 }
                 TokenMixer::Full(attn) => kv_lens.push(attn.kv_len()),
             }
@@ -2250,11 +2457,13 @@ impl Qwen35TextModel {
         for layer in &mut self.layers {
             match &mut layer.mixer {
                 TokenMixer::Linear(attn) => {
-                    let Some((conv, recurrent)) = snapshot.deltanet.get(linear_idx) else {
+                    let Some((conv, recurrent, transposed)) = snapshot.deltanet.get(linear_idx)
+                    else {
                         candle::bail!("decode-state snapshot has too few DeltaNet entries");
                     };
                     attn.conv_state = conv.clone();
                     attn.recurrent_state = recurrent.clone();
+                    attn.state_transposed = *transposed;
                     linear_idx += 1;
                 }
                 TokenMixer::Full(attn) => {
