@@ -1,7 +1,7 @@
 ---
 id: reduce-metal-dispatch-layer-overheads
 title: Shave per-op constants in the fork dispatch layer (allocator scan, fence maps, encoder locks)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: []
