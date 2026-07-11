@@ -582,6 +582,12 @@ struct DsparkRunArgs {
     #[arg(long)]
     accept_margin: Option<f32>,
 
+    /// Post-hoc quantization tier for the drafter's 248k-vocab heads
+    /// (lm_head + markov_w2). Cuts draft cost ~2x; risk surface is tau only
+    /// (drafts are target-verified).
+    #[arg(long, value_enum)]
+    drafter_quantize: Option<DrafterQuantArg>,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -4662,7 +4668,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
-    let mut drafter = DsparkDrafter::load(drafter_dir, &device, dtype)?;
+    let mut drafter = DsparkDrafter::load_with_options(
+        drafter_dir,
+        &device,
+        dtype,
+        args.drafter_quantize.map(DrafterQuantArg::ggml),
+    )?;
     let gamma = args.gamma.min(drafter.config.block_size);
     let capture_layers = drafter.config.target_layer_ids.clone();
 
@@ -4725,12 +4736,16 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             // DeepSpec inference contract: the proposal is the leading run of
             // positions whose calibrated confidence clears the threshold;
             // 0-draft rounds degrade to plain [anchor] verification.
+            // Floor at 1: a width-0 round pays the full draft for exactly one
+            // committed token, while the marginal chunk token costs ~0.8 ms
+            // against position-0 acceptance of 0.4-0.8 — always +EV.
             let width = match args.confidence_threshold {
                 Some(threshold) => proposal
                     .confidence_logits
                     .iter()
                     .take_while(|logit| sts.probability(**logit) >= threshold)
-                    .count(),
+                    .count()
+                    .max(1),
                 None => gamma,
             };
             proposed_width_histogram[width] += 1;
@@ -5471,6 +5486,23 @@ fn analyze_verification(
         bonus_token_id,
         reconstructed_token_ids,
     })
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum DrafterQuantArg {
+    Q8_0,
+    Q4k,
+    Q6k,
+}
+
+impl DrafterQuantArg {
+    fn ggml(self) -> candle::quantized::GgmlDType {
+        match self {
+            Self::Q8_0 => candle::quantized::GgmlDType::Q8_0,
+            Self::Q4k => candle::quantized::GgmlDType::Q4K,
+            Self::Q6k => candle::quantized::GgmlDType::Q6K,
+        }
+    }
 }
 
 /// Platt-style calibration of the confidence head (we own this; absent from

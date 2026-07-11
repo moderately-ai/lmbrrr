@@ -19,6 +19,7 @@ use candle::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{Linear, VarBuilder};
 use serde::Deserialize;
 
+use crate::quantized_linear::MixedLinear;
 use crate::qwen35::TruncatableKvCache;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -184,9 +185,9 @@ pub struct DsparkDrafter {
     norm: RmsNorm,
     fc: Linear,
     hidden_norm: RmsNorm,
-    lm_head: Linear,
+    lm_head: MixedLinear,
     markov_w1: Tensor,
-    markov_w2: Linear,
+    markov_w2: MixedLinear,
     confidence: Linear,
     rotary: Rotary,
     device: Device,
@@ -204,8 +205,38 @@ pub struct DraftProposal {
     pub corrected_logits: Option<Tensor>,
 }
 
+fn quantize_or_dense(
+    weight: Tensor,
+    dtype: Option<candle::quantized::GgmlDType>,
+    device: &Device,
+) -> Result<MixedLinear> {
+    match dtype {
+        None => Ok(MixedLinear::dense(Linear::new(weight, None))),
+        Some(ggml) => {
+            let cpu_f32 = weight
+                .to_dtype(DType::F32)?
+                .to_device(&Device::Cpu)?;
+            let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, device)?;
+            Ok(MixedLinear::from_qtensor(q)?)
+        }
+    }
+}
+
 impl DsparkDrafter {
     pub fn load(dir: &Path, device: &Device, dtype: DType) -> Result<Self> {
+        Self::load_with_options(dir, device, dtype, None)
+    }
+
+    /// `quantize_heads` post-hoc quantizes the two 248k-vocab weight reads
+    /// (lm_head, markov_w2) at load — no artifact, no retraining. markov_w1
+    /// stays BF16 (index_select gather) and the confidence head stays dense.
+    /// The risk surface is tau, not correctness: drafts are target-verified.
+    pub fn load_with_options(
+        dir: &Path,
+        device: &Device,
+        dtype: DType,
+        quantize_heads: Option<candle::quantized::GgmlDType>,
+    ) -> Result<Self> {
         let config = DsparkConfig::from_dir(dir)?;
         if config.markov_head_type != "vanilla"
             || !config.enable_confidence_head
@@ -258,12 +289,17 @@ impl DsparkDrafter {
                 None,
             ),
             hidden_norm: RmsNorm::load(&vb, "hidden_norm.weight", h, eps)?,
-            lm_head: Linear::new(vb.get((config.vocab_size, h), "lm_head.weight")?, None),
+            lm_head: quantize_or_dense(
+                vb.get((config.vocab_size, h), "lm_head.weight")?,
+                quantize_heads,
+                device,
+            )?,
             markov_w1: vb.get((config.vocab_size, config.markov_rank), "markov_head.markov_w1.weight")?,
-            markov_w2: Linear::new(
+            markov_w2: quantize_or_dense(
                 vb.get((config.vocab_size, config.markov_rank), "markov_head.markov_w2.weight")?,
-                None,
-            ),
+                quantize_heads,
+                device,
+            )?,
             confidence: Linear::new(
                 vb.get((1, h + config.markov_rank), "confidence_head.proj.weight")?,
                 Some(vb.get(1, "confidence_head.proj.bias")?),
