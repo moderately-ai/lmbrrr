@@ -5532,12 +5532,15 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                     None => gamma,
                 },
             };
-            if args.schedule && !skip_draft {
-                if width == 0 {
-                    consecutive_zero_widths += 1;
-                } else {
-                    consecutive_zero_widths = 0;
-                }
+            // Hysteresis bookkeeping for zero widths happens here; the reset
+            // for nonzero widths is evidence-based and happens after verify:
+            // a width>0 round whose draft is fully rejected is a realized
+            // zero and must count toward skip mode, not reset it. (Measured
+            // on a weak-drafter class: schedule-time resets turned 12
+            // fully-rejected rounds into 2x drafter invocations, because
+            // every reset buys >=SKIP_DRAFT_AFTER more probes.)
+            if args.schedule && !skip_draft && width == 0 {
+                consecutive_zero_widths += 1;
             }
             proposed_width_histogram[width] += 1;
             let draft_tokens: &[u32] = proposal.as_ref().map_or(&[], |p| &p.tokens);
@@ -5596,6 +5599,13 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 };
                 let on_alt = alt_accepted > main_accepted;
                 let accepted = main_accepted.max(alt_accepted);
+                if args.schedule {
+                    if accepted == 0 {
+                        consecutive_zero_widths += 1;
+                    } else {
+                        consecutive_zero_widths = 0;
+                    }
+                }
                 let winner: &[u32] = if on_alt { b } else { a };
                 let bonus_row = if on_alt { w + alt_accepted } else { main_accepted };
                 let bonus = targets[bonus_row];
@@ -5682,9 +5692,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 device.synchronize()?;
             }
             verify_seconds += secs(verify_start.elapsed());
-            let targets: Vec<u32> = if args.recycle {
-                // Harvest candidates from every drafter-round verify too —
-                // the table warms from all round types.
+            let targets: Vec<u32> = if args.recycle && copy_gate_open {
+                // Harvest candidates from drafter-round verifies too, but
+                // only while the copy gate is open: the two-stage top-k costs
+                // a second device round-trip per round (measured -2.1%/-3.5%
+                // end-to-end with zero proposals fired), so rounds where the
+                // scheduler considers drafting profitable skip the harvest.
                 let summary = logits_argmax_and_topk(&logits, args.recycle_topk)?;
                 for (i, (_, candidates)) in summary.iter().enumerate() {
                     recycle_table.update(chunk[i], candidates);
@@ -5729,6 +5742,13 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 Some(_) => 0,
             };
             let bonus = targets[accepted];
+            if args.schedule && width > 0 {
+                if accepted == 0 {
+                    consecutive_zero_widths += 1;
+                } else {
+                    consecutive_zero_widths = 0;
+                }
+            }
             let mut round_records = Vec::with_capacity(width.min(accepted + 1));
             for j in 0..width {
                 position_proposed[j] += 1;

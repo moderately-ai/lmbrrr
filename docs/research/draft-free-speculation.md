@@ -32,6 +32,21 @@ Reference (arXiv 2408.08696) banks top-k candidates from every verify pass and d
 
 Mux order per round: PLD match (contextual verbatim copy) → recycled chain (statistical, margin-gated) → trained drafter (scheduler EV) → greedy. All sources share one verify body and one gate.
 
-## Bench matrix queued (quiet machine)
+## Full matrix + WHY investigation (2026-07-11, quiet machine)
 
-{ctl, pld, pld+recycle} × {summary, tides, math, code} × 3 reps rotated; margin sweep {4, 6, 9} on the best class; then re-run against the round-2 drafter (staged at `target/dspark-drafter-round2-warm`, identity STS until the argmax refit) to measure the gate interaction. Negative results get recorded and the flag stays default-off.
+First full matrix (SD 0.3–1.8) showed PLD +3.9% summary / +1.0% math / −2.7% code / **−12.8% tides**, and the recycle arm dragging 1–7 points everywhere — including classes where it never accepted a token. Three hypotheses were isolated and tested:
+
+**H-A confirmed — tides −12.8% was scheduler dynamics on a diverged trajectory, not mechanism cost.** Only 3 PLD rounds fired (~1% direct cost). A PLD verify chunk's batched-matmul numerics flipped a near-tie at ~token 26 onto a different (equally greedy-valid) text; on it the scheduler chose width>0 three times as often (18 vs 6 rounds, 12/18 fully rejected — the STS overconfidence signature), and every width>0 decision reset the skip-hysteresis, buying ≥3 more drafter probes. Drafter invocations doubled (27→51); the extra draft time (+105 ms) was the entire wall delta. Corollary: the three arms produced three different texts at 160/139.6/143.5 tok/s — **on weak-drafter classes, trajectory luck swings throughput ±13%, dwarfing any mechanism effect**. Arm deltas there conflate the two; round accounting, not tok/s, attributes mechanism cost.
+
+**H-B confirmed — the recycle drag was a per-round harvest tax.** With recycling armed but proposals impossible (margin 999999, zero rounds fired), throughput still fell −2.1% (code) / −3.5% (summary): the two-stage top-k's second device round-trip ran on every verify round.
+
+**H-C negative — no margin threshold rescues Markov-1 recycling at current verify costs.** Acceptance at margin 6/9/12 on math: 45%/57%/50% — non-monotone, trajectory-dominated, far below the 77% depth-1 break-even.
+
+### Fixes landed (both confirmed by an after-matrix)
+
+1. **Harvest gated on `copy_gate_open`** — rounds where the scheduler considers drafting profitable skip the harvest. Code both-arm recovered +7.0%; with the gate closed the table stays cold and recycling correctly goes quiescent.
+2. **Evidence-based hysteresis reset** — `consecutive_zero_widths` resets only on actual draft-token acceptance; a fully-rejected width>0 round counts as a realized zero. Tides pld recovered +9.3% (139.6→152.6), and the **default path improved too**: ctl +4.7% summary, +1.0% tides, +0.9% math, −0.6% code — weak-drafter classes stop paying the reset→3-probe cycle for overconfident width decisions.
+
+### Verdicts (all provisional on the verify-intercept fix)
+
+Every economic verdict here is priced against a verify chunk that costs 1.77× a decode step at l=2 where the roofline says ~1.05× (small-l quantized matmul doesn't batch-scale — see gemv-width-splitk-concurrency). At roofline cost the depth-1 break-even drops from ~77% to ~50% acceptance, which recycling's measured 43–57% *would* clear, and PLD/tree economics improve likewise. Standing results at current costs: gated PLD is +3.7% summary / ≈0 math, code / −5.6% tides (trajectory-dominated); recycling is a small net drag and stays default-off. **Re-run this matrix after the kernel fix and cost-model re-fit before treating any of these as final** (user directive: fix known performance issues before judging techniques).
