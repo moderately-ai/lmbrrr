@@ -12,7 +12,7 @@ tags: [kernels, quantization, campaign-1000, fork]
 ---
 ## Progress (2026-07-10 night, fork ec0f74e5)
 
-Batched quantized mv LANDED: single dispatch with ne11=m for the quantized-block kernels (they address src1 by r1*ne10; the old per-row loop re-read the whole weight m times). Fork quantized suite green vs CPU. Measured: q8 drafter heads flip POSITIVE - gamma4+q8+scheduler = 115.9 tok/s math (0.78x), draft 4.9ms. Remaining scope: BF16-activation variants (the F32 cast tax stands), and the m>=8 route hits the mm path (F32 assert + slow at these shapes: gamma8+q8 draft still 15.7ms) - lift both together.
+CORRECTED ATTRIBUTION (post-hoc routing read): fwd_mv is only reached at m==1 (metal.rs:397 routes src dim Minus2==1), so the ne11=m single-dispatch change is currently DEAD CODE via QMatMul - and the mv grid (height=m) re-reads the weight per row regardless, so it saves dispatch overhead only, never bandwidth. The 115.9 tok/s gain re-attributes to the scheduler x gamma4 x q8 operating point (lm_head m<=4 through the mm path; markov steps m=1 mv). REAL remaining scope, one package: (1) BF16-src1 variants for mv AND mm; (2) a genuinely weight-shared small-m quantized matmul (same problem class as the dense skinny-gemm: the tile mm at m=2-8 and the mv grid both waste bandwidth); (3) lift the m routing once (2) exists. gamma8+q8 draft 15.7ms is the mm path measured at m=8.
 
 ## Board revision (2026-07-10 evening, agent-verified)
 

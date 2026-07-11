@@ -12,7 +12,7 @@ tags: [speculative, performance, campaign-1000]
 ---
 ## Outcome update (2026-07-10 night)
 
-With the fork mv batching (ec0f74e5), q8 heads are clearly positive: gamma4+q8+--schedule = 115.9 tok/s math (0.78x greedy), draft 4.9 ms/round, tau unchanged. Acceptance target (propose <= ~5ms) MET at the operating point. Remaining stretch: Markov row-norm pruning; gamma8 blocked on the quantized mm path (see bf16-activation ticket).
+gamma4+q8+--schedule = 115.9 tok/s math (0.78x greedy), draft 4.9 ms/round, tau unchanged - acceptance target (propose <= ~5ms) MET at the operating point. ATTRIBUTION CORRECTED: the win comes from the scheduler x gamma4 x q8 combination (lm_head m<=4 via the mm path, markov m=1 via mv); the fork mv ne11 change is dead code at current routing (m==1 only) and would not share weight reads anyway. Remaining stretch: Markov row-norm pruning; gamma8 blocked on quantized mm-path bandwidth (bf16-activation ticket owns the package).
 
 ## Progress (2026-07-10 late, commit ca4715c)
 
