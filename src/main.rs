@@ -4730,7 +4730,9 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         while committed.len() < args.max_new_tokens {
             let draft_start = Instant::now();
             let proposal = drafter.propose(anchor, start, gamma)?;
-            device.synchronize()?;
+            if loop_timing() {
+                device.synchronize()?;
+            }
             draft_seconds += secs(draft_start.elapsed());
 
             // DeepSpec inference contract: the proposal is the leading run of
@@ -4762,7 +4764,9 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 &args.model.downsample_mode,
                 start,
             )?;
-            device.synchronize()?;
+            if loop_timing() {
+                device.synchronize()?;
+            }
             verify_seconds += secs(verify_start.elapsed());
             let (targets, _) = argmax_tokens(&logits, &device)?;
             let chunk_captures = model.take_device_captures();
@@ -4842,7 +4846,11 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                     let _ = model.take_device_captures();
                 } else {
                     model.rollback_to_prefix(&snapshot, accepted + 1)?;
-                    device.synchronize()?;
+                    // No sync: the reconstruction orders behind the next
+                    // round's work on the queue; only timing mode waits.
+                    if loop_timing() {
+                        device.synchronize()?;
+                    }
                 }
                 readvance_seconds += secs(readvance_start.elapsed());
                 start += accepted + 1;
@@ -5536,6 +5544,15 @@ impl StsCalibration {
     fn probability(&self, logit: f32) -> f32 {
         1.0 / (1.0 + (-(self.scale * logit + self.shift)).exp())
     }
+}
+
+/// `LMBRRR_LOOP_TIMING=1` re-enables the per-phase synchronize() calls in the
+/// speculative round so draft/verify/rollback buckets measure GPU time. Off
+/// (default) the round pays exactly two readback waits and the buckets
+/// attribute encode+queue time only.
+fn loop_timing() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("LMBRRR_LOOP_TIMING").is_ok_and(|v| v == "1"))
 }
 
 /// `LMBRRR_READVANCE_ROLLBACK=1` restores the legacy restore + re-advance

@@ -545,9 +545,18 @@ impl FullAttention {
         // Decode (l == 1, no mask) routes to the fused SDPA vector kernel:
         // native GQA (no repeat_kv materialization of the whole cache) and
         // strided k/v (the cache narrows feed in directly, no k_t
-        // transpose+contiguous copy). Chunked/prefill keeps the explicit
-        // masked path. LMBRRR_UNFUSED_SDPA=1 restores the reference path.
-        let use_sdpa_vector = l == 1 && mask.is_none() && !unfused_sdpa();
+        // transpose+contiguous copy). Chunks/prefill (l > 1 with the model's
+        // causal mask) route to SDPA-full with do_causal: the kernel's
+        // bottom-right-aligned causal masking equals the offset-causal mask,
+        // so no mask materializes and the whole-cache repeat_kv copies leave
+        // verify chunks AND prefill. LMBRRR_UNFUSED_SDPA=1 restores both
+        // reference paths.
+        // The masked route covers verify chunks only (l <= 16): the kernel
+        // needs a materialized (b, qheads, l, kv) mask, tiny for chunks but
+        // heavy for long prefill, and stride-0 broadcast masks measure wrong.
+        let use_sdpa =
+            (l == 1 && mask.is_none() || (2..=16).contains(&l) && mask.is_some())
+                && !unfused_sdpa();
         let (q, k, v, k_t) = profiled(
             profiler,
             &device,
@@ -564,7 +573,7 @@ impl FullAttention {
                     .expect("full-attention KV cache lock poisoned")
                     .append(&k.contiguous()?, &v.contiguous()?)?;
                 let q = q.contiguous()?;
-                if use_sdpa_vector {
+                if use_sdpa {
                     return Ok((q, k, v, None));
                 }
                 let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
@@ -585,7 +594,26 @@ impl FullAttention {
             || {
                 let scale = 1.0 / (self.head_dim as f64).sqrt();
                 let Some(k_t) = k_t else {
-                    let out = candle_nn::ops::sdpa(&q, &k, &v, None, false, scale as f32, 1.0)?;
+                    // Chunks pass the model's offset-causal mask explicitly,
+                    // broadcast to the kernel's (b, qheads, l, kv) contract
+                    // (the kernel's do_causal alignment does NOT match the
+                    // offset-causal semantics — measured, gates rejected it).
+                    let sdpa_mask = match mask {
+                        Some(m) if l > 1 => Some(
+                            m.broadcast_as((b, self.num_heads, l, k.dim(2)?))?
+                                .contiguous()?,
+                        ),
+                        _ => None,
+                    };
+                    let out = candle_nn::ops::sdpa(
+                        &q,
+                        &k,
+                        &v,
+                        sdpa_mask.as_ref(),
+                        false,
+                        scale as f32,
+                        1.0,
+                    )?;
                     return out.transpose(1, 2)?.reshape((b, l, self.hidden_size));
                 };
                 let mut attn = (q.matmul(&k_t)? * scale)?;
