@@ -412,6 +412,12 @@ struct QuantConvertArgs {
 
     #[arg(long)]
     manifest_only: bool,
+
+    /// Fallback-ladder overrides for from-source policies, repeatable:
+    /// "<name-suffix>=<rung>" with rung one of q4k/q6k/q8-0. Chosen by the
+    /// quality harness where q4k collapses.
+    #[arg(long = "fallback")]
+    fallback: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -472,6 +478,14 @@ struct QuantQualityArgs {
         default_value = "target/minicpm-v46-q4k-mlp-q8-text-full/manifest.json"
     )]
     mixed_manifest: PathBuf,
+
+    /// Optional q4k-full-text manifest (from-source policy); included in the
+    /// ladder when the file exists.
+    #[arg(
+        long,
+        default_value = "target/minicpm-v46-q4k-full-text/manifest.json"
+    )]
+    full_text_manifest: PathBuf,
 
     #[arg(long, default_value_t = 0.25)]
     min_prefix_ratio: f64,
@@ -703,6 +717,7 @@ enum MixedPrecisionPolicyArg {
     Q4kMlpOnly,
     Q4kTextSafe,
     Q4kMlpQ8Text,
+    Q4kFullText,
 }
 
 impl MixedPrecisionPolicyArg {
@@ -712,6 +727,7 @@ impl MixedPrecisionPolicyArg {
             Self::Q4kMlpOnly => MixedPrecisionPolicy::Q4KMlpOnly,
             Self::Q4kTextSafe => MixedPrecisionPolicy::Q4KTextSafe,
             Self::Q4kMlpQ8Text => MixedPrecisionPolicy::Q4KMlpQ8Text,
+            Self::Q4kFullText => MixedPrecisionPolicy::Q4KFullText,
         }
     }
 }
@@ -2585,6 +2601,15 @@ fn quant_convert(args: QuantConvertArgs) -> Result<()> {
         output_dir: args.output_dir.clone(),
         max_tensors: args.max_tensors,
         manifest_only: args.manifest_only,
+        fallback_overrides: args
+            .fallback
+            .iter()
+            .map(|spec| {
+                spec.split_once('=')
+                    .map(|(suffix, rung)| (suffix.to_string(), rung.to_string()))
+                    .ok_or_else(|| anyhow::anyhow!("--fallback wants <suffix>=<rung>, got {spec}"))
+            })
+            .collect::<Result<Vec<_>>>()?,
     })?;
     let manifest_path = args.output_dir.join("manifest.json");
     let summary = serde_json::json!({
@@ -2737,13 +2762,16 @@ fn quant_quality(args: QuantQualityArgs) -> Result<()> {
     let dtype = args.model.dtype.resolve(&device);
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
-    let policy_specs = [
+    let mut policy_specs = vec![
         ("dense", None::<&PathBuf>),
         ("q8-text-linears", Some(&args.q8_manifest)),
         ("q4k-mlp-only", Some(&args.q4_mlp_manifest)),
         ("q4k-text-safe", Some(&args.q4_text_safe_manifest)),
         ("q4k-mlp-q8-text", Some(&args.mixed_manifest)),
     ];
+    if args.full_text_manifest.exists() {
+        policy_specs.push(("q4k-full-text", Some(&args.full_text_manifest)));
+    }
 
     let mut policy_runs = Vec::new();
     for (label, manifest) in policy_specs {

@@ -127,19 +127,28 @@ impl QuantizedTextArtifact {
             .tensors
             .into_iter()
             .filter_map(|tensor| {
-                let data = tensor.data?;
-                (tensor.format != "source").then_some((
+                if tensor.format == "source" {
+                    return None;
+                }
+                // From-source formats carry no data blob; lmbq formats must.
+                let from_source = tensor.format.ends_with("_from_source");
+                if !from_source && tensor.data.is_none() {
+                    return None;
+                }
+                Some((
                     tensor.name,
                     QuantizedTensor {
                         format: tensor.format,
                         shape: tensor.shape,
                         num_elements: tensor.num_elements,
-                        data,
+                        expected_weight_bytes: tensor.expected_weight_bytes,
+                        source_file: tensor.source_file,
+                        data: tensor.data,
                     },
                 ))
             })
             .collect::<HashMap<_, _>>();
-        if !tensors.is_empty() && data_path.is_none() {
+        if tensors.values().any(|t| t.data.is_some()) && data_path.is_none() {
             anyhow::bail!("quantized manifest has tensor data entries but no output.data_file");
         }
         Ok(Self {
@@ -166,7 +175,12 @@ impl QuantizedTextArtifact {
     pub fn quantized_data_bytes(&self) -> u64 {
         self.tensors
             .values()
-            .map(|tensor| tensor.data.length)
+            .map(|tensor| match &tensor.data {
+                Some(data) => data.length,
+                // From-source tensors: on-device GGML footprint from the
+                // manifest's accounting.
+                None => tensor.expected_weight_bytes.unwrap_or(0) as u64,
+            })
             .sum::<u64>()
     }
 
@@ -192,15 +206,24 @@ impl QuantizedTextArtifact {
     }
 
     fn load_values(&self, name: &str, tensor: &QuantizedTensor) -> Result<Vec<f32>> {
+        // From-source formats read the original safetensors tensor directly,
+        // so the only quantization applied is the final GGML one.
+        if tensor.format.ends_with("_from_source") {
+            return self.load_source_values(name, tensor);
+        }
+        let data = tensor
+            .data
+            .as_ref()
+            .with_context(|| format!("quantized tensor {name} has no data blob"))?;
         let data_path = self
             .data_path
             .as_ref()
             .context("quantized artifact has no data file")?;
         let mut file = File::open(data_path)
             .with_context(|| format!("open quantized data {}", data_path.display()))?;
-        file.seek(SeekFrom::Start(tensor.data.offset))
+        file.seek(SeekFrom::Start(data.offset))
             .with_context(|| format!("seek quantized tensor {name}"))?;
-        let mut bytes = vec![0u8; tensor.data.length as usize];
+        let mut bytes = vec![0u8; data.length as usize];
         file.read_exact(&mut bytes)
             .with_context(|| format!("read quantized tensor {name}"))?;
         match tensor.format.as_str() {
@@ -209,6 +232,47 @@ impl QuantizedTextArtifact {
             other => anyhow::bail!("unsupported quantized tensor format {other} for {name}"),
         }
     }
+
+    fn load_source_values(&self, name: &str, tensor: &QuantizedTensor) -> Result<Vec<f32>> {
+        let recorded = tensor
+            .source_file
+            .as_ref()
+            .with_context(|| format!("from-source tensor {name} has no source_file"))?;
+        let recorded_path = PathBuf::from(recorded);
+        let path = if recorded_path.exists() {
+            recorded_path
+        } else {
+            // Fall back to the file name next to the manifest (artifact
+            // moved between machines).
+            let manifest_dir = self
+                .manifest_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let file_name = recorded_path
+                .file_name()
+                .with_context(|| format!("source_file for {name} has no file name"))?;
+            let fallback = manifest_dir.join(file_name);
+            if !fallback.exists() {
+                anyhow::bail!(
+                    "source weights for {name} not found at {} or {}",
+                    recorded_path.display(),
+                    fallback.display()
+                );
+            }
+            fallback
+        };
+        let file =
+            File::open(&path).with_context(|| format!("open source weights {}", path.display()))?;
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file) }
+            .with_context(|| format!("mmap {}", path.display()))?;
+        let safetensors = safetensors::SafeTensors::deserialize(&mmap)
+            .with_context(|| format!("read safetensors {}", path.display()))?;
+        let view = safetensors
+            .tensor(name)
+            .with_context(|| format!("source tensor {name} missing from {}", path.display()))?;
+        crate::quant_convert::load_tensor_values(&view)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -216,14 +280,17 @@ struct QuantizedTensor {
     format: String,
     shape: Vec<usize>,
     num_elements: usize,
-    data: QuantizedData,
+    expected_weight_bytes: Option<usize>,
+    source_file: Option<String>,
+    data: Option<QuantizedData>,
 }
 
 impl QuantizedTensor {
     fn ggml_dtype(&self) -> Result<GgmlDType> {
         match self.format.as_str() {
-            "q8_symmetric" => Ok(GgmlDType::Q8_0),
-            "q4k_block64_symmetric" => Ok(GgmlDType::Q4K),
+            "q8_symmetric" | "q8_0_from_source" => Ok(GgmlDType::Q8_0),
+            "q4k_block64_symmetric" | "q4k_from_source" => Ok(GgmlDType::Q4K),
+            "q6k_from_source" => Ok(GgmlDType::Q6K),
             other => anyhow::bail!("unsupported quantized tensor format {other}"),
         }
     }
@@ -247,6 +314,10 @@ struct QuantizedTensorManifest {
     format: String,
     shape: Vec<usize>,
     num_elements: usize,
+    #[serde(default)]
+    expected_weight_bytes: Option<usize>,
+    #[serde(default)]
+    source_file: Option<String>,
     data: Option<QuantizedData>,
 }
 

@@ -20,6 +20,14 @@ pub enum MixedPrecisionPolicy {
     Q4KMlpOnly,
     Q4KTextSafe,
     Q4KMlpQ8Text,
+    /// Campaign policy: every text linear (mlp + attention + DeltaNet
+    /// projections, minus the tiny decay gates) as a GGML-native
+    /// from-source reference — the loader quantizes straight from the
+    /// original safetensors, no lmbq data blob and no double quantization.
+    /// Pair with --quantize-lm-head q4k for the head (tied embedding, not a
+    /// checkpoint tensor). Protections are advisory under this policy: the
+    /// sensitivity-set gate is skipped.
+    Q4KFullText,
 }
 
 impl MixedPrecisionPolicy {
@@ -29,6 +37,7 @@ impl MixedPrecisionPolicy {
             Self::Q4KMlpOnly => "q4k-mlp-only",
             Self::Q4KTextSafe => "q4k-text-safe",
             Self::Q4KMlpQ8Text => "q4k-mlp-q8-text",
+            Self::Q4KFullText => "q4k-full-text",
         }
     }
 }
@@ -43,6 +52,11 @@ pub struct ConversionOptions {
     pub output_dir: PathBuf,
     pub max_tensors: Option<usize>,
     pub manifest_only: bool,
+    /// Per-tensor fallback ladder for from-source policies: tensors whose
+    /// name ends with the suffix use the given rung ("q6k"/"q8-0"/"q4k")
+    /// instead of the policy default. Chosen by the quality harness, not by
+    /// logit thresholds.
+    pub fallback_overrides: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -118,6 +132,12 @@ enum TensorFormat {
     PreserveSource,
     Q8Symmetric,
     Q4KBlock64,
+    // GGML-native from-source references: no data blob is written; the
+    // loader quantizes directly from the original safetensors tensor
+    // (single quantization). Q6K/Q8_0 are the per-tensor fallback rungs.
+    Q4KFromSource,
+    Q6KFromSource,
+    Q80FromSource,
 }
 
 impl TensorFormat {
@@ -126,6 +146,25 @@ impl TensorFormat {
             Self::PreserveSource => "source",
             Self::Q8Symmetric => "q8_symmetric",
             Self::Q4KBlock64 => "q4k_block64_symmetric",
+            Self::Q4KFromSource => "q4k_from_source",
+            Self::Q6KFromSource => "q6k_from_source",
+            Self::Q80FromSource => "q8_0_from_source",
+        }
+    }
+
+    fn is_from_source(self) -> bool {
+        matches!(
+            self,
+            Self::Q4KFromSource | Self::Q6KFromSource | Self::Q80FromSource
+        )
+    }
+
+    fn from_fallback_name(name: &str) -> Option<Self> {
+        match name {
+            "q4k" => Some(Self::Q4KFromSource),
+            "q6k" => Some(Self::Q6KFromSource),
+            "q8-0" | "q8_0" => Some(Self::Q80FromSource),
+            _ => None,
         }
     }
 }
@@ -141,6 +180,15 @@ pub fn convert_mixed_precision(options: ConversionOptions) -> Result<serde_json:
     validate_sensitivity(&sensitivity)?;
     let sensitivity_sha256 = sha256_file(&options.sensitivity_artifact)?;
     let sensitivity_modules = sensitivity_module_set(&sensitivity);
+    let fallback_overrides = options
+        .fallback_overrides
+        .iter()
+        .map(|(suffix, rung)| {
+            TensorFormat::from_fallback_name(rung)
+                .map(|format| (suffix.clone(), format))
+                .with_context(|| format!("unknown fallback rung {rung} (want q4k/q6k/q8-0)"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let source_files = options
         .source_weights
         .iter()
@@ -209,6 +257,7 @@ pub fn convert_mixed_precision(options: ConversionOptions) -> Result<serde_json:
                 &shape,
                 protected,
                 &sensitivity_modules,
+                &fallback_overrides,
             );
             let format = if options
                 .max_tensors
@@ -222,6 +271,14 @@ pub fn convert_mixed_precision(options: ConversionOptions) -> Result<serde_json:
             let expected_weight_bytes = expected_weight_bytes(num_elements, source_bytes, format);
             let data = match format {
                 TensorFormat::PreserveSource => None,
+                // From-source formats carry no blob: the loader quantizes
+                // straight from the referenced safetensors tensor.
+                TensorFormat::Q4KFromSource
+                | TensorFormat::Q6KFromSource
+                | TensorFormat::Q80FromSource => {
+                    quantized_count += 1;
+                    None
+                }
                 TensorFormat::Q8Symmetric | TensorFormat::Q4KBlock64 => {
                     if options.manifest_only {
                         data_offset += expected_weight_bytes as u64;
@@ -247,7 +304,7 @@ pub fn convert_mixed_precision(options: ConversionOptions) -> Result<serde_json:
                             quantized_dtype: match format {
                                 TensorFormat::Q8Symmetric => "i8".to_string(),
                                 TensorFormat::Q4KBlock64 => "packed_i4_plus_8".to_string(),
-                                TensorFormat::PreserveSource => unreachable!(),
+                                _ => unreachable!("only lmbq formats write data"),
                             },
                         };
                         data_offset += length;
@@ -367,15 +424,36 @@ fn planned_tensor_format(
     shape: &[usize],
     protected: bool,
     sensitivity_modules: &BTreeSet<String>,
+    fallback_overrides: &[(String, TensorFormat)],
 ) -> TensorFormat {
     if protected || shape.len() < 2 || !name.ends_with(".weight") {
         return TensorFormat::PreserveSource;
+    }
+    // Campaign policy: protections advisory, no sensitivity-set gate — every
+    // text linear except the tiny decay gates (in_proj_a/b: 32 KB, high
+    // sensitivity, zero bandwidth value).
+    if policy == MixedPrecisionPolicy::Q4KFullText {
+        if !matches!(
+            family,
+            "text.mlp" | "text.full_attention" | "text.deltanet"
+        ) || name.ends_with(".in_proj_a.weight")
+            || name.ends_with(".in_proj_b.weight")
+        {
+            return TensorFormat::PreserveSource;
+        }
+        for (suffix, format) in fallback_overrides {
+            if name.ends_with(suffix.as_str()) {
+                return *format;
+            }
+        }
+        return TensorFormat::Q4KFromSource;
     }
     if !sensitivity_modules.contains(name) {
         return TensorFormat::PreserveSource;
     }
 
     match policy {
+        MixedPrecisionPolicy::Q4KFullText => unreachable!("handled above"),
         MixedPrecisionPolicy::Q8TextLinears => {
             if matches!(family, "text.mlp" | "text.full_attention" | "text.deltanet") {
                 TensorFormat::Q8Symmetric
@@ -423,6 +501,8 @@ fn encode_values(values: &[f32], format: TensorFormat) -> Vec<u8> {
         TensorFormat::PreserveSource => Vec::new(),
         TensorFormat::Q8Symmetric => encode_q8(values),
         TensorFormat::Q4KBlock64 => encode_q4_block64(values),
+        f if f.is_from_source() => Vec::new(),
+        _ => Vec::new(),
     }
 }
 
@@ -473,7 +553,7 @@ fn quantize_symmetric(value: f32, scale: f32, qmax: f32) -> i32 {
     }
 }
 
-fn load_tensor_values(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>> {
+pub(crate) fn load_tensor_values(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>> {
     let tensor = view.load(&Device::Cpu)?;
     Ok(tensor
         .to_dtype(DType::F32)?
@@ -489,6 +569,11 @@ fn expected_weight_bytes(num_elements: usize, source_bytes: usize, format: Tenso
             let blocks = num_elements.div_ceil(64);
             blocks * 4 + num_elements.div_ceil(2)
         }
+        // GGML on-device block sizes (bytes per 256/32-element block), for
+        // roofline accounting: q4_K 144/256, q6_K 210/256, q8_0 34/32.
+        TensorFormat::Q4KFromSource => num_elements.div_ceil(256) * 144,
+        TensorFormat::Q6KFromSource => num_elements.div_ceil(256) * 210,
+        TensorFormat::Q80FromSource => num_elements.div_ceil(32) * 34,
     }
 }
 
@@ -560,6 +645,7 @@ mod tests {
                 &[64, 64],
                 false,
                 &sensitivity,
+                &[],
             ),
             TensorFormat::PreserveSource
         );
@@ -571,6 +657,7 @@ mod tests {
                 &[64, 64],
                 false,
                 &sensitivity,
+                &[],
             ),
             TensorFormat::Q4KBlock64
         );
@@ -592,6 +679,7 @@ mod tests {
                 &[64, 64],
                 false,
                 &sensitivity,
+                &[],
             ),
             TensorFormat::Q4KBlock64
         );
@@ -603,6 +691,7 @@ mod tests {
                 &[64, 64],
                 false,
                 &sensitivity,
+                &[],
             ),
             TensorFormat::Q8Symmetric
         );
@@ -614,8 +703,55 @@ mod tests {
                 &[64, 64],
                 false,
                 &sensitivity,
+                &[],
             ),
             TensorFormat::Q8Symmetric
+        );
+    }
+
+    #[test]
+    fn full_text_policy_skips_gate_and_honours_fallback() {
+        let sensitivity = BTreeSet::new(); // gate must NOT matter
+        let overrides = vec![(
+            ".self_attn.q_proj.weight".to_string(),
+            TensorFormat::Q80FromSource,
+        )];
+        assert_eq!(
+            planned_tensor_format(
+                MixedPrecisionPolicy::Q4KFullText,
+                "model.language_model.layers.0.mlp.gate_proj.weight",
+                "text.mlp",
+                &[64, 64],
+                false,
+                &sensitivity,
+                &overrides,
+            ),
+            TensorFormat::Q4KFromSource
+        );
+        assert_eq!(
+            planned_tensor_format(
+                MixedPrecisionPolicy::Q4KFullText,
+                "model.language_model.layers.11.self_attn.q_proj.weight",
+                "text.full_attention",
+                &[64, 64],
+                false,
+                &sensitivity,
+                &overrides,
+            ),
+            TensorFormat::Q80FromSource
+        );
+        // Decay gates stay dense even under the full policy.
+        assert_eq!(
+            planned_tensor_format(
+                MixedPrecisionPolicy::Q4KFullText,
+                "model.language_model.layers.0.linear_attn.in_proj_a.weight",
+                "text.deltanet",
+                &[64, 64],
+                false,
+                &sensitivity,
+                &overrides,
+            ),
+            TensorFormat::PreserveSource
         );
     }
 }
