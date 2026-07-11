@@ -319,7 +319,7 @@ def inspect_data(path: str = "data/regen-smoke.jsonl", samples: int = 3) -> str:
     return report
 
 
-@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=6 * 3600)
+@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=6 * 3600, ephemeral_disk=1024 * 1024)
 def prepare_cache(
     train_data: str = "data/regen-smoke.jsonl",
     cache_name: str = "target-cache-smoke",
