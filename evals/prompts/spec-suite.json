@@ -1,0 +1,68 @@
+{
+ "source": "Spec-Bench (github.com/hemingkx/Spec-Bench, Apache-2.0), data/spec_bench/question.jsonl vendored beside this file. The standard speculative-decoding benchmark used by FR-Spec/SpecVocab/EvoSpec.",
+ "usage": "Single-turn local benches use turns[0] of each question. Calibration ids feed STS fits; validation ids are held out and are the only quotable generalization results. Never move an id between splits.",
+ "calibration": {
+  "math_reasoning": [
+   401,
+   402,
+   403
+  ],
+  "summarization": [
+   241,
+   242,
+   243
+  ],
+  "qa": [
+   321,
+   322,
+   323
+  ],
+  "translation": [
+   161,
+   162,
+   163
+  ],
+  "coding": [
+   121,
+   122,
+   123
+  ],
+  "writing": [
+   81,
+   82,
+   83
+  ]
+ },
+ "validation": {
+  "math_reasoning": [
+   404,
+   405,
+   406
+  ],
+  "summarization": [
+   244,
+   245,
+   246
+  ],
+  "qa": [
+   324,
+   325,
+   326
+  ],
+  "translation": [
+   164,
+   165,
+   166
+  ],
+  "coding": [
+   124,
+   125,
+   126
+  ],
+  "writing": [
+   84,
+   85,
+   86
+  ]
+ }
+}
