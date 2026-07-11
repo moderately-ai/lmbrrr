@@ -600,6 +600,7 @@ def train_probe(
 # (fakequant checkpoint) and what a concurrent chat workload sustains.
 sglang_image = (
     modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.12")
+    .apt_install("libnuma1", "numactl")
     .uv_pip_install("sglang[all]==0.5.7", "openai==2.6.1")
     .env(
         {
