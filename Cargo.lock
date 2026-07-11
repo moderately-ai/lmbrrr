@@ -242,7 +242,7 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a#40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2f95b6f2eb6c5af93807c90c93128760118a3d72#2f95b6f2eb6c5af93807c90c93128760118a3d72"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -275,7 +275,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a#40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2f95b6f2eb6c5af93807c90c93128760118a3d72#2f95b6f2eb6c5af93807c90c93128760118a3d72"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -286,7 +286,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a#40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2f95b6f2eb6c5af93807c90c93128760118a3d72#2f95b6f2eb6c5af93807c90c93128760118a3d72"
 dependencies = [
  "cudaforge",
 ]
@@ -294,7 +294,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a#40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2f95b6f2eb6c5af93807c90c93128760118a3d72#2f95b6f2eb6c5af93807c90c93128760118a3d72"
 dependencies = [
  "block2",
  "half",
@@ -309,7 +309,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a#40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2f95b6f2eb6c5af93807c90c93128760118a3d72#2f95b6f2eb6c5af93807c90c93128760118a3d72"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -328,7 +328,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a#40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2f95b6f2eb6c5af93807c90c93128760118a3d72#2f95b6f2eb6c5af93807c90c93128760118a3d72"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -349,7 +349,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a#40eba9ce5e828e82bf8f22c0c3f1f3d10391ab3a"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2f95b6f2eb6c5af93807c90c93128760118a3d72#2f95b6f2eb6c5af93807c90c93128760118a3d72"
 dependencies = [
  "ug",
  "ug-cuda",
