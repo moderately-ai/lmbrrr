@@ -78,6 +78,28 @@ enum Command {
     VerifyTable(VerifyTableArgs),
     DsparkRun(DsparkRunArgs),
     DsparkDrafterParity(DsparkDrafterParityArgs),
+    MultiBench(MultiBenchArgs),
+}
+
+/// Static-batched multi-stream greedy decode: N copies of the prompt run as
+/// one batch through the whole text path; reports aggregate and per-stream
+/// rates plus a single-stream-equivalence check on stream 0.
+#[derive(Parser, Debug)]
+struct MultiBenchArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long)]
+    prompt: String,
+
+    #[arg(long, default_value_t = 8)]
+    streams: usize,
+
+    #[arg(long, default_value_t = 128)]
+    max_new_tokens: usize,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug)]
@@ -1270,6 +1292,7 @@ fn main() -> Result<()> {
         Command::VerifyTable(args) => verify_table(args),
         Command::DsparkRun(args) => dspark_run(args),
         Command::DsparkDrafterParity(args) => dspark_drafter_parity(args),
+        Command::MultiBench(args) => multi_bench(args),
     }
 }
 
@@ -5292,6 +5315,131 @@ fn load_model(
         unsafe { VarBuilder::from_mmaped_safetensors(&bundle.artifacts.weights, dtype, device)? };
     let model = MiniCpmForConditionalGeneration::new(&bundle.config, vb)?;
     Ok((model, load_start.elapsed(), None))
+}
+
+
+/// Static-batched N-stream greedy decode. Same prompt per stream (static
+/// batching), batch dimension through the whole text path. The fused
+/// DeltaNet decode kernel currently gates to b == 1, so batched steps take
+/// the tensor path — dispatch counts amortize across streams, which is the
+/// aggregate lane's core economics; kernel batching is the follow-up.
+fn multi_bench(args: MultiBenchArgs) -> Result<()> {
+    if args.streams == 0 {
+        anyhow::bail!("--streams must be greater than zero");
+    }
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, false);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
+    )?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+    let n = args.streams;
+    let len = prompt_tokens.len();
+
+    // Single-stream reference for the equivalence check (advisory: batched
+    // numerics can tie-flip).
+    model.clear_cache();
+    let reference = generate_tokens(
+        &mut model,
+        &device,
+        &greedy_generation_args(args.max_new_tokens, false),
+        &prompt_tokens,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        &eos_ids,
+        |_, _, _, _| Ok(()),
+    )?;
+
+    model.clear_cache();
+    let mut batched: Vec<u32> = Vec::with_capacity(n * len);
+    for _ in 0..n {
+        batched.extend_from_slice(&prompt_tokens);
+    }
+    let input = Tensor::from_slice(&batched, (n, len), &device)?;
+    let prefill_start = Instant::now();
+    let mut logits = model.forward(&input, None::<&ProcessedImages>, &args.model.downsample_mode, 0)?;
+    device.synchronize()?;
+    let prefill_elapsed = prefill_start.elapsed();
+
+    let mut streams: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut finished = vec![false; n];
+    let mut position = len;
+    let decode_start = Instant::now();
+    let mut steps = 0usize;
+    for _ in 0..args.max_new_tokens {
+        // logits [n, vocab]
+        let next = logits
+            .to_dtype(DType::F32)?
+            .argmax(D::Minus1)?
+            .to_device(&Device::Cpu)?
+            .to_vec1::<u32>()?;
+        let mut all_done = true;
+        for (i, tok) in next.iter().enumerate() {
+            if !finished[i] {
+                if eos_ids.contains(tok) {
+                    finished[i] = true;
+                } else {
+                    streams[i].push(*tok);
+                    all_done = false;
+                }
+            }
+        }
+        steps += 1;
+        if all_done {
+            break;
+        }
+        // Finished streams keep decoding their last token (static batch);
+        // their outputs are ignored above.
+        let feed: Vec<u32> = next
+            .iter()
+            .enumerate()
+            .map(|(i, t)| if finished[i] { eos_ids[0] } else { *t })
+            .collect();
+        let step_input = Tensor::from_slice(&feed, (n, 1), &device)?;
+        logits = model.forward(&step_input, None::<&ProcessedImages>, &args.model.downsample_mode, position)?;
+        position += 1;
+    }
+    let decode_elapsed = decode_start.elapsed();
+    let total_tokens: usize = streams.iter().map(|s| s.len()).sum();
+    let aggregate_tps = total_tokens as f64 / decode_elapsed.as_secs_f64();
+
+    let equiv = reference
+        .generated_token_ids
+        .iter()
+        .zip(streams[0].iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let report = serde_json::json!({
+        "kind": "lmbrrr_multi_bench",
+        "schema_version": 1,
+        "model_id": args.model.model_id.as_str(),
+        "device": format!("{device:?}"),
+        "dtype": format!("{dtype:?}"),
+        "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
+        "prompt_tokens": len,
+        "streams": n,
+        "max_new_tokens": args.max_new_tokens,
+        "decode_steps": steps,
+        "total_generated_tokens": total_tokens,
+        "prefill_seconds": secs(prefill_elapsed),
+        "decode_seconds": secs(decode_elapsed),
+        "aggregate_tokens_per_second": aggregate_tps,
+        "per_stream_tokens_per_second": aggregate_tps / n as f64,
+        "single_stream_equivalence_prefix": equiv,
+        "single_stream_reference_tokens": reference.generated_token_ids.len(),
+        "stream0_text": decode_tokens(&tokenizer, &streams[0])?,
+    });
+    write_json_report(args.output.as_ref(), &report)
 }
 
 fn load_model_with_optional_quantization(

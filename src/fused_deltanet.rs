@@ -192,6 +192,7 @@ pub fn gated_delta_chunk(
 #[allow(clippy::too_many_arguments)]
 pub fn gated_delta_decode(
     proj: &Tensor,
+    batch: usize,
     conv_state: &Tensor,
     recurrent_state: &Tensor,
     conv_weight: &Tensor,
@@ -260,17 +261,17 @@ pub fn gated_delta_decode(
 
     let out_buf = device
         .new_buffer_builder()
-        .with_size_for(dims.value_dim, DType::BF16)
+        .with_size_for(batch * dims.value_dim, DType::BF16)
         .with_label("gated_delta_out")
         .build()?;
     let conv_out_buf = device
         .new_buffer_builder()
-        .with_size_for(dims.conv_dim * dims.ksz, DType::BF16)
+        .with_size_for(batch * dims.conv_dim * dims.ksz, DType::BF16)
         .with_label("gated_delta_conv_state")
         .build()?;
     let state_out_buf = device
         .new_buffer_builder()
-        .with_size_for(dims.heads * dims.dk * dims.dv, DType::F32)
+        .with_size_for(batch * dims.heads * dims.dk * dims.dv, DType::F32)
         .with_label("gated_delta_state")
         .build()?;
 
@@ -290,6 +291,7 @@ pub fn gated_delta_decode(
             l2_eps,
             norm_eps,
         },
+        batch,
         &proj_buf,
         &conv_in_buf,
         &state_in_buf,
@@ -310,18 +312,23 @@ pub fn gated_delta_decode(
         let storage = candle::MetalStorage::new(buf, device.clone(), count, dtype);
         Tensor::from_storage(Storage::Metal(storage), shape, BackpropOp::none(), false)
     };
-    let out = mk(out_buf, dims.value_dim, DType::BF16, vec![1, 1, dims.value_dim]);
+    let out = mk(
+        out_buf,
+        batch * dims.value_dim,
+        DType::BF16,
+        vec![batch, 1, dims.value_dim],
+    );
     let conv_out = mk(
         conv_out_buf,
-        dims.conv_dim * dims.ksz,
+        batch * dims.conv_dim * dims.ksz,
         DType::BF16,
-        vec![1, dims.conv_dim, dims.ksz],
+        vec![batch, dims.conv_dim, dims.ksz],
     );
     let state_out = mk(
         state_out_buf,
-        dims.heads * dims.dk * dims.dv,
+        batch * dims.heads * dims.dk * dims.dv,
         DType::F32,
-        vec![1, dims.heads, dims.dk, dims.dv],
+        vec![batch, dims.heads, dims.dk, dims.dv],
     );
     Ok((out, conv_out, state_out))
 }

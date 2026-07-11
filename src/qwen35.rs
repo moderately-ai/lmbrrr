@@ -936,8 +936,10 @@ impl GatedDeltaNet {
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
         };
+        let (b_sz, _, _) = xs.dims3()?;
         let (out, conv_new, state_new) = crate::fused_deltanet::gated_delta_decode(
             &proj,
+            b_sz,
             &conv_state,
             &recurrent_state.contiguous()?,
             &self.conv_weight_full,
@@ -956,7 +958,7 @@ impl GatedDeltaNet {
 
     #[cfg(feature = "metal")]
     fn fused_decode_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
-        b == 1
+        (1..=32).contains(&b)
             && l == 1
             && !unfused_deltanet()
             && matches!(xs.device(), Device::Metal(_))
