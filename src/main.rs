@@ -6378,6 +6378,77 @@ fn generate_tokens(
     let mut next_input_elapsed = Duration::ZERO;
     let mut callback_elapsed = Duration::ZERO;
 
+    // Greedy fast path: the sampled token stays on device (u32 argmax feeds
+    // the next forward directly), and ids are read back in batches of K —
+    // removing both the per-token 4-byte upload (a fresh Metal buffer +
+    // residency commit each step) and the per-token host sync, letting the
+    // host run ahead of the GPU. Generation may run up to K-1 forwards past
+    // EOS; the surplus is discarded and the next caller clears the cache.
+    let device_chain =
+        is_greedy_generation(generation) && (generation.repeat_penalty - 1.0).abs() < f32::EPSILON;
+    if device_chain {
+        const READBACK_EVERY: usize = 8;
+        let mut pending: Vec<Tensor> = Vec::with_capacity(READBACK_EVERY);
+        'outer: loop {
+            let sampling_start = Instant::now();
+            // argmax over [1, vocab] keeps the id rank-1 (cat/reshape need it).
+            let next_id = logits.argmax(D::Minus1)?;
+            pending.push(next_id.clone());
+            sampling_elapsed += sampling_start.elapsed();
+
+            let produced = generated_token_ids.len() + pending.len();
+            let flush = pending.len() >= READBACK_EVERY || produced >= generation.max_new_tokens;
+            if flush {
+                let sampling_start = Instant::now();
+                let refs = pending.iter().collect::<Vec<_>>();
+                let ids = Tensor::cat(&refs, 0)?
+                    .to_device(&Device::Cpu)?
+                    .to_vec1::<u32>()?;
+                pending.clear();
+                sampling_elapsed += sampling_start.elapsed();
+                for id in ids {
+                    if eos_ids.contains(&id) {
+                        eos_reached = true;
+                        break 'outer;
+                    }
+                    if first_token_after_prefill.is_none() {
+                        first_token_after_prefill = Some(decode_start.elapsed());
+                    }
+                    generated_token_ids.push(id);
+                    generated += 1;
+                    let callback_start = Instant::now();
+                    on_token(id, generated, decode_start.elapsed(), prefill_elapsed)?;
+                    callback_elapsed += callback_start.elapsed();
+                    if generated == generation.max_new_tokens {
+                        break 'outer;
+                    }
+                }
+            }
+            if produced >= generation.max_new_tokens {
+                break;
+            }
+
+            let decode_model_start = Instant::now();
+            let input = next_id.reshape((1, 1))?;
+            logits = model.forward(&input, None::<&ProcessedImages>, downsample_mode, position)?;
+            decode_model_elapsed += decode_model_start.elapsed();
+            position += 1;
+        }
+        return Ok(GenerationStats {
+            prompt_tokens: input_tokens.len(),
+            generated_tokens: generated,
+            generated_token_ids,
+            eos_reached,
+            prefill_elapsed,
+            decode_elapsed: decode_start.elapsed(),
+            decode_model_elapsed,
+            sampling_elapsed,
+            next_input_elapsed,
+            callback_elapsed,
+            first_token_after_prefill,
+        });
+    }
+
     for _ in 0..generation.max_new_tokens {
         let sampling_start = Instant::now();
         let logits_1d = logits.squeeze(0)?;
