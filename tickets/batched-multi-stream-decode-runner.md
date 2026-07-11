@@ -1,7 +1,7 @@
 ---
 id: batched-multi-stream-decode-runner
 title: Batched multi stream decode runner
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [aggregate-throughput-bench-harness]
@@ -9,7 +9,14 @@ scopes: [runtime/candle, evals]
 shared_scopes: [docs/research]
 paths: [src/qwen35.rs, src/minicpm.rs, src/main.rs, evals/**, docs/research/batched-decode-runner.md]
 tags: [performance, batching, campaign-1000]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783753611
 ---
+## Progress (2026-07-11, commit d68f087 — core landed, 847/1000)
+
+multi-bench subcommand + batched fused decode kernel (fork 40eba9ce, grid batch x heads). Aggregate ladder (q4k target, 128 tokens): N=8/12/16/24/32 = 660/738/784/817/847 tok/s; bf16 N=8 = 580. Batching WITHOUT the kernel was worse than single-stream (111 at N=8) — the b==1 gate forced the tensor path, now proven. Saturation ~850 at N=32: remaining bottlenecks are the m=N lm_head/attention gemm inefficiency (the same small/mid-m matmul package on bf16-activation-quantized-matmul-metal) and the per-step batched-argmax host readback. Equivalence advisory: quantized stream-0 matches its single-stream reference 73/128 (batched-m numerics tie-flips); bf16 single-stream path stays bit-identical (fixture green). Remaining scope: per-stream KV with differing prompt lengths (padding/ragged), spec-over-batch, and the last ~150 tok/s.
+
 ## Goal
 
 Run N independent generation streams through one batched decode forward. Batching amortizes exactly the per-dispatch overhead this small model suffers from and is the near-term path to the aggregate-1000 milestone (e.g. 8 streams x 125 tok/s quantized).
