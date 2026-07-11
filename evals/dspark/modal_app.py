@@ -312,7 +312,7 @@ def train(
 
 @app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=4 * 3600)
 def evaluate(
-    checkpoint: str = "runs/dspark_block8_minicpm_v46/step_380",
+    checkpoint: str = "runs/checkpoints/lmbrrr/dspark_block8_minicpm_v46_round1/step_380",
     tasks: str = "gsm8k:20,mt-bench:10",
     max_new_tokens: int = 512,
     temperature: float = 0.0,
