@@ -17,8 +17,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use candle::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{Linear, VarBuilder};
-use candle_transformers::utils::repeat_kv;
 use serde::Deserialize;
+
+use crate::qwen35::TruncatableKvCache;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct DsparkRopeParameters {
@@ -160,15 +161,19 @@ struct DraftLayer {
     down_proj: Linear,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
-    // Projected fused-context K/V at their absolute positions (roped).
-    ctx_k: Option<Tensor>,
-    ctx_v: Option<Tensor>,
+    // Projected fused-context K/V at their absolute positions (roped), in a
+    // grow-on-demand buffer: appends write only the new rows, and propose()
+    // appends the block rows then truncates back — no per-round copies of
+    // the whole context (the old Tensor::cat pattern was O(T) per round and
+    // O(T^2) over a run).
+    ctx: TruncatableKvCache,
 }
 
 impl DraftLayer {
     fn clear_context(&mut self) {
-        self.ctx_k = None;
-        self.ctx_v = None;
+        self.ctx
+            .truncate(0)
+            .expect("truncate to zero cannot fail");
     }
 }
 
@@ -184,7 +189,6 @@ pub struct DsparkDrafter {
     markov_w2: Linear,
     confidence: Linear,
     rotary: Rotary,
-    num_kv_groups: usize,
     device: Device,
     dtype: DType,
 }
@@ -193,9 +197,11 @@ pub struct DsparkDrafter {
 pub struct DraftProposal {
     pub tokens: Vec<u32>,
     pub confidence_logits: Vec<f32>,
-    pub block_hidden: Tensor,
-    pub base_logits: Tensor,
-    pub corrected_logits: Tensor,
+    /// Populated only by `propose_with_diagnostics` (parity harness); the
+    /// hot loop skips materializing them (~0.2 ms/round of vocab-wide cats).
+    pub block_hidden: Option<Tensor>,
+    pub base_logits: Option<Tensor>,
+    pub corrected_logits: Option<Tensor>,
 }
 
 impl DsparkDrafter {
@@ -240,8 +246,7 @@ impl DsparkDrafter {
                 down_proj: Linear::new(vb.get((h, config.intermediate_size), &format!("{p}.mlp.down_proj.weight"))?, None),
                 input_layernorm: RmsNorm::load(&vb, &format!("{p}.input_layernorm.weight"), h, eps)?,
                 post_attention_layernorm: RmsNorm::load(&vb, &format!("{p}.post_attention_layernorm.weight"), h, eps)?,
-                ctx_k: None,
-                ctx_v: None,
+                ctx: TruncatableKvCache::new(),
             });
         }
 
@@ -264,7 +269,6 @@ impl DsparkDrafter {
                 Some(vb.get(1, "confidence_head.proj.bias")?),
             ),
             rotary: Rotary::new(head_dim, config.rope_parameters.rope_theta, dtype, device)?,
-            num_kv_groups: heads / kv_heads,
             layers,
             device: device.clone(),
             dtype,
@@ -299,20 +303,19 @@ impl DsparkDrafter {
                 .transpose(1, 2)?
                 .contiguous()?;
             let k = self.rotary.apply(&k, start_pos)?;
-            let v = layer
+            let v_new = layer
                 .v_proj
                 .forward(&fused)?
                 .reshape((b, m, kv_heads, head_dim))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            layer.ctx_k = Some(match &layer.ctx_k {
-                Some(prev) => Tensor::cat(&[prev, &k], 2)?,
-                None => k,
-            });
-            layer.ctx_v = Some(match &layer.ctx_v {
-                Some(prev) => Tensor::cat(&[prev, &v], 2)?,
-                None => v,
-            });
+            if layer.ctx.len() != start_pos {
+                anyhow::bail!(
+                    "drafter context length {} does not match append position {start_pos}",
+                    layer.ctx.len()
+                );
+            }
+            layer.ctx.append(&k.contiguous()?, &v_new)?;
         }
         Ok(())
     }
@@ -324,6 +327,27 @@ impl DsparkDrafter {
     /// trailing mask tokens, so a shortened block is out-of-distribution.
     /// Only the first `gamma` positions go through lm_head/Markov/confidence.
     pub fn propose(&mut self, anchor_token: u32, anchor_pos: usize, gamma: usize) -> Result<DraftProposal> {
+        self.propose_inner(anchor_token, anchor_pos, gamma, false)
+    }
+
+    /// Parity-harness variant that also materializes block_hidden /
+    /// base_logits / corrected_logits.
+    pub fn propose_with_diagnostics(
+        &mut self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        gamma: usize,
+    ) -> Result<DraftProposal> {
+        self.propose_inner(anchor_token, anchor_pos, gamma, true)
+    }
+
+    fn propose_inner(
+        &mut self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        gamma: usize,
+        diagnostics: bool,
+    ) -> Result<DraftProposal> {
         let block = self.config.block_size;
         if gamma == 0 || gamma > block {
             anyhow::bail!("gamma {gamma} outside 1..={block}");
@@ -337,7 +361,7 @@ impl DsparkDrafter {
         let head_dim = self.config.head_dim;
         let scale = 1.0 / (head_dim as f64).sqrt();
 
-        for layer in &self.layers {
+        for layer in &mut self.layers {
             let residual = hidden.clone();
             let normed = layer.input_layernorm.forward(&hidden)?;
             let q = layer
@@ -358,21 +382,25 @@ impl DsparkDrafter {
                 .reshape((b, q_len, kv_heads, head_dim))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            let (k_all, v_all) = match (&layer.ctx_k, &layer.ctx_v) {
-                (Some(ck), Some(cv)) => (
-                    Tensor::cat(&[ck, &k_new], 2)?,
-                    Tensor::cat(&[cv, &v_new], 2)?,
-                ),
-                _ => (k_new, v_new),
-            };
-            let k_all = repeat_kv(k_all, self.num_kv_groups)?.contiguous()?;
-            let v_all = repeat_kv(v_all, self.num_kv_groups)?.contiguous()?;
-            let attn = (q.contiguous()?.matmul(&k_all.transpose(2, 3)?.contiguous()?)? * scale)?;
-            let attn = candle_nn::ops::softmax_last_dim(&attn.to_dtype(DType::F32)?)?
-                .to_dtype(hidden.dtype())?;
-            let out = attn
-                .contiguous()?
-                .matmul(&v_all)?
+            // Block rows are appended into the context buffer for the
+            // attention call and truncated straight back out: bidirectional
+            // attention over [ctx | block] with zero copies of the context.
+            // The fused SDPA kernel handles GQA natively (no repeat_kv).
+            let prev_len = layer.ctx.len();
+            let (k_all, v_all) = layer
+                .ctx
+                .append(&k_new.contiguous()?, &v_new)?;
+            let out = candle_nn::ops::sdpa(
+                &q.contiguous()?,
+                &k_all,
+                &v_all,
+                None,
+                false,
+                scale as f32,
+                1.0,
+            )?;
+            layer.ctx.truncate(prev_len)?;
+            let out = out
                 .transpose(1, 2)?
                 .reshape((b, q_len, heads * head_dim))?;
             hidden = (residual + layer.o_proj.forward(&out)?)?;
@@ -407,24 +435,32 @@ impl DsparkDrafter {
             prev_id = token;
         }
         let feature_refs = features.iter().collect::<Vec<_>>();
-        let confidence_logits = self
+        let confidences = self
             .confidence
             .forward(&Tensor::cat(&feature_refs, 0)?)?
             .to_dtype(DType::F32)?
-            .squeeze(D::Minus1)?
+            .squeeze(D::Minus1)?;
+        // Single host readback: confidences and token ids ride one buffer
+        // (u32 < 2^24 is exact in f32), halving the per-proposal sync count.
+        let token_refs = token_tensors.iter().collect::<Vec<_>>();
+        let tokens_f32 = Tensor::cat(&token_refs, 0)?.to_dtype(DType::F32)?;
+        let packed = Tensor::cat(&[&confidences, &tokens_f32], 0)?
             .to_device(&Device::Cpu)?
             .to_vec1::<f32>()?;
-        let token_refs = token_tensors.iter().collect::<Vec<_>>();
-        let tokens = Tensor::cat(&token_refs, 0)?
-            .to_device(&Device::Cpu)?
-            .to_vec1::<u32>()?;
-        let corrected_refs = corrected.iter().collect::<Vec<_>>();
-        let corrected_logits = Tensor::cat(&corrected_refs, 0)?.unsqueeze(0)?;
+        let (confidence_logits, token_vals) = packed.split_at(gamma);
+        let tokens = token_vals.iter().map(|v| *v as u32).collect::<Vec<_>>();
+        let confidence_logits = confidence_logits.to_vec();
+        let corrected_logits = if diagnostics {
+            let corrected_refs = corrected.iter().collect::<Vec<_>>();
+            Some(Tensor::cat(&corrected_refs, 0)?.unsqueeze(0)?)
+        } else {
+            None
+        };
         Ok(DraftProposal {
             tokens,
             confidence_logits,
-            block_hidden,
-            base_logits,
+            block_hidden: diagnostics.then_some(block_hidden),
+            base_logits: diagnostics.then_some(base_logits),
             corrected_logits,
         })
     }

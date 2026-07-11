@@ -272,7 +272,7 @@ impl RotaryEmbedding {
 /// rewind); `truncate` just moves the length back — the buffer beyond it is
 /// overwritten by the re-advance chunk.
 #[derive(Clone, Debug)]
-struct TruncatableKvCache {
+pub struct TruncatableKvCache {
     k: Option<Tensor>,
     v: Option<Tensor>,
     len: usize,
@@ -281,7 +281,7 @@ struct TruncatableKvCache {
 impl TruncatableKvCache {
     const MIN_CAPACITY: usize = 1024;
 
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             k: None,
             v: None,
@@ -295,11 +295,11 @@ impl TruncatableKvCache {
         self.len = 0;
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.len
     }
 
-    fn truncate(&mut self, len: usize) -> Result<()> {
+    pub fn truncate(&mut self, len: usize) -> Result<()> {
         if len > self.len {
             candle::bail!("cannot truncate KV cache from {} to {len}", self.len);
         }
@@ -327,7 +327,7 @@ impl TruncatableKvCache {
         Ok(())
     }
 
-    fn append(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
+    pub fn append(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
         let added = k.dim(2)?;
         let needed = self.len + added;
         Self::ensure_capacity(&mut self.k, k, needed, self.len)?;

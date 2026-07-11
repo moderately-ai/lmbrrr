@@ -1273,7 +1273,7 @@ fn dspark_drafter_parity(args: DsparkDrafterParityArgs) -> Result<()> {
     let ctx_len = ctx.dim(1)?;
 
     drafter.append_context(&ctx, 0)?;
-    let proposal = drafter.propose(anchor, ctx_len, gamma)?;
+    let proposal = drafter.propose_with_diagnostics(anchor, ctx_len, gamma)?;
 
     let expected_tokens = fixture
         .get("sampled_tokens")
@@ -1300,9 +1300,16 @@ fn dspark_drafter_parity(args: DsparkDrafterParityArgs) -> Result<()> {
             .to_scalar::<f32>()?;
         Ok(diff as f64)
     };
-    let hidden_diff = max_abs(&proposal.block_hidden, "block_hidden")?;
-    let base_diff = max_abs(&proposal.base_logits, "base_logits")?;
-    let corrected_diff = max_abs(&proposal.corrected_logits, "corrected_logits")?;
+    let diag = |t: &Option<Tensor>, name: &str| -> Result<Tensor> {
+        t.clone()
+            .with_context(|| format!("diagnostics missing {name}"))
+    };
+    let hidden_diff = max_abs(&diag(&proposal.block_hidden, "block_hidden")?, "block_hidden")?;
+    let base_diff = max_abs(&diag(&proposal.base_logits, "base_logits")?, "base_logits")?;
+    let corrected_diff = max_abs(
+        &diag(&proposal.corrected_logits, "corrected_logits")?,
+        "corrected_logits",
+    )?;
 
     let token_matches = proposal
         .tokens
