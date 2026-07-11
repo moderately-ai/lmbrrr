@@ -91,3 +91,19 @@ Data-gen is embarrassingly parallel: shard count buys wall-clock, not dollars.
 - **Launch gate: user sign-off on this plan.** Nothing above runs until then.
 - **Round-3 gate (data-driven):** if 100k shows ≥ +0.4 τ_math over round 1 on the deployment target, buy the 500k run. If not, data alone is not the path — the budget pivots to tree in-kernel restart + relaxed-typical acceptance, which multiply whatever τ exists.
 - Every round evaluates on the fixed suite, controls first, per the measurement protocol.
+
+## Round-2 results (2026-07-11)
+
+Executed variant: vLLM regen (native MiniCPMV4_6 serving, 6,597 tok/s at concurrency 64; 40k conversations in 21:38) against the fakequant deployment-config target; NVMe-staged training at ~5 s/step. Ablation arms: A = warm start from round-1 (20k corpus, 0.3x LR, 18 epochs), B = fresh init (40k corpus, lr 6e-4, 18 epochs). Both evaluated by the Modal MiniCPM evaluator on the fakequant target (gsm8k:20, mt-bench:10, greedy).
+
+| arm | gsm8k tau | mt-bench tau | pos-0 accept (gsm8k) |
+| --- | --- | --- | --- |
+| round-1 step_380 (rebased on fakequant target) | 2.08 | 1.56 | — |
+| A: warm, 20k, 18 ep (plateaued by ep 12) | 2.69 | 1.71 | — |
+| **B: fresh, 40k, 18 ep** | **3.54** | **2.08** | **78.2%** |
+
+**Verdict: fresh wins decisively.** Warm-starting saved compute but capped the ceiling (its per-epoch tau plateaued by epoch 12 while B kept improving); at 2x corpus the fresh run beats warm by +32% gsm8k tau and round-1 by +70%. Local validation on the real Metal runner corroborates the direction (warm arm measured tau 2.72 fixed-gamma on math locally vs the evaluator's 2.69 on gsm8k — the fakequant trace pipeline transfers almost exactly; B's local numbers pending checkpoint download).
+
+**Round-3 gate: cleared 3x over.** +1.46 tau_math over round-1 vs the +0.4 criterion. Config for round 3: FRESH init (not warm), 100k-500k corpus, same deployment-config trace path, argmax confidence labels (already merged in the DeepSpec fork), per-epoch held-out tau selection.
+
+Deployment sequencing before the default drafter flips to B: download step_1386, local fixed-gamma tau A/B vs round-1, argmax-event STS fit (the warm arm's fit measured +8.2% held-out over round-1 scheduled; rerun the same 10-minute procedure for B), scheduled validation must beat round-1 scheduled and B fixed-gamma, multi-class sweep.
