@@ -110,3 +110,7 @@ tower path, image embedding insertion, and one plausible image-conditioned
 decode. It is still not full numeric parity for the vision tower. The next gate
 should compare image feature shapes and selected hidden-state values after
 `get_image_features` against Transformers.
+
+## Vision feature parity (2026-07-11)
+
+The oracle (`evals/minicpm_v46_image_oracle.py --features`) now also runs the Transformers vision tower + merger (`get_image_features`, bf16 CPU) on the same deterministic synthetic images and exports sampled merged-feature values (`evals/fixtures/minicpm_v46_transformers_image_features.json`). The permanent Rust gate is `lmbrrr vision-check` (Metal, BF16): per-case feature shapes match exactly (70/447/276 × 1024 across unsliced, large-sliced, and tall-sliced cases), and the 64 sampled values per case agree within max |Δ| 0.109 / mean |Δ| ≤ 0.0098 (default gates 0.125 / 0.02). The residual is accumulated bf16 rounding across the ~27-layer tower and merger attention under different kernel orders (CPU torch vs Metal candle); no architecture-level mismatch found.

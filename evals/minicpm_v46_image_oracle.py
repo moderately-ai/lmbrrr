@@ -42,6 +42,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scale-resolution", type=int, default=448)
     parser.add_argument("--patch-size", type=int, default=14)
     parser.add_argument("--sample-count", type=int, default=64)
+    parser.add_argument(
+        "--features",
+        action="store_true",
+        help=(
+            "Also run the vision tower + merger (get_image_features) and export "
+            "sampled merged-feature values per case. Loads the full model on CPU "
+            "in bf16; needs transformers>=5.7 and ~17 GB RAM."
+        ),
+    )
+    parser.add_argument("--model-hub-id", default=MODEL_ID)
+    parser.add_argument("--downsample-mode", default="16x")
     return parser.parse_args()
 
 
@@ -130,6 +141,62 @@ def fixture_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
     return rows
 
 
+def feature_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Vision-tower + merger parity rows: merged image features for each
+    synthetic case, sampled like the pixel fixtures. Runs the composite on
+    CPU in bf16 (values exported as f32); the Rust check compares within a
+    documented bf16 tolerance."""
+    import torch
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(args.model_dir, trust_remote_code=True)
+    model = (
+        AutoModelForImageTextToText.from_pretrained(
+            args.model_hub_id,
+            revision=args.revision,
+            dtype=torch.bfloat16,
+        )
+        .to("cpu")
+        .eval()
+    )
+
+    rows = []
+    for case in DEFAULT_CASES:
+        image = synthetic_image(case.height, case.width)
+        processed = processor.image_processor(
+            [image],
+            return_tensors="pt",
+            max_slice_nums=args.max_slice_nums,
+            scale_resolution=args.scale_resolution,
+            patch_size=args.patch_size,
+        )
+        with torch.no_grad():
+            vision_output = model.model.get_image_features(
+                processed["pixel_values"],
+                processed["target_sizes"],
+                downsample_mode=args.downsample_mode,
+            )
+        pooled = vision_output.pooler_output
+        if isinstance(pooled, (list, tuple)):
+            pooled = torch.cat(list(pooled), dim=0)
+        features = pooled.detach().float().contiguous()
+        flat = features.flatten()
+        indices = sample_indices(int(flat.numel()), args.sample_count)
+        sample_values = [float(flat[index].item()) for index in indices]
+        rows.append(
+            {
+                **asdict(case),
+                "feature_shape": list(features.shape),
+                "sample_indices": indices,
+                "sample_values": sample_values,
+                "sample_max_abs": max(abs(value) for value in sample_values),
+                "feature_mean": float(features.mean().item()),
+                "feature_abs_mean": float(features.abs().mean().item()),
+            }
+        )
+    return rows
+
+
 def main() -> int:
     args = parse_args()
     fixture = {
@@ -143,6 +210,10 @@ def main() -> int:
         "patch_size": args.patch_size,
         "cases": fixture_cases(args),
     }
+    if args.features:
+        fixture["downsample_mode"] = args.downsample_mode
+        fixture["feature_dtype"] = "bf16-cpu (exported f32)"
+        fixture["feature_cases"] = feature_cases(args)
     payload = json.dumps(fixture, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(payload + "\n", encoding="utf-8")

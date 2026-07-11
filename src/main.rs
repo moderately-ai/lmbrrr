@@ -80,6 +80,24 @@ enum Command {
     DsparkDrafterParity(DsparkDrafterParityArgs),
     MultiBench(MultiBenchArgs),
     TreeCheck(TreeCheckArgs),
+    VisionCheck(VisionCheckArgs),
+}
+
+/// Vision feature parity gate: merged image features (vision tower + merger)
+/// for the oracle's deterministic synthetic images vs the Transformers
+/// fixture (evals/fixtures/minicpm_v46_transformers_image_features.json).
+#[derive(Parser, Debug)]
+struct VisionCheckArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    /// Max |Δ| per sampled feature (bf16-CPU oracle vs bf16-Metal tower).
+    #[arg(long, default_value_t = 0.125)]
+    max_abs_delta: f32,
+
+    /// Max mean |Δ| across each case's samples.
+    #[arg(long, default_value_t = 0.02)]
+    max_mean_delta: f32,
 }
 
 /// Tree-vs-chain equivalence gate for two-branch tree verification: the
@@ -1357,7 +1375,109 @@ fn main() -> Result<()> {
         Command::DsparkDrafterParity(args) => dspark_drafter_parity(args),
         Command::MultiBench(args) => multi_bench(args),
         Command::TreeCheck(args) => tree_check(args),
+        Command::VisionCheck(args) => vision_check(args),
     }
+}
+
+fn vision_check(args: VisionCheckArgs) -> Result<()> {
+    use lmbrrr::image_processor::preprocess_rgb_images;
+
+    #[derive(serde::Deserialize)]
+    struct FeatureFixture {
+        downsample_mode: String,
+        feature_cases: Vec<FeatureCase>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FeatureCase {
+        id: String,
+        height: usize,
+        width: usize,
+        feature_shape: Vec<usize>,
+        sample_indices: Vec<usize>,
+        sample_values: Vec<f32>,
+    }
+
+    let fixture: FeatureFixture = serde_json::from_str(include_str!(
+        "../evals/fixtures/minicpm_v46_transformers_image_features.json"
+    ))?;
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let preprocessor_path = bundle
+        .artifacts
+        .preprocessor
+        .as_ref()
+        .context("vision check requires preprocessor_config.json")?;
+    let preprocessor = PreprocessorConfig::from_path(preprocessor_path)?;
+    let (model, _, _) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
+    )?;
+
+    let mut worst_abs = 0f32;
+    let mut worst_mean = 0f32;
+    for case in &fixture.feature_cases {
+        // Same generator as the oracle's synthetic_image.
+        let mut img = image::RgbImage::new(case.width as u32, case.height as u32);
+        for y in 0..case.height {
+            for x in 0..case.width {
+                img.put_pixel(
+                    x as u32,
+                    y as u32,
+                    image::Rgb([
+                        ((x * 17 + y * 3) % 256) as u8,
+                        ((x * 5 + y * 11 + 37) % 256) as u8,
+                        ((x * 13 + y * 7 + 91) % 256) as u8,
+                    ]),
+                );
+            }
+        }
+        let processed = preprocess_rgb_images(
+            &[(PathBuf::from(format!("{}.png", case.id)), img)],
+            &preprocessor,
+            &device,
+        )?;
+        let features = model.image_features(&processed, &fixture.downsample_mode, dtype)?;
+        let features = Tensor::cat(&features.iter().collect::<Vec<_>>(), 0)?
+            .to_dtype(DType::F32)?
+            .to_device(&Device::Cpu)?;
+        anyhow::ensure!(
+            features.dims() == case.feature_shape.as_slice(),
+            "{}: feature shape {:?} != oracle {:?}",
+            case.id,
+            features.dims(),
+            case.feature_shape
+        );
+        let flat = features.flatten_all()?.to_vec1::<f32>()?;
+        let mut max_d = 0f32;
+        let mut sum_d = 0f32;
+        for (index, expected) in case.sample_indices.iter().zip(case.sample_values.iter()) {
+            let got = flat[*index];
+            let d = (got - expected).abs();
+            max_d = max_d.max(d);
+            sum_d += d;
+        }
+        let mean_d = sum_d / case.sample_indices.len() as f32;
+        println!(
+            "{}: shape {:?} ok, max |Δ| {max_d:.4}, mean |Δ| {mean_d:.4}",
+            case.id,
+            features.dims()
+        );
+        worst_abs = worst_abs.max(max_d);
+        worst_mean = worst_mean.max(mean_d);
+    }
+    println!(
+        "vision-check: worst max |Δ| {worst_abs:.4} (eps {}), worst mean |Δ| {worst_mean:.4} (eps {})",
+        args.max_abs_delta, args.max_mean_delta
+    );
+    if worst_abs > args.max_abs_delta || worst_mean > args.max_mean_delta {
+        anyhow::bail!("vision-check FAILED");
+    }
+    println!("vision-check PASSED");
+    Ok(())
 }
 
 /// See [`TreeCheckArgs`]. Per round, with the pre-round state snapshotted:

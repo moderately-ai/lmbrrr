@@ -467,6 +467,17 @@ impl MiniCpmForConditionalGeneration {
         })
     }
 
+    /// Merged per-image vision features (vision tower + merger), for parity
+    /// gates against the Transformers oracle.
+    pub fn image_features(
+        &self,
+        images: &ProcessedImages,
+        downsample_mode: &str,
+        dtype: DType,
+    ) -> Result<Vec<Tensor>> {
+        self.model.get_image_features(images, downsample_mode, dtype)
+    }
+
     /// Post-hoc lm_head quantization: replaces the tied-embedding dense head
     /// with a quantized copy (the BF16 embedding table stays for the
     /// gather). The 508 MB/token head read is 34% of all decode weight
