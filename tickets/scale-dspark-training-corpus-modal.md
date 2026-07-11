@@ -2,7 +2,7 @@
 id: scale-dspark-training-corpus-modal
 title: Scale DSpark training corpus on Modal
 status: in-progress
-priority: p3
+priority: p1
 dependencies: [train-dspark-semi-autoregressive-drafter]
 related: [benchmark-full-dspark-speedup]
 scopes: [evals]

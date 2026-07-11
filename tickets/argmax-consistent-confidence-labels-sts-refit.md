@@ -2,7 +2,7 @@
 id: argmax-consistent-confidence-labels-sts-refit
 title: Argmax-consistent confidence labels + STS refit
 status: in-progress
-priority: p2
+priority: p1
 dependencies: []
 related: []
 scopes: [evals]

@@ -2,7 +2,7 @@
 id: tree-speculation-over-dspark
 title: Tree speculation over DSpark
 status: todo
-priority: p1
+priority: p2
 dependencies: [integrate-dspark-block-runner]
 related: [remeasure-spec-round-cost-model]
 scopes: [inference/speculative, runtime/candle, evals]

@@ -190,6 +190,11 @@ pub struct DsparkDrafter {
     markov_w2: MixedLinear,
     confidence: Linear,
     rotary: Rotary,
+    // FR-Spec draft-vocabulary restriction: when set, lm_head and markov_w2
+    // hold only these rows (rank order), and proposal argmaxes remap through
+    // this id table. Committed output is unaffected (verification is exact);
+    // only draft cost and tau move.
+    draft_vocab_ids: Option<Tensor>,
     device: Device,
     dtype: DType,
 }
@@ -208,6 +213,16 @@ pub struct DraftProposal {
     pub block_hidden: Option<Tensor>,
     pub base_logits: Option<Tensor>,
     pub corrected_logits: Option<Tensor>,
+}
+
+fn maybe_slice_rows(weight: Tensor, ids: Option<&[u32]>) -> Result<Tensor> {
+    match ids {
+        None => Ok(weight),
+        Some(ids) => {
+            let idx = Tensor::from_slice(ids, ids.len(), weight.device())?;
+            Ok(weight.index_select(&idx, 0)?.contiguous()?)
+        }
+    }
 }
 
 fn quantize_or_dense(
@@ -241,6 +256,21 @@ impl DsparkDrafter {
         device: &Device,
         dtype: DType,
         quantize_heads: Option<candle::quantized::GgmlDType>,
+    ) -> Result<Self> {
+        Self::load_with_draft_vocab(dir, device, dtype, quantize_heads, None)
+    }
+
+    /// `draft_vocab`: FR-Spec top-k token ids (rank order). The vocab-wide
+    /// draft heads (lm_head, markov_w2) are sliced to these rows before any
+    /// quantization; markov_w1, the embedding and the confidence head keep
+    /// the full vocabulary (they index by committed-token id, which need not
+    /// be inside the draft vocabulary).
+    pub fn load_with_draft_vocab(
+        dir: &Path,
+        device: &Device,
+        dtype: DType,
+        quantize_heads: Option<candle::quantized::GgmlDType>,
+        draft_vocab: Option<&[u32]>,
     ) -> Result<Self> {
         let config = DsparkConfig::from_dir(dir)?;
         if config.markov_head_type != "vanilla"
@@ -295,16 +325,25 @@ impl DsparkDrafter {
             ),
             hidden_norm: RmsNorm::load(&vb, "hidden_norm.weight", h, eps)?,
             lm_head: quantize_or_dense(
-                vb.get((config.vocab_size, h), "lm_head.weight")?,
+                maybe_slice_rows(
+                    vb.get((config.vocab_size, h), "lm_head.weight")?,
+                    draft_vocab,
+                )?,
                 quantize_heads,
                 device,
             )?,
             markov_w1: vb.get((config.vocab_size, config.markov_rank), "markov_head.markov_w1.weight")?,
             markov_w2: quantize_or_dense(
-                vb.get((config.vocab_size, config.markov_rank), "markov_head.markov_w2.weight")?,
+                maybe_slice_rows(
+                    vb.get((config.vocab_size, config.markov_rank), "markov_head.markov_w2.weight")?,
+                    draft_vocab,
+                )?,
                 quantize_heads,
                 device,
             )?,
+            draft_vocab_ids: draft_vocab
+                .map(|ids| Tensor::from_slice(ids, ids.len(), device))
+                .transpose()?,
             confidence: Linear::new(
                 vb.get((1, h + config.markov_rank), "confidence_head.proj.weight")?,
                 Some(vb.get(1, "confidence_head.proj.bias")?),
@@ -476,11 +515,22 @@ impl DsparkDrafter {
         let mut token_tensors = Vec::with_capacity(gamma);
         let mut corrected = Vec::with_capacity(gamma);
         let mut features = Vec::with_capacity(gamma);
+        let mut sub_argmax0: Option<Tensor> = None;
         for k in 0..gamma {
             let prev_emb = self.markov_w1.index_select(&prev_id, 0)?;
             let bias = self.markov_w2.forward(&prev_emb)?;
             let step = (base_logits.i((0, k))?.unsqueeze(0)? + &bias)?;
-            let token = step.to_dtype(DType::F32)?.argmax(D::Minus1)?;
+            let sub_token = step.to_dtype(DType::F32)?.argmax(D::Minus1)?;
+            // Draft-vocab argmaxes index the sliced rows; remap to global ids
+            // (one device-side gather) so the Markov chain and readback stay
+            // in real token space.
+            let token = match &self.draft_vocab_ids {
+                Some(ids) => ids.index_select(&sub_token, 0)?,
+                None => sub_token.clone(),
+            };
+            if k == 0 {
+                sub_argmax0 = Some(sub_token);
+            }
             let h_k = block_hidden.i((0, k))?.unsqueeze(0)?;
             features.push(Tensor::cat(&[&h_k, &prev_emb.to_dtype(self.dtype)?], D::Minus1)?);
             corrected.push(step);
@@ -496,11 +546,21 @@ impl DsparkDrafter {
             let step0 = corrected[0].to_dtype(DType::F32)?.squeeze(0)?;
             let neg = Tensor::full(-1e30f32, 1, &self.device)?;
             // Keep the id rank-1 like the main chain's argmax(Minus1) output:
-            // markov_w1.index_select rejects rank-0 indices.
-            let second = step0
-                .index_add(&token_tensors[0], &neg, 0)?
+            // markov_w1.index_select rejects rank-0 indices. The mask index
+            // lives in the (possibly sliced) logit space; the winner remaps
+            // to a global id afterwards.
+            let mask_idx = sub_argmax0
+                .as_ref()
+                .expect("main chain populated position 0")
+                .clone();
+            let second_sub = step0
+                .index_add(&mask_idx, &neg, 0)?
                 .argmax(0)?
                 .unsqueeze(0)?;
+            let second = match &self.draft_vocab_ids {
+                Some(ids) => ids.index_select(&second_sub, 0)?,
+                None => second_sub,
+            };
             let mut prev = second.clone();
             alt_token_tensors.push(second);
             for k in 0..gamma {
@@ -511,7 +571,11 @@ impl DsparkDrafter {
                 if k + 1 < gamma {
                     let bias = self.markov_w2.forward(&prev_emb)?;
                     let step = (base_logits.i((0, k + 1))?.unsqueeze(0)? + &bias)?;
-                    let token = step.to_dtype(DType::F32)?.argmax(D::Minus1)?;
+                    let sub = step.to_dtype(DType::F32)?.argmax(D::Minus1)?;
+                    let token = match &self.draft_vocab_ids {
+                        Some(ids) => ids.index_select(&sub, 0)?,
+                        None => sub,
+                    };
                     alt_token_tensors.push(token.clone());
                     prev = token;
                 }

@@ -1,7 +1,7 @@
 ---
 id: ngram-draft-source-mux
 title: "Draft-free n-gram speculation: prompt-lookup + verify-logit token recycling"
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: [verify-logit-token-recycling-draft-source]
@@ -9,9 +9,6 @@ scopes: [inference/speculative]
 shared_scopes: [docs/research]
 paths: []
 tags: [speculative, campaign-1000, frontier-survey]
-claimed_from: todo
-assignee: claude
-lease_expires_at: 1783789802
 ---
 ## Goal
 Chain-mode draft sources requiring no training: (1) prompt-lookup (suffix n-gram match against prompt+generation, propose following span, cap 12 tokens to fit closed-form rollback); (2) token recycling (adjacency matrix of top-k candidates from verify logits we already compute, <2 MB). Drafts fire only on match -> strict greedy floor, no probe tax. Mux per-round under the existing hardware-aware scheduler (RASD pattern): n-gram match > DSpark drafter > greedy.

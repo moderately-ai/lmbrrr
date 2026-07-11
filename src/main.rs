@@ -697,6 +697,13 @@ struct DsparkRunArgs {
     #[arg(long, value_enum)]
     drafter_quantize: Option<DrafterQuantArg>,
 
+    /// FR-Spec draft-vocabulary artifact: JSON with an "ids" array of
+    /// frequency-ranked token ids. Drafting argmaxes only over these rows
+    /// (lm_head + markov_w2 sliced at load); committed output is unaffected
+    /// (verification is exact) — only draft cost and tau move.
+    #[arg(long)]
+    draft_vocab: Option<PathBuf>,
+
     /// Hardware-aware prefix scheduling (paper Appendix A): per-round
     /// admission maximizing expected tokens/sec from calibrated cumulative
     /// survival and the measured round-cost table. Supersedes
@@ -5260,11 +5267,26 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
-    let mut drafter = DsparkDrafter::load_with_options(
+    let draft_vocab_ids: Option<Vec<u32>> = match &args.draft_vocab {
+        None => None,
+        Some(path) => {
+            #[derive(serde::Deserialize)]
+            struct DraftVocabFile {
+                ids: Vec<u32>,
+            }
+            let file = std::fs::File::open(path)
+                .with_context(|| format!("open draft vocab {}", path.display()))?;
+            let parsed: DraftVocabFile = serde_json::from_reader(file)
+                .with_context(|| format!("parse draft vocab {}", path.display()))?;
+            Some(parsed.ids)
+        }
+    };
+    let mut drafter = DsparkDrafter::load_with_draft_vocab(
         drafter_dir,
         &device,
         dtype,
         args.drafter_quantize.map(DrafterQuantArg::ggml),
+        draft_vocab_ids.as_deref(),
     )?;
     let gamma = args.gamma.min(drafter.config.block_size);
     let capture_layers = drafter.config.target_layer_ids.clone();
@@ -5743,7 +5765,17 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             };
             let bonus = targets[accepted];
             if args.schedule && width > 0 {
-                if accepted == 0 {
+                // Rate-based hysteresis evidence: the width choice is made
+                // with the draft cost sunk, so a round can be the best
+                // in-round option yet still run below the greedy pace once
+                // the draft is included — and a drafter strong enough to
+                // keep width > 0 would otherwise never let skip mode engage
+                // (measured: -7% on weak Spec-Bench classes). A round only
+                // resets the counter when its realized rate, draft
+                // included, beat a plain greedy step.
+                let round_ms = cost_model.t_round_ms(width);
+                let greedy_ms = cost_model.verify_ms[1];
+                if ((accepted + 1) as f64) * greedy_ms < round_ms {
                     consecutive_zero_widths += 1;
                 } else {
                     consecutive_zero_widths = 0;
