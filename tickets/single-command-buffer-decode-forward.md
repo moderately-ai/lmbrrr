@@ -1,7 +1,7 @@
 ---
 id: single-command-buffer-decode-forward
 title: Single command buffer decode forward
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [fuse-deltanet-decode-step-kernel, measure-metal-roofline-and-dispatch-overhead]

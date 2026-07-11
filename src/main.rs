@@ -6674,17 +6674,17 @@ fn trace_capture_layers(requested: &[usize], num_layers: usize) -> Result<Vec<us
     Ok(layers)
 }
 
-fn argmax_token(logits: &Tensor, device: &Device) -> Result<(u32, Duration)> {
-    device.synchronize()?;
+// No leading synchronize in either helper: to_scalar/to_vec1 already wait
+// for the GPU, and a second wait per token costs a commit/fence cycle plus a
+// buffer-pool purge. The returned Duration therefore covers any outstanding
+// forward work too — callers use it for coarse reporting only.
+fn argmax_token(logits: &Tensor, _device: &Device) -> Result<(u32, Duration)> {
     let started = Instant::now();
-    // to_scalar already waits for the GPU; a trailing synchronize would only
-    // add another wait + buffer-pool purge.
     let token = logits.squeeze(0)?.argmax(D::Minus1)?.to_scalar::<u32>()?;
     Ok((token, started.elapsed()))
 }
 
-fn argmax_tokens(logits: &Tensor, device: &Device) -> Result<(Vec<u32>, Duration)> {
-    device.synchronize()?;
+fn argmax_tokens(logits: &Tensor, _device: &Device) -> Result<(Vec<u32>, Duration)> {
     let started = Instant::now();
     let tokens = logits
         .squeeze(0)?
