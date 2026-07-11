@@ -1,7 +1,7 @@
 ---
 id: add-minicpm-dspark-evaluator
 title: Add MiniCPM DSpark evaluator to DeepSpec
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [scale-dspark-training-corpus-modal, calibrate-dspark-confidence-head, train-dspark-semi-autoregressive-drafter]
