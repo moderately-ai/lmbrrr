@@ -1,7 +1,7 @@
 ---
 id: verify-chunk-masked-sdpa
 title: Route the masked verify-chunk attention through SDPA (kill per-chunk repeat_kv)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [remeasure-spec-round-cost-model]
@@ -10,6 +10,10 @@ shared_scopes: [docs/research]
 paths: []
 tags: [speculative, performance, kernels]
 ---
+## Outcome (2026-07-11, closing)
+
+Core landed across commits a7aa2a1 (masked-chunk SDPA, l<=16, materialized mask; do_causal and stride-0 broadcast masks both measured wrong and rejected by gates; instrumentation syncs behind LMBRRR_LOOP_TIMING=1) and 49f301a6/f4f2ccd (chunk-kernel v2: gamma8 verify 17.1 -> 15.7ms). Operating point progressed 87 -> 95 -> 103 -> 115.9 tok/s across the L1/L2/scheduler stack. REMAINING ITEMS MOVED: single round buffer + speculative ctx append + device-resident acceptance belong to single-command-buffer-decode-forward (same encoder-discipline theme); the m=2-9 gemm bandwidth question lives on bf16-activation-quantized-matmul-metal.
+
 ## Expanded scope: the L2 verify-residuals bundle (spec-loop analysis)
 
 The l>=2 chunk verify costs ~15.6 ms vs a 6.9 ms decode token; itemized cuts beyond the repeat_kv fix below: (1) instrumentation-only syncs at main.rs:4722 (post-draft), 4750 (post-verify), and the unconditional rollback sync at 4830 — production round needs exactly 2 readbacks and zero bare syncs; gate timing syncs behind a flag (-1.5-2.5 ms). (2) One committed buffer per round: enqueue verify + lm_head + argmax + capture-cat + SPECULATIVE full-l drafter ctx append (chunk captures are prefix-valid regardless of accepted; truncate the drafter ctx after readback) (-1-1.5 ms host gaps). (3) Device-resident acceptance: eq+cumprod on GPU, one packed [accepted, targets...] readback folding the argmax sync into the verify readback (-0.5-1 ms). (4) Rollback reconstruction is 2.15 ms per occurrence host-composed — drop its sync, consider a small fused select-state kernel. Target: mean verify (incl. width-0 rounds) ~9.3 ms.

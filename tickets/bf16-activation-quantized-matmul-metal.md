@@ -10,6 +10,10 @@ shared_scopes: [docs/research]
 paths: [Cargo.toml, Cargo.lock, src/quantized_linear.rs, docs/research/bf16-qmatmul-metal.md]
 tags: [kernels, quantization, campaign-1000, fork]
 ---
+## Micro-bench observation (2026-07-11, TREAT WITH CAUTION)
+
+quant-matmul-bench lm_head rows scale LINEARLY in m across dense AND all quant tiers (dense: 2.87/5.59/11.19/23.12 ms at m=1/2/4/8) — consistent with per-row weight re-reads — BUT the absolute numbers contradict end-to-end facts (lm_head alone at m=8 "costs" more than the whole 15.7ms verify forward), so the micro-bench conditions (per-iteration sync, cold pool) inflate and the linear pattern may be sync-amplified. Per the measurement protocol, only same-session end-to-end A/Bs decide. Next investigation step when this ticket is picked up: Instruments GPU capture of one verify chunk (the only tool that attributes GPU time truthfully here), THEN kernel work.
+
 ## Progress (2026-07-10 night, fork ec0f74e5)
 
 CORRECTED ATTRIBUTION (post-hoc routing read): fwd_mv is only reached at m==1 (metal.rs:397 routes src dim Minus2==1), so the ne11=m single-dispatch change is currently DEAD CODE via QMatMul - and the mv grid (height=m) re-reads the weight per row regardless, so it saves dispatch overhead only, never bandwidth. The 115.9 tok/s gain re-attributes to the scheduler x gamma4 x q8 operating point (lm_head m<=4 through the mm path; markov steps m=1 mv). REAL remaining scope, one package: (1) BF16-src1 variants for mv AND mm; (2) a genuinely weight-shared small-m quantized matmul (same problem class as the dense skinny-gemm: the tile mm at m=2-8 and the mv grid both waste bandwidth); (3) lift the m routing once (2) exists. gamma8+q8 draft 15.7ms is the mm path measured at m=8.
