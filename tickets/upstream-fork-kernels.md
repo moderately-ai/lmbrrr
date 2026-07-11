@@ -1,7 +1,7 @@
 ---
 id: upstream-fork-kernels
 title: Upstream fork kernels to candle
-status: todo
+status: in-progress
 priority: p3
 dependencies: []
 related: [bf16-activation-quantized-matmul-metal, fuse-deltanet-decode-step-kernel, optimize-deltanet-chunked-prefill-and-verify-throughput, integrate-dspark-block-runner]
@@ -9,6 +9,9 @@ scopes: [candle-fork]
 shared_scopes: [docs/research]
 paths: [docs/research/candle-upstreaming.md]
 tags: [fork, upstream]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783766058
 ---
 ## Goal
 
