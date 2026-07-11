@@ -70,11 +70,20 @@ def main() -> int:
                        "--gamma", str(args.gamma),
                        "--drafter-quantize", "q8-0",
                        "--quantize-lm-head", "q4k",
-                       "--quantized-manifest", str(ROOT / QMAN),
-                       "--cost-model", str(ROOT / COST),
-                       "--output", str(out), *extra]
-                subprocess.run(cmd, capture_output=True, cwd=ROOT, check=False)
-                print(f"rep{rep} {cls} q{qid} {name}: done", flush=True)
+                       "--quantized-manifest", str(ROOT / QMAN)]
+                # Per-arm extras override the default cost model (dspark-run
+                # rejects duplicate flags).
+                if "--cost-model" not in extra:
+                    cmd += ["--cost-model", str(ROOT / COST)]
+                cmd += ["--output", str(out), *extra]
+                proc = subprocess.run(cmd, capture_output=True, cwd=ROOT,
+                                      check=False, text=True)
+                if proc.returncode != 0 or not out.exists():
+                    tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+                    print(f"rep{rep} {cls} q{qid} {name}: FAILED rc="
+                          f"{proc.returncode} :: {tail}", flush=True)
+                else:
+                    print(f"rep{rep} {cls} q{qid} {name}: done", flush=True)
 
     print(f"\n{'class':>15} {'qid':>4} {'arm':>8} {'tok/s':>12} {'tau':>5}")
     for cls, qid in qids:
