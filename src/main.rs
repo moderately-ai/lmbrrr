@@ -743,6 +743,28 @@ struct DsparkRunArgs {
     #[arg(long)]
     pld_ungated: bool,
 
+    /// Verify-logit token recycling: bank top-k candidates from every verify
+    /// pass and, when no prompt-lookup match fires, chain the banked top-1
+    /// through rows whose logit margin clears --recycle-margin. Same gate as
+    /// PLD (fires only where the scheduler skips drafting).
+    #[arg(long)]
+    recycle: bool,
+
+    /// Max recycled chain depth (chained acceptance compounds; keep short).
+    #[arg(long, default_value_t = 2)]
+    recycle_depth: usize,
+
+    /// Minimum banked top-1/top-2 logit margin to extend a recycled chain.
+    /// The viability condition: a depth-1 draft needs ~77% acceptance to
+    /// beat a greedy step on the measured cost model, which only
+    /// near-deterministic (large-margin) continuations clear.
+    #[arg(long, default_value_t = 6.0)]
+    recycle_margin: f32,
+
+    /// Candidates banked per verify row.
+    #[arg(long, default_value_t = 8)]
+    recycle_topk: usize,
+
     /// Smallest n-gram that may trigger a lookup match (2..=4).
     #[arg(long, default_value_t = 3)]
     pld_min_ngram: usize,
@@ -5323,6 +5345,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mut pld_rounds = 0usize;
     let mut pld_proposed_tokens = 0usize;
     let mut pld_accepted_tokens = 0usize;
+    let mut recycle_table = lmbrrr::token_recycle::RecycleTable::new();
+    let mut recycle_rounds = 0usize;
+    let mut recycle_proposed_tokens = 0usize;
+    let mut recycle_accepted_tokens = 0usize;
 
     if !eos_ids.contains(&first_token) {
         while committed.len() < args.max_new_tokens {
@@ -5335,18 +5361,36 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 }
             }
 
-            // Prompt-lookup round: a history match proposes a copied span at
-            // zero draft cost; verification is the same exact-argmax chunk.
-            // Gated by default to rounds where the scheduler has judged
-            // drafting unprofitable (skip-hysteresis engaged) — firing on
-            // every match preempts strong drafter rounds and loses (measured
-            // -9% on math). Ungated is available for ablation.
-            let pld_gate_open = args.pld
+            // Copy-draft round (prompt-lookup, then token recycling): a
+            // zero-draft-cost proposal verified as the same exact-argmax
+            // chunk. Gated by default to rounds where the scheduler has
+            // judged drafting unprofitable (skip-hysteresis engaged) —
+            // firing on every match preempts strong drafter rounds and
+            // loses (measured -13% on math). Ungated is available for
+            // ablation. Lookup outranks recycling: contextual verbatim
+            // copies beat statistical table guesses.
+            let copy_gate_open = (args.pld || args.recycle)
                 && (args.pld_ungated
                     || !args.schedule
                     || consecutive_zero_widths >= SKIP_DRAFT_AFTER);
-            if pld_gate_open {
-                if let Some(pld_draft) = ngram_index.propose(pld_span) {
+            let copy_draft: Option<(Vec<u32>, bool)> = if copy_gate_open {
+                let from_pld = if args.pld {
+                    ngram_index.propose(pld_span)
+                } else {
+                    None
+                };
+                match from_pld {
+                    Some(draft) => Some((draft, false)),
+                    None if args.recycle => recycle_table
+                        .propose(anchor, args.recycle_depth, args.recycle_margin)
+                        .map(|draft| (draft, true)),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            {
+                if let Some((pld_draft, from_recycle)) = copy_draft {
                     let w = pld_draft.len();
                     let snapshot = model.snapshot_decode_state();
                     let mut chunk = Vec::with_capacity(w + 1);
@@ -5364,7 +5408,15 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                         device.synchronize()?;
                     }
                     verify_seconds += secs(verify_start.elapsed());
-                    let (targets, _) = argmax_tokens(&logits, &device)?;
+                    let targets: Vec<u32> = if args.recycle {
+                        let summary = logits_argmax_and_topk(&logits, args.recycle_topk)?;
+                        for (i, (_, candidates)) in summary.iter().enumerate() {
+                            recycle_table.update(chunk[i], candidates);
+                        }
+                        summary.into_iter().map(|(argmax, _)| argmax).collect()
+                    } else {
+                        argmax_tokens(&logits, &device)?.0
+                    };
                     let chunk_captures = model.take_device_captures();
 
                     let accepted = pld_draft
@@ -5409,9 +5461,15 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                     committed.extend_from_slice(&pld_draft[..accepted]);
                     committed.push(bonus);
                     rounds += 1;
-                    pld_rounds += 1;
-                    pld_proposed_tokens += w;
-                    pld_accepted_tokens += accepted;
+                    if from_recycle {
+                        recycle_rounds += 1;
+                        recycle_proposed_tokens += w;
+                        recycle_accepted_tokens += accepted;
+                    } else {
+                        pld_rounds += 1;
+                        pld_proposed_tokens += w;
+                        pld_accepted_tokens += accepted;
+                    }
                     anchor = bonus;
 
                     if committed[committed.len() - (accepted + 1)..]
@@ -5624,7 +5682,17 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 device.synchronize()?;
             }
             verify_seconds += secs(verify_start.elapsed());
-            let (targets, _) = argmax_tokens(&logits, &device)?;
+            let targets: Vec<u32> = if args.recycle {
+                // Harvest candidates from every drafter-round verify too —
+                // the table warms from all round types.
+                let summary = logits_argmax_and_topk(&logits, args.recycle_topk)?;
+                for (i, (_, candidates)) in summary.iter().enumerate() {
+                    recycle_table.update(chunk[i], candidates);
+                }
+                summary.into_iter().map(|(argmax, _)| argmax).collect()
+            } else {
+                argmax_tokens(&logits, &device)?.0
+            };
             let chunk_captures = model.take_device_captures();
 
             let accepted = match args.accept_margin {
@@ -5749,7 +5817,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mean_tau = if rounds == 0 {
         0.0
     } else {
-        (drafter_committed + pld_accepted_tokens + pld_rounds) as f64 / rounds as f64
+        (drafter_committed
+            + pld_accepted_tokens
+            + pld_rounds
+            + recycle_accepted_tokens
+            + recycle_rounds) as f64
+            / rounds as f64
     };
     let advisory_prefix = baseline
         .generated_token_ids
@@ -5797,6 +5870,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "pld_rounds": pld_rounds,
         "pld_proposed_tokens": pld_proposed_tokens,
         "pld_accepted_tokens": pld_accepted_tokens,
+        "recycle": args.recycle,
+        "recycle_rounds": recycle_rounds,
+        "recycle_proposed_tokens": recycle_proposed_tokens,
+        "recycle_accepted_tokens": recycle_accepted_tokens,
+        "recycle_table_rows": recycle_table.len(),
+        "recycle_table_updates": recycle_table.updates(),
         "confidence_records": confidence_records.iter()
             .map(|round| round.iter()
                 .map(|(pos, logit, p, acc)| serde_json::json!([pos, logit, p, acc]))
@@ -7145,6 +7224,96 @@ fn trace_capture_layers(requested: &[usize], num_layers: usize) -> Result<Vec<us
     Ok(layers)
 }
 
+/// Exact per-row argmax plus top-k (id, logit) candidates from [1, l, V]
+/// logits via two-stage chunk reduction, for verify-logit token recycling.
+///
+/// Stage 1 reduces each row to per-chunk maxima (chunks of 256) on device —
+/// a tiny readback instead of the full vocab row. Stage 2 gathers only the
+/// rows' top-k chunks (one batched index_select, one readback) and finishes
+/// exactly on host. Exactness: the k-th largest global value is exceeded by
+/// at most k−1 others, so at most k chunks can have a maximum ≥ it — the
+/// top-k chunk-maxima chunks provably contain the true top-k values.
+/// Tie semantics match candle argmax (lowest index wins at both stages).
+const RECYCLE_CHUNK: usize = 256;
+
+fn logits_argmax_and_topk(
+    logits: &Tensor,
+    k: usize,
+) -> Result<Vec<(u32, Vec<(u32, f32)>)>> {
+    let (_, l, vocab) = logits.dims3()?;
+    let chunks = vocab.div_ceil(RECYCLE_CHUNK);
+    let padded = chunks * RECYCLE_CHUNK;
+    let logits_f32 = logits.to_dtype(DType::F32)?;
+    let padded_logits = if padded == vocab {
+        logits_f32
+    } else {
+        let pad = Tensor::full(
+            f32::NEG_INFINITY,
+            (1, l, padded - vocab),
+            logits.device(),
+        )?;
+        Tensor::cat(&[&logits_f32, &pad], D::Minus1)?
+    };
+    let rows = padded_logits.reshape((l, chunks, RECYCLE_CHUNK))?;
+    let chunk_maxima = rows.max(D::Minus1)?.to_device(&Device::Cpu)?.to_vec2::<f32>()?;
+
+    // Per row, pick the top-k chunks by maxima (lowest chunk index wins ties
+    // to preserve argmax tie semantics).
+    let take = k.min(chunks);
+    let mut selected = Vec::with_capacity(l * take);
+    let mut selected_per_row = Vec::with_capacity(l);
+    for (row, maxima) in chunk_maxima.iter().enumerate() {
+        let mut order: Vec<usize> = (0..chunks).collect();
+        order.sort_by(|&a, &b| {
+            maxima[b]
+                .partial_cmp(&maxima[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+        let row_chunks: Vec<usize> = order[..take].to_vec();
+        for &chunk in &row_chunks {
+            selected.push((row * chunks + chunk) as u32);
+        }
+        selected_per_row.push(row_chunks);
+    }
+
+    // One batched gather of every selected chunk, one readback.
+    let flat = rows.reshape((l * chunks, RECYCLE_CHUNK))?;
+    let idx = Tensor::from_slice(&selected, selected.len(), logits.device())?;
+    let gathered = flat
+        .index_select(&idx, 0)?
+        .to_device(&Device::Cpu)?
+        .to_vec2::<f32>()?;
+
+    let mut out = Vec::with_capacity(l);
+    for (row, row_chunks) in selected_per_row.iter().enumerate() {
+        // Exact top-k over the union of the selected chunks' values.
+        let mut candidates: Vec<(u32, f32)> = Vec::with_capacity(take * RECYCLE_CHUNK);
+        for (slot, &chunk) in row_chunks.iter().enumerate() {
+            let values = &gathered[row * take + slot];
+            let base = chunk * RECYCLE_CHUNK;
+            for (offset, &value) in values.iter().enumerate() {
+                let id = base + offset;
+                if id < vocab {
+                    candidates.push((id as u32, value));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        candidates.truncate(k);
+        let argmax = candidates
+            .first()
+            .map(|(id, _)| *id)
+            .context("logits row produced no candidates")?;
+        out.push((argmax, candidates));
+    }
+    Ok(out)
+}
+
 // No leading synchronize in either helper: to_scalar/to_vec1 already wait
 // for the GPU, and a second wait per token costs a commit/fence cycle plus a
 // buffer-pool purge. The returned Duration therefore covers any outstanding
@@ -7273,6 +7442,46 @@ fn select_device(cpu: bool) -> Result<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two-stage top-k must agree exactly with candle argmax and a naive
+    /// full-row top-k, including lowest-index tie semantics, across padded /
+    /// unpadded vocab sizes and duplicate values.
+    #[test]
+    fn chunked_topk_matches_naive_exactly() {
+        let device = Device::Cpu;
+        // Deterministic pseudo-random values; includes exact duplicates.
+        for (l, vocab) in [(1usize, 1000usize), (3, 4096), (2, 248094 / 64)] {
+            let values: Vec<f32> = (0..l * vocab)
+                .map(|i| (((i * 2654435761) % 1013) as f32) / 7.0)
+                .collect();
+            let logits = Tensor::from_slice(&values, (1, l, vocab), &device).unwrap();
+            let got = logits_argmax_and_topk(&logits, 8).unwrap();
+
+            let reference_argmax = logits
+                .squeeze(0)
+                .unwrap()
+                .argmax(D::Minus1)
+                .unwrap()
+                .to_vec1::<u32>()
+                .unwrap();
+            for row in 0..l {
+                assert_eq!(got[row].0, reference_argmax[row], "argmax row {row}");
+                // Naive exact top-8 with the same tie rule.
+                let mut naive: Vec<(u32, f32)> = values[row * vocab..(row + 1) * vocab]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| (i as u32, v))
+                    .collect();
+                naive.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap()
+                        .then(a.0.cmp(&b.0))
+                });
+                naive.truncate(8);
+                assert_eq!(got[row].1, naive, "top-8 row {row}");
+            }
+        }
+    }
 
     /// Paper Appendix A non-anticipation scenario: a1 = 0.8 with SPS
     /// throughputs {1.0, 0.5, 0.45}. f(0) = 1*1.0 = 1.0; f(1) = 1.8*0.5 =
