@@ -10,6 +10,10 @@ shared_scopes: [docs/research]
 paths: [src/main.rs, evals/dspark/**, docs/research/dspark-hardware-aware-prefix-scheduler.md]
 tags: [speculative, dspark, scheduler]
 ---
+## Addendum (2026-07-11, commit 184cfa3)
+
+Greedy-fallback hysteresis added (skip drafts after 3 consecutive width-0 rounds, probe every 8th): the scheduler now degrades gracefully to ~baseline wherever speculation is structurally unprofitable. Under the quantized target with the truthful quantized cost artifact (spec-round-cost-model-q4kfull.json: chunk l=2 = 15.7ms vs decode 5.0 - quantized small-m mm penalty), the scheduler proves width-0 optimal per-round and the config lands at 154.5 tok/s (0.81x of 190) instead of the degenerate 100. BF16 spec config: 119.1 (0.81x). --schedule is now safe-on for any configuration.
+
 ## Outcome (2026-07-10 night, commit 5c0339b)
 
 Landed as dspark-run --schedule: expected-throughput prefix admission from calibrated cumulative survival x the measured post-fusion cost table (RoundCostModel::measured_default from target/vt-gdc2.json). Non-anticipation invariant unit-tested on the Appendix A scenario (a1=0.8, SPS={1.0,0.5,0.45} -> width 0, exactly one confidence read). Beat the incumbent threshold truncation: math 95.3 -> 103.2 tok/s (0.71x), tides 71.7 -> 81.0 (0.55x). Remaining (minor): externalize the cost table to the remeasure artifact when it lands; multi-request batch mode deferred to the batched-runner lane.
