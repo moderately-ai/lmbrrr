@@ -79,6 +79,38 @@ enum Command {
     DsparkRun(DsparkRunArgs),
     DsparkDrafterParity(DsparkDrafterParityArgs),
     MultiBench(MultiBenchArgs),
+    TreeCheck(TreeCheckArgs),
+}
+
+/// Tree-vs-chain equivalence gate for two-branch tree verification: the
+/// flattened tree forward's main-branch rows must match a plain chain verify
+/// (same kernel, same state), the alternate rows must match a chain
+/// re-advance of the alternate tokens within the rollback noise envelope,
+/// and both rollback paths must land on states indistinguishable from a
+/// chain-built state.
+#[derive(Parser, Debug)]
+struct TreeCheckArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    #[arg(long, default_value = "Explain how tides work.")]
+    prompt: String,
+
+    #[arg(long, default_value_t = 3)]
+    branch_width: usize,
+
+    #[arg(long, default_value_t = 4)]
+    rounds: usize,
+
+    /// Max |Δlogit| for main-branch rows (identical dispatch expected).
+    #[arg(long, default_value_t = 0.02)]
+    main_eps: f32,
+
+    /// Max |Δlogit| for alternate rows and post-rollback probes (closed-form
+    /// branch seeding vs chain re-advance; same envelope as partial-accept
+    /// rollback).
+    #[arg(long, default_value_t = 0.75)]
+    alt_eps: f32,
 }
 
 /// Static-batched multi-stream greedy decode: N copies of the prompt run as
@@ -1294,7 +1326,188 @@ fn main() -> Result<()> {
         Command::DsparkRun(args) => dspark_run(args),
         Command::DsparkDrafterParity(args) => dspark_drafter_parity(args),
         Command::MultiBench(args) => multi_bench(args),
+        Command::TreeCheck(args) => tree_check(args),
     }
+}
+
+/// See [`TreeCheckArgs`]. Per round, with the pre-round state snapshotted:
+/// the main branch is the greedy continuation, the alternate is the
+/// runner-up token at the anchor followed by its greedy continuation. Chain
+/// references are built by restoring the snapshot and running plain chunk
+/// forwards over the same tokens.
+fn tree_check(args: TreeCheckArgs) -> Result<()> {
+    let w = args.branch_width;
+    if w == 0 || w > 5 {
+        anyhow::bail!("--branch-width must be in 1..=5 (flattened chunk must fit the l <= 12 kernel)");
+    }
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let (mut model, _, _) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
+    )?;
+
+    let prompt_text = chat_prompt(&args.prompt, 0, false);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let prompt_input = Tensor::from_slice(&prompt_tokens, (1, prompt_tokens.len()), &device)?;
+    let prefill_logits = model.forward(
+        &prompt_input,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        0,
+    )?;
+    let top2 = |logits: &Tensor| -> Result<(u32, u32)> {
+        let v = logits.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let mut best = (0usize, f32::NEG_INFINITY);
+        let mut second = (0usize, f32::NEG_INFINITY);
+        for (i, &x) in v.iter().enumerate() {
+            if x > best.1 {
+                second = best;
+                best = (i, x);
+            } else if x > second.1 {
+                second = (i, x);
+            }
+        }
+        Ok((best.0 as u32, second.0 as u32))
+    };
+    let max_abs_delta = |a: &Tensor, b: &Tensor| -> Result<f32> {
+        let d = (a.to_dtype(DType::F32)? - b.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        Ok(d)
+    };
+    let forward_chain = |model: &mut MiniCpmForConditionalGeneration,
+                         tokens: &[u32],
+                         offset: usize|
+     -> Result<Tensor> {
+        let input = Tensor::from_slice(tokens, (1, tokens.len()), &device)?;
+        Ok(model.forward_all_logits(
+            &input,
+            None::<&ProcessedImages>,
+            &args.model.downsample_mode,
+            offset,
+        )?)
+    };
+
+    let (mut anchor, _) = top2(&prefill_logits)?;
+    let mut offset = prompt_tokens.len();
+    let mut worst_main = 0f32;
+    let mut worst_alt = 0f32;
+    let mut worst_rollback = 0f32;
+    let probe_token = prompt_tokens[prompt_tokens.len() / 2];
+
+    for round in 0..args.rounds {
+        let snapshot = model.snapshot_decode_state();
+
+        // Greedy main branch a_1..a_w and the runner-up alternate root b_1.
+        let mut a_tokens = Vec::with_capacity(w);
+        let mut b_tokens = Vec::with_capacity(w);
+        let mut cur = anchor;
+        let mut b_root = 0u32;
+        for i in 0..w {
+            let logits = forward_chain(&mut model, &[cur], offset + i)?
+                .narrow(1, 0, 1)?
+                .squeeze(1)?;
+            let (best, second) = top2(&logits)?;
+            if i == 0 {
+                b_root = second;
+            }
+            a_tokens.push(best);
+            cur = best;
+        }
+        // Alternate branch: runner-up root, then that path's own greedy
+        // continuation (built as a chain from the snapshot).
+        model.restore_decode_state(&snapshot)?;
+        b_tokens.push(b_root);
+        let mut cur = b_root;
+        let _ = forward_chain(&mut model, &[anchor], offset)?;
+        for i in 1..w {
+            let logits = forward_chain(&mut model, &[cur], offset + i)?
+                .narrow(1, 0, 1)?
+                .squeeze(1)?;
+            let (best, _) = top2(&logits)?;
+            b_tokens.push(best);
+            cur = best;
+        }
+
+        // Chain references over the exact tree tokens.
+        model.restore_decode_state(&snapshot)?;
+        let mut chain_a = vec![anchor];
+        chain_a.extend(&a_tokens);
+        let ref_a = forward_chain(&mut model, &chain_a, offset)?;
+        model.restore_decode_state(&snapshot)?;
+        let mut chain_b = vec![anchor];
+        chain_b.extend(&b_tokens);
+        let ref_b = forward_chain(&mut model, &chain_b, offset)?;
+
+        // Tree forward on the flattened layout.
+        model.restore_decode_state(&snapshot)?;
+        let mut flat = vec![anchor];
+        flat.extend(&a_tokens);
+        flat.extend(&b_tokens);
+        let flat_input = Tensor::from_slice(&flat, (1, flat.len()), &device)?;
+        let tree_logits = model.forward_tree_all_logits(&flat_input, offset, w)?;
+
+        let d_main = max_abs_delta(
+            &tree_logits.narrow(1, 0, w + 1)?,
+            &ref_a.narrow(1, 0, w + 1)?,
+        )?;
+        let d_alt = max_abs_delta(
+            &tree_logits.narrow(1, w + 1, w)?,
+            &ref_b.narrow(1, 1, w)?,
+        )?;
+        worst_main = worst_main.max(d_main);
+        worst_alt = worst_alt.max(d_alt);
+
+        // Rollback probes: install each winner path and compare a probe
+        // token's logits against the same state built as a plain chain.
+        let p = w.div_ceil(2);
+        for on_alt in [false, true] {
+            model.restore_decode_state(&snapshot)?;
+            let _ = model.forward_tree_all_logits(&flat_input, offset, w)?;
+            model.rollback_tree(&snapshot, w, on_alt, p)?;
+            let probe =
+                forward_chain(&mut model, &[probe_token], offset + 1 + p)?;
+            model.restore_decode_state(&snapshot)?;
+            let mut chain = vec![anchor];
+            chain.extend(if on_alt { &b_tokens } else { &a_tokens }[..p].iter().copied());
+            let _ = forward_chain(&mut model, &chain, offset)?;
+            let ref_probe =
+                forward_chain(&mut model, &[probe_token], offset + 1 + p)?;
+            let d = max_abs_delta(&probe, &ref_probe)?;
+            worst_rollback = worst_rollback.max(d);
+            println!(
+                "round {round} rollback on_alt={on_alt} p={p}: max |Δlogit| {d:.4}"
+            );
+        }
+        println!(
+            "round {round}: main rows max |Δ| {d_main:.5}, alt rows max |Δ| {d_alt:.4} (tokens a={a_tokens:?} b={b_tokens:?})"
+        );
+
+        // Advance: commit the main chain and continue from its last logits.
+        model.restore_decode_state(&snapshot)?;
+        let ref_a = forward_chain(&mut model, &chain_a, offset)?;
+        let last = ref_a.narrow(1, w, 1)?.squeeze(1)?;
+        let (next, _) = top2(&last)?;
+        offset += w + 1;
+        anchor = next;
+    }
+
+    println!(
+        "tree-check: worst main {worst_main:.5} (eps {}), worst alt {worst_alt:.4} (eps {}), worst rollback {worst_rollback:.4} (eps {})",
+        args.main_eps, args.alt_eps, args.alt_eps
+    );
+    if worst_main > args.main_eps || worst_alt > args.alt_eps || worst_rollback > args.alt_eps {
+        anyhow::bail!("tree-check FAILED");
+    }
+    println!("tree-check PASSED");
+    Ok(())
 }
 
 fn dspark_drafter_parity(args: DsparkDrafterParityArgs) -> Result<()> {

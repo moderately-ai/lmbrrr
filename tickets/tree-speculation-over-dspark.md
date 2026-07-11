@@ -1,7 +1,7 @@
 ---
 id: tree-speculation-over-dspark
 title: Tree speculation over DSpark
-status: todo
+status: in-progress
 priority: p1
 dependencies: [integrate-dspark-block-runner]
 related: [remeasure-spec-round-cost-model]
@@ -9,6 +9,9 @@ scopes: [inference/speculative, runtime/candle, evals]
 shared_scopes: [docs/research]
 paths: [src/main.rs, src/qwen35.rs, evals/dspark/**, docs/research/tree-speculation-dspark.md]
 tags: [speculative, dspark, campaign-1000]
+claimed_from: todo
+assignee: claude
+lease_expires_at: 1783761082
 ---
 ## Board revision (2026-07-10 evening)
 

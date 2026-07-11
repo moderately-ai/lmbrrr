@@ -247,13 +247,38 @@ impl RotaryEmbedding {
     }
 
     fn apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
-        let (_, _, seq_len, head_dim) = q.dims4()?;
+        let (_, _, seq_len, _) = q.dims4()?;
         let cos = self.cos.narrow(0, offset, seq_len)?;
         let sin = self.sin.narrow(0, offset, seq_len)?;
+        self.apply_tables(q, k, &cos, &sin)
+    }
+
+    /// Rotary application at explicit per-token positions (tree verification:
+    /// sibling branch segments share the positions of the main branch).
+    fn apply_with_positions(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        positions: &[u32],
+    ) -> Result<(Tensor, Tensor)> {
+        let idx = Tensor::from_slice(positions, positions.len(), q.device())?;
+        let cos = self.cos.index_select(&idx, 0)?;
+        let sin = self.sin.index_select(&idx, 0)?;
+        self.apply_tables(q, k, &cos, &sin)
+    }
+
+    fn apply_tables(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let (_, _, _, head_dim) = q.dims4()?;
         let q_rot = q.narrow(D::Minus1, 0, self.rotary_dim)?;
         let k_rot = k.narrow(D::Minus1, 0, self.rotary_dim)?;
-        let q_rot = candle_nn::rotary_emb::rope(&q_rot.contiguous()?, &cos, &sin)?;
-        let k_rot = candle_nn::rotary_emb::rope(&k_rot.contiguous()?, &cos, &sin)?;
+        let q_rot = candle_nn::rotary_emb::rope(&q_rot.contiguous()?, cos, sin)?;
+        let k_rot = candle_nn::rotary_emb::rope(&k_rot.contiguous()?, cos, sin)?;
         if self.rotary_dim == head_dim {
             Ok((q_rot, k_rot))
         } else {
@@ -327,6 +352,35 @@ impl TruncatableKvCache {
         Ok(())
     }
 
+    /// Winner-path compaction after tree verification: moves `count` rows
+    /// starting at `src` down to `dst` (dst < src) and truncates to
+    /// `dst + count`. Used when the alternate branch wins — its rows sit
+    /// after the main branch's in the flattened chunk and must become the
+    /// sequence suffix.
+    pub fn compact_rows(&mut self, dst: usize, src: usize, count: usize) -> Result<()> {
+        if dst >= src {
+            candle::bail!("compact_rows requires dst < src (got {dst} >= {src})");
+        }
+        if src + count > self.len {
+            candle::bail!(
+                "compact_rows source range {src}+{count} exceeds cache length {}",
+                self.len
+            );
+        }
+        if count > 0 {
+            let (k, v) = match (&self.k, &self.v) {
+                (Some(k), Some(v)) => (k, v),
+                _ => candle::bail!("compact_rows on an empty KV cache"),
+            };
+            let k_rows = k.narrow(2, src, count)?.contiguous()?;
+            let v_rows = v.narrow(2, src, count)?.contiguous()?;
+            k.slice_set(&k_rows, 2, dst)?;
+            v.slice_set(&v_rows, 2, dst)?;
+        }
+        self.len = dst + count;
+        Ok(())
+    }
+
     pub fn append(&mut self, k: &Tensor, v: &Tensor) -> Result<(Tensor, Tensor)> {
         let added = k.dim(2)?;
         let needed = self.len + added;
@@ -352,6 +406,20 @@ impl TruncatableKvCache {
 pub struct DecodeStateSnapshot {
     deltanet: Vec<(Option<Tensor>, Option<Tensor>)>,
     kv_lens: Vec<usize>,
+}
+
+/// Per-forward context for two-branch tree verification. The flattened chunk
+/// layout is [anchor, a_1..a_w, b_1..b_w]: both branch segments continue from
+/// the anchor, so b_i shares a_i's absolute position and each row's attention
+/// is limited to history + its own ancestors (the `mask`, built by the model).
+#[derive(Clone, Debug)]
+pub struct TreeForward {
+    /// Tokens per branch (w >= 1); flattened chunk length is 1 + 2w.
+    pub branch_width: usize,
+    /// Absolute rotary position per flattened-chunk token, length 1 + 2w.
+    pub positions: Vec<u32>,
+    /// Ancestor attention mask, (1, 1, 1 + 2w, offset + 1 + 2w), model dtype.
+    pub mask: Tensor,
 }
 
 #[derive(Clone, Debug)]
@@ -486,6 +554,16 @@ impl FullAttention {
             .truncate(len)
     }
 
+    /// Alternate-branch winner after a tree verify: its `accepted` rows sit
+    /// at [history + 1 + w ..) in the flattened append order and become the
+    /// sequence suffix right after the anchor.
+    fn compact_tree_kv(&self, history: usize, branch_width: usize, accepted: usize) -> Result<()> {
+        self.kv_cache
+            .lock()
+            .expect("full-attention KV cache lock poisoned")
+            .compact_rows(history + 1, history + 1 + branch_width, accepted)
+    }
+
     fn forward(
         &self,
         xs: &Tensor,
@@ -493,6 +571,7 @@ impl FullAttention {
         offset: usize,
         layer_index: usize,
         profiler: Option<&Qwen35Profiler>,
+        rope_positions: Option<&[u32]>,
     ) -> Result<Tensor> {
         let (b, l, _) = xs.dims3()?;
         let device = xs.device().clone();
@@ -566,7 +645,10 @@ impl FullAttention {
             l,
             offset,
             || {
-                (q, k) = self.rotary.apply(&q, &k, offset)?;
+                (q, k) = match rope_positions {
+                    Some(positions) => self.rotary.apply_with_positions(&q, &k, positions)?,
+                    None => self.rotary.apply(&q, &k, offset)?,
+                };
                 let (k, v) = self
                     .kv_cache
                     .lock()
@@ -727,6 +809,9 @@ struct GatedDeltaNet {
     // chunks; single-chunk forwards retain reconstruction intermediates.
     verify_capture: bool,
     verify_captured: Option<DeltaVerifyCapture>,
+    // Per-segment captures of the last tree verify forward: (main segment
+    // [anchor, a_1..a_w], alternate segment [b_1..b_w]).
+    tree_captured: Option<(DeltaVerifyCapture, DeltaVerifyCapture)>,
     // Conv input window staged by depthwise_causal_conv (which runs before
     // the recurrent rule in the layer forward) for capture assembly.
     pending_conv_window: Option<(Tensor, usize)>,
@@ -802,6 +887,7 @@ impl GatedDeltaNet {
             recurrent_state: None,
             verify_capture: false,
             verify_captured: None,
+            tree_captured: None,
             pending_conv_window: None,
             conv_kernel_size: cfg.linear_conv_kernel_dim,
             num_k_heads: cfg.linear_num_key_heads,
@@ -818,22 +904,24 @@ impl GatedDeltaNet {
         self.conv_state = None;
         self.recurrent_state = None;
         self.verify_captured = None;
+        self.tree_captured = None;
         self.pending_conv_window = None;
     }
 
-    /// Reconstructs and installs the recurrent + conv state as of the first
-    /// `prefix_len` positions of the last captured verify chunk, replacing a
-    /// restore + re-advance forward on partial accept.
-    fn select_verify_state(&mut self, prefix_len: usize) -> Result<()> {
-        let Some(cap) = self.verify_captured.take() else {
-            candle::bail!("select_verify_state without a captured verify chunk");
-        };
+    /// Closed-form recurrent + conv state as of the first `prefix_len`
+    /// positions of a captured chunk:
+    /// S_j = exp(G_j)·S0 + Σ_{i≤j} exp(G_j−G_i)·k_i ⊗ δ_i.
+    /// Returns (recurrent in capture dtype, conv window).
+    fn reconstruct_capture_state(
+        cap: &DeltaVerifyCapture,
+        prefix_len: usize,
+        ksz: usize,
+    ) -> Result<(Tensor, Tensor)> {
         let chunk_len = cap.gcs.dim(2)?;
         if prefix_len == 0 || prefix_len > chunk_len {
             candle::bail!("verify-state prefix {prefix_len} outside 1..={chunk_len}");
         }
         let j = prefix_len - 1;
-        // S_j = exp(G_j)·S0 + Σ_{i≤j} exp(G_j−G_i)·k_i ⊗ δ_i
         let gcs_j = cap.gcs.narrow(2, j, 1)?; // (b, h, 1)
         let rel = gcs_j
             .broadcast_sub(&cap.gcs.narrow(2, 0, prefix_len)?)?
@@ -851,18 +939,47 @@ impl GatedDeltaNet {
                 .broadcast_mul(&gcs_j.exp()?.unsqueeze(3)?)?)?;
         // Match the dtype the chunked store (and thus a re-advance) would
         // have produced at this boundary.
-        self.recurrent_state = Some(state.to_dtype(cap.dtype)?);
+        let recurrent = state.to_dtype(cap.dtype)?;
 
         let window_len = cap.prev_conv_len + prefix_len;
-        let ksz = self.conv_kernel_size;
-        self.conv_state = Some(if window_len >= ksz {
+        let conv = if window_len >= ksz {
             cap.conv_full.narrow(2, window_len - ksz, ksz)?.copy()?
         } else {
             cap.conv_full
                 .narrow(2, 0, window_len)?
                 .pad_with_zeros(2, ksz - window_len, 0)?
                 .copy()?
-        });
+        };
+        Ok((recurrent, conv))
+    }
+
+    /// Reconstructs and installs the recurrent + conv state as of the first
+    /// `prefix_len` positions of the last captured verify chunk, replacing a
+    /// restore + re-advance forward on partial accept.
+    fn select_verify_state(&mut self, prefix_len: usize) -> Result<()> {
+        let Some(cap) = self.verify_captured.take() else {
+            candle::bail!("select_verify_state without a captured verify chunk");
+        };
+        let (recurrent, conv) =
+            Self::reconstruct_capture_state(&cap, prefix_len, self.conv_kernel_size)?;
+        self.recurrent_state = Some(recurrent);
+        self.conv_state = Some(conv);
+        Ok(())
+    }
+
+    /// Installs the winner-path state after a tree verify: the main segment's
+    /// capture covers [anchor, a_1..a_w] (select `1 + accepted`), the
+    /// alternate's covers [b_1..b_w] continuing from the anchor state (select
+    /// `accepted`).
+    fn select_tree_state(&mut self, on_alt: bool, prefix_in_segment: usize) -> Result<()> {
+        let Some((cap_main, cap_alt)) = self.tree_captured.take() else {
+            candle::bail!("select_tree_state without a captured tree forward");
+        };
+        let cap = if on_alt { cap_alt } else { cap_main };
+        let (recurrent, conv) =
+            Self::reconstruct_capture_state(&cap, prefix_in_segment, self.conv_kernel_size)?;
+        self.recurrent_state = Some(recurrent);
+        self.conv_state = Some(conv);
         Ok(())
     }
 
@@ -1053,6 +1170,111 @@ impl GatedDeltaNet {
         }
         self.conv_state = Some(conv_new);
         self.recurrent_state = Some(state_new);
+        self.out_proj.forward(&out)
+    }
+
+    /// Two-branch tree verify: segment decomposition over the flattened
+    /// [anchor, a_1..a_w, b_1..b_w] layout. Projections/MLP shapes upstream
+    /// ran once over the whole flattened chunk; here the chunk kernel runs
+    /// per root-to-leaf segment, with the alternate segment seeded from the
+    /// closed-form branch-point (post-anchor) state of the main segment's
+    /// capture — no weight re-reads, two kernel dispatches per layer.
+    #[cfg(feature = "metal")]
+    fn forward_tree(&mut self, xs: &Tensor, branch_width: usize) -> Result<Tensor> {
+        let w = branch_width;
+        let seg1 = w + 1;
+        let l = 1 + 2 * w;
+        if xs.dim(1)? != l {
+            candle::bail!("tree forward expects {} tokens, got {}", l, xs.dim(1)?);
+        }
+        if !self.fused_chunk_eligible(xs, xs.dim(0)?, seg1) {
+            candle::bail!("tree forward requires the fused chunk path (metal, BF16, w+1 <= 12)");
+        }
+        let qkv = self.in_proj_qkv.forward(xs)?;
+        let z = self.in_proj_z.forward(xs)?;
+        let b_in = self.in_proj_b.forward(xs)?;
+        let a_in = self.in_proj_a.forward(xs)?;
+        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
+        let conv_state = self
+            .conv_state
+            .as_ref()
+            .expect("tree forward requires a populated conv state")
+            .clone();
+        let s0 = match &self.recurrent_state {
+            Some(state) if state.dtype() == DType::F32 => state.clone(),
+            Some(state) => state.to_dtype(DType::F32)?,
+            None => Tensor::zeros(
+                (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                DType::F32,
+                xs.device(),
+            )?,
+        };
+        let dims = crate::fused_deltanet::GatedDeltaDims {
+            heads: self.num_v_heads,
+            dk: self.head_k_dim,
+            dv: self.head_v_dim,
+            conv_dim: self.conv_dim,
+            key_dim: self.key_dim,
+            value_dim: self.value_dim,
+            ksz: self.conv_kernel_size,
+        };
+        let run_segment = |proj_seg: &Tensor,
+                           seg_len: usize,
+                           conv: &Tensor,
+                           state: &Tensor|
+         -> Result<(Tensor, Tensor, Tensor, DeltaVerifyCapture)> {
+            let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_chunk(
+                &proj_seg.flatten_to(1)?.contiguous()?,
+                seg_len,
+                conv,
+                &state.contiguous()?,
+                &self.conv_weight_full,
+                &self.dt_bias_f32.flatten_all()?,
+                &self.a_log_exp_f32.flatten_all()?,
+                &self.norm.weight_f32,
+                &dims,
+                1e-6,
+                self.norm.eps as f32,
+            )
+            .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
+            let mixed_t = proj_seg
+                .narrow(D::Minus1, 0, self.conv_dim)?
+                .transpose(1, 2)?
+                .contiguous()?;
+            let conv_full = Tensor::cat(&[conv, &mixed_t], 2)?;
+            let capture = DeltaVerifyCapture {
+                s0: state.clone(),
+                kc: cap.kc,
+                delta: cap.delta,
+                gcs: cap.gcs,
+                conv_full,
+                prev_conv_len: conv.dim(2)?,
+                dtype: xs.dtype(),
+            };
+            Ok((out, conv_new, state_new, capture))
+        };
+        let proj_main = proj.narrow(1, 0, seg1)?;
+        let proj_alt = proj.narrow(1, seg1, w)?;
+        let (out_main, conv_main, state_main, cap_main) =
+            run_segment(&proj_main, seg1, &conv_state, &s0)?;
+        // Branch-point (post-anchor) state from the main segment's own
+        // capture — the same closed form the partial-accept rollback uses.
+        let (branch_rec, branch_conv) =
+            Self::reconstruct_capture_state(&cap_main, 1, self.conv_kernel_size)?;
+        let branch_rec_f32 = if branch_rec.dtype() == DType::F32 {
+            branch_rec
+        } else {
+            branch_rec.to_dtype(DType::F32)?
+        };
+        let (out_alt, _conv_alt, _state_alt, cap_alt) =
+            run_segment(&proj_alt, w, &branch_conv, &branch_rec_f32)?;
+        self.tree_captured = Some((cap_main, cap_alt));
+        self.verify_captured = None;
+        // Leave the live state at the main segment's end; the runner always
+        // installs the winner via select_tree_state before the next forward.
+        self.conv_state = Some(conv_main);
+        self.recurrent_state = Some(state_main);
+        let out = Tensor::cat(&[&out_main, &out_alt], 1)?;
         self.out_proj.forward(&out)
     }
 
@@ -1601,6 +1823,7 @@ impl DecoderLayer {
         offset: usize,
         layer_index: usize,
         profiler: Option<&Qwen35Profiler>,
+        tree: Option<&TreeForward>,
     ) -> Result<Tensor> {
         let (_, seq_len, _) = xs.dims3()?;
         let device = xs.device().clone();
@@ -1616,9 +1839,26 @@ impl DecoderLayer {
             offset,
             || self.input_layernorm.forward(xs),
         )?;
-        let hidden = match &mut self.mixer {
-            TokenMixer::Full(attn) => attn.forward(&hidden, mask, offset, layer_index, profiler)?,
-            TokenMixer::Linear(attn) => attn.forward(&hidden, layer_index, offset, profiler)?,
+        let hidden = match (&mut self.mixer, tree) {
+            (TokenMixer::Full(attn), _) => attn.forward(
+                &hidden,
+                mask,
+                offset,
+                layer_index,
+                profiler,
+                tree.map(|t| t.positions.as_slice()),
+            )?,
+            (TokenMixer::Linear(attn), None) => {
+                attn.forward(&hidden, layer_index, offset, profiler)?
+            }
+            #[cfg(feature = "metal")]
+            (TokenMixer::Linear(attn), Some(tree)) => {
+                attn.forward_tree(&hidden, tree.branch_width)?
+            }
+            #[cfg(not(feature = "metal"))]
+            (TokenMixer::Linear(_), Some(_)) => {
+                candle::bail!("tree verification requires the metal feature")
+            }
         };
         let xs = (residual + hidden)?;
         let residual = &xs;
@@ -1785,6 +2025,7 @@ impl Qwen35TextModel {
                 offset,
                 layer_index,
                 profiler.as_ref(),
+                None,
             )?;
             if let Some(trace_recorder) = trace_recorder.as_ref() {
                 trace_recorder.record_layer(layer_index, layer_kind, &hidden, offset)?;
@@ -1808,6 +2049,119 @@ impl Qwen35TextModel {
             offset,
             || self.norm.forward(&hidden),
         )
+    }
+
+    /// Two-branch tree verify forward over the flattened
+    /// [anchor, a_1..a_w, b_1..b_w] layout (both branches continue from the
+    /// anchor; siblings share rotary positions). Returns final-norm hidden
+    /// states for all 1 + 2w rows. Commit the winner with
+    /// [`Self::rollback_tree`] before the next forward.
+    pub fn forward_tree_embeds(
+        &mut self,
+        inputs_embeds: &Tensor,
+        offset: usize,
+        branch_width: usize,
+    ) -> Result<Tensor> {
+        let w = branch_width;
+        let (b, l, _) = inputs_embeds.dims3()?;
+        if w == 0 || l != 1 + 2 * w || b != 1 {
+            candle::bail!(
+                "tree forward expects [1, 1 + 2w, hidden] with w >= 1; got b={b} l={l} w={w}"
+            );
+        }
+        let mut positions = Vec::with_capacity(l);
+        positions.push(offset as u32);
+        for i in 1..=w {
+            positions.push((offset + i) as u32);
+        }
+        for i in 1..=w {
+            positions.push((offset + i) as u32);
+        }
+        let tree = TreeForward {
+            branch_width: w,
+            positions,
+            mask: self.tree_mask(w, offset)?,
+        };
+        let profiler = self.profiler.clone();
+        let mut hidden = inputs_embeds.clone();
+        for (layer_index, layer) in self.layers.iter_mut().enumerate() {
+            hidden = layer.forward(
+                &hidden,
+                Some(&tree.mask),
+                offset,
+                layer_index,
+                profiler.as_ref(),
+                Some(&tree),
+            )?;
+        }
+        self.norm.forward(&hidden)
+    }
+
+    /// Ancestor mask for the flattened tree layout: every row sees history
+    /// and the anchor; a-rows additionally see earlier a-rows, b-rows earlier
+    /// b-rows. (1, 1, 1 + 2w, offset + 1 + 2w), 0 = visible, -inf = masked.
+    fn tree_mask(&self, w: usize, offset: usize) -> Result<Tensor> {
+        let l = 1 + 2 * w;
+        let total = offset + l;
+        let mut data = vec![f32::NEG_INFINITY; l * total];
+        for row in 0..l {
+            for col in 0..=offset {
+                data[row * total + col] = 0.0; // history + anchor (col offset)
+            }
+            let (seg_start, seg_pos) = if row == 0 {
+                (0, 0)
+            } else if row <= w {
+                (1, row) // a-segment, 1-based index within branch
+            } else {
+                (w + 1, row - w) // b-segment
+            };
+            if seg_pos > 0 {
+                for i in 0..seg_pos {
+                    data[row * total + offset + seg_start + i] = 0.0;
+                }
+            }
+        }
+        Tensor::from_vec(data, (1, 1, l, total), &self.device)?.to_dtype(self.dtype)
+    }
+
+    /// Installs the winner path after a tree verify: `accepted` is the number
+    /// of accepted draft tokens along the winning branch (0..=w; 0 only valid
+    /// on the main branch — the branches are identical at zero). DeltaNet
+    /// states select from the winning segment's capture; full-attention KV
+    /// keeps [anchor + winner rows], compacting the alternate's rows down
+    /// over the main branch's when the alternate wins.
+    pub fn rollback_tree(
+        &mut self,
+        snapshot: &DecodeStateSnapshot,
+        branch_width: usize,
+        on_alt: bool,
+        accepted: usize,
+    ) -> Result<()> {
+        if on_alt && accepted == 0 {
+            candle::bail!("zero-accept tree rollback must use the main branch");
+        }
+        if accepted > branch_width {
+            candle::bail!("accepted {accepted} exceeds branch width {branch_width}");
+        }
+        let prefix_in_segment = if on_alt { accepted } else { accepted + 1 };
+        let mut full_idx = 0usize;
+        for layer in &mut self.layers {
+            match &mut layer.mixer {
+                TokenMixer::Linear(attn) => attn.select_tree_state(on_alt, prefix_in_segment)?,
+                TokenMixer::Full(attn) => {
+                    let Some(history) = snapshot.kv_lens.get(full_idx) else {
+                        candle::bail!("decode-state snapshot has too few KV entries");
+                    };
+                    if on_alt {
+                        attn.compact_tree_kv(*history, branch_width, accepted)?;
+                    } else {
+                        attn.truncate_kv(history + 1 + accepted)?;
+                    }
+                    full_idx += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn clear_cache(&mut self) {

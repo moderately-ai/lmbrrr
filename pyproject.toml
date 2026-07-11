@@ -13,3 +13,8 @@ dependencies = [
     "torchvision>=0.27.1",
     "transformers>=5.13.0",
 ]
+
+[dependency-groups]
+dev = [
+    "python-dotenv>=1.2.2",
+]

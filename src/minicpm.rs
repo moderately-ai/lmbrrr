@@ -564,6 +564,35 @@ impl MiniCpmForConditionalGeneration {
         self.lm_head.forward(&hidden)
     }
 
+    /// Tree verify forward: `input_ids` is the flattened
+    /// [anchor, a_1..a_w, b_1..b_w] chunk (shape [1, 1 + 2w]). Returns dense
+    /// logits for every row. Commit the winner with [`Self::rollback_tree`].
+    pub fn forward_tree_all_logits(
+        &mut self,
+        input_ids: &Tensor,
+        offset: usize,
+        branch_width: usize,
+    ) -> Result<Tensor> {
+        let embeds = self.model.language_model.embed(input_ids)?;
+        let hidden = self
+            .model
+            .language_model
+            .forward_tree_embeds(&embeds, offset, branch_width)?;
+        self.lm_head.forward(&hidden)
+    }
+
+    pub fn rollback_tree(
+        &mut self,
+        snapshot: &crate::qwen35::DecodeStateSnapshot,
+        branch_width: usize,
+        on_alt: bool,
+        accepted: usize,
+    ) -> Result<()> {
+        self.model
+            .language_model
+            .rollback_tree(snapshot, branch_width, on_alt, accepted)
+    }
+
     fn forward_hidden(
         &mut self,
         input_ids: &Tensor,
