@@ -378,6 +378,7 @@ def train(
     stage_local: bool = True,
     draft_init_checkpoint: str | None = None,
     lr: float | None = None,
+    target_model: str = "/vol/models/minicpm-v46-fakequant-q4kft",
 ) -> None:
     """Train the drafter on a prepared cache; checkpoints land in /vol/runs.
 
@@ -396,6 +397,9 @@ def train(
     opts = [
         f"data.target_cache_path={cache_path}",
         f"train.local_batch_size={local_batch_size}",
+        # Must match the cache's recorded target (validated at trainer init);
+        # also sources the frozen embed/lm_head copy from the same weights.
+        f"model.target_model_name_or_path={target_model}",
     ]
     if draft_init_checkpoint:
         # Weights-only warm start (DeepSpec db36013); fresh schedule.
