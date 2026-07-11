@@ -432,6 +432,7 @@ def evaluate(
     max_new_tokens: int = 512,
     temperature: float = 0.0,
     confidence_threshold: float = 0.0,
+    target_model: str = TARGET_MODEL,
 ) -> None:
     """Run the DeepSpec DSpark evaluator (tau, accept_rate@k, confidence
     reliability artifacts) against a checkpoint on the volume.
@@ -446,7 +447,7 @@ def evaluate(
         "python",
         "/deepspec/eval.py",
         "--target_name_or_path",
-        TARGET_MODEL,
+        target_model,
         "--draft_name_or_path",
         ckpt,
         "--evaluator",
