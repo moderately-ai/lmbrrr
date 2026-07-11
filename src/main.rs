@@ -129,6 +129,12 @@ struct ModelArgs {
 
     #[arg(long)]
     quantized_manifest: Option<PathBuf>,
+
+    /// Post-hoc lm_head quantization (quantized copy of the tied embedding;
+    /// BF16 table stays for the gather). 508 MB/token head read -> 143 MB at
+    /// q4k. Quality advisory per campaign policy.
+    #[arg(long, value_enum)]
+    quantize_lm_head: Option<DrafterQuantArg>,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -1419,6 +1425,7 @@ fn run(args: RunArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let mut stream = TokenOutputStream::new(tokenizer);
@@ -1551,6 +1558,7 @@ fn bench(args: BenchArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let mut writer = benchmark_writer(args.output.as_ref(), args.append)?;
@@ -1674,6 +1682,7 @@ fn logits(args: LogitsArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
 
     let mut rows = Vec::with_capacity(cases.len());
@@ -1774,6 +1783,7 @@ fn profile_decode(args: ProfileArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let profiler = Qwen35Profiler::new();
     model.set_text_profiler(Some(profiler.clone()));
@@ -1912,6 +1922,7 @@ fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
@@ -2090,6 +2101,7 @@ fn trace_hidden_states(args: TraceArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let trace_recorder = Qwen35TraceRecorder::new(capture_layers.clone());
@@ -2251,6 +2263,7 @@ fn quant_sensitivity(args: QuantSensitivityArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
 
     let baseline_started = Instant::now();
@@ -2620,7 +2633,7 @@ fn run_quant_quality_policy(
     Option<QuantizedLoadStats>,
 )> {
     let (mut model, load_elapsed, quantized_load) =
-        load_model_with_optional_quantization(bundle, dtype, device, quantized_manifest)?;
+        load_model_with_optional_quantization(bundle, dtype, device, quantized_manifest, None)?;
     let mut generations = Vec::with_capacity(rows.len());
     for row in rows {
         let generation = quality_generation_args(&args.generation, row);
@@ -3217,6 +3230,7 @@ fn eagle_live_probe(args: EagleLiveProbeArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let trace_recorder = Qwen35TraceRecorder::new(draft_head.capture_layers.clone());
@@ -3428,6 +3442,7 @@ fn eagle_recurrent_draft(args: EagleRecurrentDraftArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
 
     let trace_recorder = Qwen35TraceRecorder::new(drafter.capture_layers.clone());
@@ -4331,6 +4346,7 @@ fn verify_table(args: VerifyTableArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
@@ -4696,6 +4712,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
@@ -5012,6 +5029,7 @@ fn dspark_run(args: DsparkRunArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let vocab_size = bundle.config.text_config.vocab_size;
@@ -5252,12 +5270,16 @@ fn load_model_with_optional_quantization(
     dtype: DType,
     device: &Device,
     quantized_manifest: Option<&PathBuf>,
+    quantize_lm_head: Option<DrafterQuantArg>,
 ) -> Result<(
     MiniCpmForConditionalGeneration,
     Duration,
     Option<QuantizedLoadStats>,
 )> {
     let (mut model, load_elapsed, _) = load_model(bundle, dtype, device)?;
+    if let Some(tier) = quantize_lm_head {
+        model.quantize_lm_head(tier.ggml())?;
+    }
     let Some(manifest) = quantized_manifest else {
         return Ok((model, load_elapsed, None));
     };
@@ -6281,6 +6303,7 @@ mod tests {
                 preprocessor: None,
                 weights: Vec::new(),
                 quantized_manifest: None,
+                quantize_lm_head: None,
             },
             generation: GenerationArgs {
                 max_new_tokens: 128,

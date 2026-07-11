@@ -442,7 +442,7 @@ impl MiniCpmModel {
 #[derive(Clone, Debug)]
 pub struct MiniCpmForConditionalGeneration {
     model: MiniCpmModel,
-    lm_head: Linear,
+    lm_head: crate::quantized_linear::MixedLinear,
     image_token_id: u32,
     device: Device,
 }
@@ -461,10 +461,24 @@ impl MiniCpmForConditionalGeneration {
         };
         Ok(Self {
             model,
-            lm_head,
+            lm_head: crate::quantized_linear::MixedLinear::dense(lm_head),
             image_token_id: cfg.image_token_id,
             device: vb.device().clone(),
         })
+    }
+
+    /// Post-hoc lm_head quantization: replaces the tied-embedding dense head
+    /// with a quantized copy (the BF16 embedding table stays for the
+    /// gather). The 508 MB/token head read is 34% of all decode weight
+    /// bytes; quality is advisory per campaign policy.
+    pub fn quantize_lm_head(&mut self, ggml: candle::quantized::GgmlDType) -> Result<()> {
+        let weight = self.model.language_model.embeddings().clone();
+        let cpu_f32 = weight
+            .to_dtype(candle::DType::F32)?
+            .to_device(&Device::Cpu)?;
+        let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
+        self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q)?;
+        Ok(())
     }
 
     pub fn clear_cache(&mut self) {
@@ -532,10 +546,11 @@ impl MiniCpmForConditionalGeneration {
         // position only to discard all but one wasted ~0.5 TFLOP and a
         // ~500 MB logits buffer on a 1k-token prompt. Callers needing dense
         // logits (spec verification) use forward_all_logits.
-        self.forward_hidden(input_ids, images, downsample_mode, offset)?
+        let hidden = self
+            .forward_hidden(input_ids, images, downsample_mode, offset)?
             .narrow(1, seq_len - 1, 1)?
-            .apply(&self.lm_head)?
-            .squeeze(1)
+            .contiguous()?;
+        self.lm_head.forward(&hidden)?.squeeze(1)
     }
 
     pub fn forward_all_logits(
@@ -545,8 +560,8 @@ impl MiniCpmForConditionalGeneration {
         downsample_mode: &str,
         offset: usize,
     ) -> Result<Tensor> {
-        self.forward_hidden(input_ids, images, downsample_mode, offset)?
-            .apply(&self.lm_head)
+        let hidden = self.forward_hidden(input_ids, images, downsample_mode, offset)?;
+        self.lm_head.forward(&hidden)
     }
 
     fn forward_hidden(
