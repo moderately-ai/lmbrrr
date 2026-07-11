@@ -641,6 +641,10 @@ def vllm_probe(
         "bfloat16",
         "--gpu-memory-utilization",
         "0.85",
+        # Text-only serving: the qwen3_5 registration is multimodal-aware,
+        # but we never send images; zero the budget so mm profiling skips.
+        "--limit-mm-per-prompt",
+        '{"image": 0, "video": 0}',
     ]
     print("+", " ".join(cmd), flush=True)
     server = subprocess.Popen(cmd)
