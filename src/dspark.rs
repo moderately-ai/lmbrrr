@@ -198,6 +198,11 @@ pub struct DsparkDrafter {
 pub struct DraftProposal {
     pub tokens: Vec<u32>,
     pub confidence_logits: Vec<f32>,
+    /// Alternate chain branching at position 0 from the runner-up Markov
+    /// token — nearly free by construction (base_logits\[k\] is branch-
+    /// independent; only the Markov bias chains), for tree speculation.
+    pub alt_tokens: Vec<u32>,
+    pub alt_confidence_logits: Vec<f32>,
     /// Populated only by `propose_with_diagnostics` (parity harness); the
     /// hot loop skips materializing them (~0.2 ms/round of vocab-wide cats).
     pub block_hidden: Option<Tensor>,
@@ -363,7 +368,18 @@ impl DsparkDrafter {
     /// trailing mask tokens, so a shortened block is out-of-distribution.
     /// Only the first `gamma` positions go through lm_head/Markov/confidence.
     pub fn propose(&mut self, anchor_token: u32, anchor_pos: usize, gamma: usize) -> Result<DraftProposal> {
-        self.propose_inner(anchor_token, anchor_pos, gamma, false)
+        self.propose_inner(anchor_token, anchor_pos, gamma, false, false)
+    }
+
+    /// Also drafts the alternate chain branching at position 0 (runner-up
+    /// Markov token) for tree speculation: ~1 extra Markov gemv per position.
+    pub fn propose_branching(
+        &mut self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        gamma: usize,
+    ) -> Result<DraftProposal> {
+        self.propose_inner(anchor_token, anchor_pos, gamma, false, true)
     }
 
     /// Parity-harness variant that also materializes block_hidden /
@@ -374,7 +390,7 @@ impl DsparkDrafter {
         anchor_pos: usize,
         gamma: usize,
     ) -> Result<DraftProposal> {
-        self.propose_inner(anchor_token, anchor_pos, gamma, true)
+        self.propose_inner(anchor_token, anchor_pos, gamma, true, false)
     }
 
     fn propose_inner(
@@ -383,6 +399,7 @@ impl DsparkDrafter {
         anchor_pos: usize,
         gamma: usize,
         diagnostics: bool,
+        branch: bool,
     ) -> Result<DraftProposal> {
         let block = self.config.block_size;
         if gamma == 0 || gamma > block {
@@ -470,7 +487,33 @@ impl DsparkDrafter {
             token_tensors.push(token.clone());
             prev_id = token;
         }
-        let feature_refs = features.iter().collect::<Vec<_>>();
+        // Alternate chain: branch at position 0 from the runner-up Markov
+        // token; base_logits rows are branch-independent, so this is one
+        // masked-argmax plus gamma-1 extra Markov steps.
+        let mut alt_token_tensors = Vec::new();
+        let mut alt_features = Vec::new();
+        if branch && gamma > 0 {
+            let step0 = corrected[0].to_dtype(DType::F32)?.squeeze(0)?;
+            let neg = Tensor::full(-1e30f32, 1, &self.device)?;
+            let second = step0.index_add(&token_tensors[0], &neg, 0)?.argmax(0)?;
+            let mut prev = second.clone();
+            alt_token_tensors.push(second);
+            for k in 0..gamma {
+                let prev_emb = self.markov_w1.index_select(&prev, 0)?;
+                let h_k = block_hidden.i((0, k))?.unsqueeze(0)?;
+                alt_features
+                    .push(Tensor::cat(&[&h_k, &prev_emb.to_dtype(self.dtype)?], D::Minus1)?);
+                if k + 1 < gamma {
+                    let bias = self.markov_w2.forward(&prev_emb)?;
+                    let step = (base_logits.i((0, k + 1))?.unsqueeze(0)? + &bias)?;
+                    let token = step.to_dtype(DType::F32)?.argmax(D::Minus1)?;
+                    alt_token_tensors.push(token.clone());
+                    prev = token;
+                }
+            }
+        }
+
+        let feature_refs = features.iter().chain(alt_features.iter()).collect::<Vec<_>>();
         let confidences = self
             .confidence
             .forward(&Tensor::cat(&feature_refs, 0)?)?
@@ -478,13 +521,21 @@ impl DsparkDrafter {
             .squeeze(D::Minus1)?;
         // Single host readback: confidences and token ids ride one buffer
         // (u32 < 2^24 is exact in f32), halving the per-proposal sync count.
-        let token_refs = token_tensors.iter().collect::<Vec<_>>();
+        let token_refs = token_tensors
+            .iter()
+            .chain(alt_token_tensors.iter())
+            .collect::<Vec<_>>();
         let tokens_f32 = Tensor::cat(&token_refs, 0)?.to_dtype(DType::F32)?;
         let packed = Tensor::cat(&[&confidences, &tokens_f32], 0)?
             .to_device(&Device::Cpu)?
             .to_vec1::<f32>()?;
-        let (confidence_logits, token_vals) = packed.split_at(gamma);
-        let tokens = token_vals.iter().map(|v| *v as u32).collect::<Vec<_>>();
+        let n_alt = alt_token_tensors.len();
+        let (conf_all, token_vals) = packed.split_at(gamma + if branch && gamma > 0 { gamma } else { 0 });
+        let (confidence_logits, alt_confidence_logits) = conf_all.split_at(gamma);
+        let (token_main, token_alt) = token_vals.split_at(gamma);
+        let tokens = token_main.iter().map(|v| *v as u32).collect::<Vec<_>>();
+        let alt_tokens = token_alt[..n_alt].iter().map(|v| *v as u32).collect::<Vec<_>>();
+        let alt_confidence_logits = alt_confidence_logits.to_vec();
         let confidence_logits = confidence_logits.to_vec();
         let corrected_logits = if diagnostics {
             let corrected_refs = corrected.iter().collect::<Vec<_>>();
@@ -495,6 +546,8 @@ impl DsparkDrafter {
         Ok(DraftProposal {
             tokens,
             confidence_logits,
+            alt_tokens,
+            alt_confidence_logits,
             block_hidden: diagnostics.then_some(block_hidden),
             base_logits: diagnostics.then_some(base_logits),
             corrected_logits,
