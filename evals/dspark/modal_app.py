@@ -599,9 +599,16 @@ def train_probe(
 # hybrid; this probe checks whether it loads the MiniCPM-V-4.6 composite
 # (fakequant checkpoint) and what a concurrent chat workload sustains.
 sglang_image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.12")
     .uv_pip_install("sglang[all]==0.5.7", "openai==2.6.1")
-    .env({"HF_HOME": "/vol/hf", "TOKENIZERS_PARALLELISM": "false"})
+    .env(
+        {
+            "HF_HOME": "/vol/hf",
+            "TOKENIZERS_PARALLELISM": "false",
+            # deep_gemm asserts on CUDA_HOME (needs the devel toolkit).
+            "CUDA_HOME": "/usr/local/cuda",
+        }
+    )
 )
 
 
