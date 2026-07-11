@@ -723,6 +723,30 @@ struct DsparkRunArgs {
     #[arg(long, value_delimiter = ',', default_values_t = [0.0f32, 1.0])]
     tree_band: Vec<f32>,
 
+    /// Prompt-lookup drafting: when the trailing n-gram of the committed
+    /// sequence matches an earlier occurrence in prompt+history, propose the
+    /// tokens that followed it (verified exactly like any draft). Fires only
+    /// on a match, so the greedy floor is preserved; the trained drafter
+    /// handles non-matching rounds.
+    #[arg(long)]
+    pld: bool,
+
+    /// Max tokens proposed per prompt-lookup match (chunk cap is 11).
+    /// Default 2: measured, accepted runs are short even on copy-heavy text,
+    /// so wider proposals only add rejected-tail verify cost.
+    #[arg(long, default_value_t = 2)]
+    pld_span: usize,
+
+    /// Fire prompt-lookup on every match instead of only where the scheduler
+    /// has given up on drafting. Ungated PLD preempts strong drafter rounds
+    /// (measured net loss on math); the default gates PLD to skip rounds.
+    #[arg(long)]
+    pld_ungated: bool,
+
+    /// Smallest n-gram that may trigger a lookup match (2..=4).
+    #[arg(long, default_value_t = 3)]
+    pld_min_ngram: usize,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -5289,8 +5313,122 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     const SKIP_DRAFT_AFTER: usize = 3;
     const PROBE_EVERY: usize = 8;
 
+    // Prompt-lookup index over prompt + committed tokens; synced at the top
+    // of every round so all round types (drafter/tree/lookup) feed it.
+    let pld_span = args.pld_span.min(11);
+    let mut ngram_index = lmbrrr::ngram_draft::NgramDraftIndex::new(args.pld_min_ngram, 4);
+    if args.pld {
+        ngram_index.extend(&prompt_tokens);
+    }
+    let mut pld_rounds = 0usize;
+    let mut pld_proposed_tokens = 0usize;
+    let mut pld_accepted_tokens = 0usize;
+
     if !eos_ids.contains(&first_token) {
         while committed.len() < args.max_new_tokens {
+            // Keep the lookup index in sync with everything committed so
+            // far, regardless of which round type committed it.
+            if args.pld {
+                let indexed = ngram_index.len() - prompt_tokens.len();
+                if committed.len() > indexed {
+                    ngram_index.extend(&committed[indexed..]);
+                }
+            }
+
+            // Prompt-lookup round: a history match proposes a copied span at
+            // zero draft cost; verification is the same exact-argmax chunk.
+            // Gated by default to rounds where the scheduler has judged
+            // drafting unprofitable (skip-hysteresis engaged) — firing on
+            // every match preempts strong drafter rounds and loses (measured
+            // -9% on math). Ungated is available for ablation.
+            let pld_gate_open = args.pld
+                && (args.pld_ungated
+                    || !args.schedule
+                    || consecutive_zero_widths >= SKIP_DRAFT_AFTER);
+            if pld_gate_open {
+                if let Some(pld_draft) = ngram_index.propose(pld_span) {
+                    let w = pld_draft.len();
+                    let snapshot = model.snapshot_decode_state();
+                    let mut chunk = Vec::with_capacity(w + 1);
+                    chunk.push(anchor);
+                    chunk.extend_from_slice(&pld_draft);
+                    let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), &device)?;
+                    let verify_start = Instant::now();
+                    let logits = model.forward_all_logits(
+                        &chunk_input,
+                        None::<&ProcessedImages>,
+                        &args.model.downsample_mode,
+                        start,
+                    )?;
+                    if loop_timing() {
+                        device.synchronize()?;
+                    }
+                    verify_seconds += secs(verify_start.elapsed());
+                    let (targets, _) = argmax_tokens(&logits, &device)?;
+                    let chunk_captures = model.take_device_captures();
+
+                    let accepted = pld_draft
+                        .iter()
+                        .zip(targets.iter())
+                        .take_while(|(draft, target)| draft == target)
+                        .count();
+                    let bonus = targets[accepted];
+
+                    let capture_refs = chunk_captures.iter().collect::<Vec<_>>();
+                    let chunk_ctx = Tensor::cat(&capture_refs, D::Minus1)?;
+                    drafter.append_context(&chunk_ctx.narrow(1, 0, accepted + 1)?, start)?;
+
+                    if accepted == w {
+                        start += w + 1;
+                    } else {
+                        rollbacks += 1;
+                        let readvance_start = Instant::now();
+                        if readvance_rollback() {
+                            model.restore_decode_state(&snapshot)?;
+                            let readvance = &chunk[..accepted + 1];
+                            let readvance_input =
+                                Tensor::from_slice(readvance, (1, readvance.len()), &device)?;
+                            let _ = model.forward_all_logits(
+                                &readvance_input,
+                                None::<&ProcessedImages>,
+                                &args.model.downsample_mode,
+                                start,
+                            )?;
+                            device.synchronize()?;
+                            let _ = model.take_device_captures();
+                        } else {
+                            model.rollback_to_prefix(&snapshot, accepted + 1)?;
+                            if loop_timing() {
+                                device.synchronize()?;
+                            }
+                        }
+                        readvance_seconds += secs(readvance_start.elapsed());
+                        start += accepted + 1;
+                    }
+
+                    committed.extend_from_slice(&pld_draft[..accepted]);
+                    committed.push(bonus);
+                    rounds += 1;
+                    pld_rounds += 1;
+                    pld_proposed_tokens += w;
+                    pld_accepted_tokens += accepted;
+                    anchor = bonus;
+
+                    if committed[committed.len() - (accepted + 1)..]
+                        .iter()
+                        .any(|token| eos_ids.contains(token))
+                    {
+                        if let Some(eos_at) =
+                            committed.iter().position(|token| eos_ids.contains(token))
+                        {
+                            committed.truncate(eos_at + 1);
+                        }
+                        break;
+                    }
+                    continue;
+                }
+            }
+
             let skip_draft = args.schedule
                 && consecutive_zero_widths >= SKIP_DRAFT_AFTER
                 && (rounds % PROBE_EVERY) != 0;
@@ -5598,10 +5736,21 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     model.set_device_capture(None);
     model.set_verify_state_capture(false);
 
-    // Exact per-round committed tokens (accepted + bonus) from the histogram;
-    // committed.len()/rounds counts the prefill token and loses EOS-truncated
-    // tokens, a ~1/rounds bias the scheduler's break-even margin can't afford.
-    let mean_tau = mean_committed_per_round(&accepted_histogram, rounds);
+    // Exact per-round committed tokens (accepted + bonus) from the histogram
+    // plus lookup-round tokens (tracked separately: lookup spans exceed the
+    // gamma-sized histogram); committed.len()/rounds counts the prefill token
+    // and loses EOS-truncated tokens, a ~1/rounds bias the scheduler's
+    // break-even margin can't afford.
+    let drafter_committed: usize = accepted_histogram
+        .iter()
+        .enumerate()
+        .map(|(accepted, count)| (accepted + 1) * count)
+        .sum();
+    let mean_tau = if rounds == 0 {
+        0.0
+    } else {
+        (drafter_committed + pld_accepted_tokens + pld_rounds) as f64 / rounds as f64
+    };
     let advisory_prefix = baseline
         .generated_token_ids
         .iter()
@@ -5644,6 +5793,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "tree_rounds": tree_rounds,
         "tree_alt_wins": alt_wins,
         "tree_alt_tokens_gained": alt_tokens_gained,
+        "pld": args.pld,
+        "pld_rounds": pld_rounds,
+        "pld_proposed_tokens": pld_proposed_tokens,
+        "pld_accepted_tokens": pld_accepted_tokens,
         "confidence_records": confidence_records.iter()
             .map(|round| round.iter()
                 .map(|(pos, logit, p, acc)| serde_json::json!([pos, logit, p, acc]))

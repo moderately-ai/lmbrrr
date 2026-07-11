@@ -5,6 +5,7 @@ pub mod dspark;
 pub mod fused_deltanet;
 pub mod image_processor;
 pub mod minicpm;
+pub mod ngram_draft;
 pub mod prompt;
 pub mod quant_convert;
 pub mod quant_sensitivity;
