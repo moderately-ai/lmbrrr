@@ -575,6 +575,13 @@ struct DsparkRunArgs {
     #[arg(long)]
     confidence_threshold: Option<f32>,
 
+    /// Accept a draft token whose target logit is within this margin of the
+    /// target's top logit (Medusa-style typical acceptance) instead of
+    /// requiring exact argmax match. Changes outputs; quality is reported,
+    /// not gated (campaign policy). Exact match when unset.
+    #[arg(long)]
+    accept_margin: Option<f32>,
+
     #[arg(long)]
     enable_thinking: bool,
 
@@ -4738,11 +4745,39 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             let (targets, _) = argmax_tokens(&logits, &device)?;
             let chunk_captures = model.take_device_captures();
 
-            let accepted = proposal.tokens[..width]
-                .iter()
-                .zip(targets.iter())
-                .take_while(|(draft, target)| draft == target)
-                .count();
+            let accepted = match args.accept_margin {
+                // Exact: draft must equal the target argmax (lossless greedy).
+                None => proposal.tokens[..width]
+                    .iter()
+                    .zip(targets.iter())
+                    .take_while(|(draft, target)| draft == target)
+                    .count(),
+                // Typical: draft survives while its target logit is within
+                // `margin` of the top logit. Committed tokens remain the
+                // drafts, so outputs may legitimately differ from greedy.
+                Some(margin) if width > 0 => {
+                    let verify_logits = logits.narrow(1, 0, width)?;
+                    let max_vals = verify_logits
+                        .max(D::Minus1)?
+                        .to_dtype(DType::F32)?
+                        .squeeze(0)?
+                        .to_vec1::<f32>()?;
+                    let idx =
+                        Tensor::from_slice(&proposal.tokens[..width], (1, width, 1), &device)?;
+                    let draft_vals = verify_logits
+                        .gather(&idx, D::Minus1)?
+                        .to_dtype(DType::F32)?
+                        .squeeze(2)?
+                        .squeeze(0)?
+                        .to_vec1::<f32>()?;
+                    draft_vals
+                        .iter()
+                        .zip(max_vals.iter())
+                        .take_while(|(draft, top)| **draft >= **top - margin)
+                        .count()
+                }
+                Some(_) => 0,
+            };
             let bonus = targets[accepted];
             for j in 0..width {
                 position_proposed[j] += 1;
@@ -4846,6 +4881,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             .map(|(p, a)| if *p > 0 { *a as f64 / *p as f64 } else { 0.0 })
             .collect::<Vec<_>>(),
         "confidence_threshold": args.confidence_threshold,
+        "accept_margin": args.accept_margin,
+        "acceptance_note": if args.accept_margin.is_some() {
+            "typical acceptance: outputs may diverge from greedy; confidence_records reflect the relaxed rule (recalibrate before mixing with exact-rule fits)"
+        } else {
+            "exact argmax acceptance (lossless greedy)"
+        },
         "sts_calibration": { "scale": sts.scale, "shift": sts.shift },
         "proposed_width_histogram": proposed_width_histogram,
         "confidence_records": confidence_records.iter()
