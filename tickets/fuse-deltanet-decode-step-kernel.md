@@ -13,6 +13,10 @@ claimed_from: todo
 assignee: claude
 lease_expires_at: 1783735054
 ---
+## Outcome (2026-07-10): decode step DONE — 77 -> 145 tok/s (+88%)
+
+Landed: fork kernel gated_delta_decode_bf16 (rev fdd06d7c) + lmbrrr src/fused_deltanet.rs wrapper (multi-output tensors built from MetalStorage; all-public APIs, no candle-core changes) + GatedDeltaNet::forward_fused_decode behind eligibility checks and LMBRRR_UNFUSED_DELTANET=1. Gates all green (tests/fixture/oracle both prompts/coherent-text drift advisory). Rotated same-binary A/B: 140.7-147.5 vs 69.8-79.5 tok/s, zero overlap — Stage-2 neighbourhood (~54% BF16 roofline) reached on this lever alone. NOTES: (1) trajectory-oracle envelope crept to 0.625/0.75 with numerics changes stacking — rederive the bound if another numerics change lands; (2) fork lib.rs root re-export of call_gated_delta_decode still missing (lmbrrr imports via kernels:: path) — fold into the next fork commit; (3) REMAINING SCOPE: the verify-chunk variant (chunked WY kernel) — verify is now ~25ms vs 7ms/token decode, the spec loop's dominant cost; and the packed single-gemv projection (4 gemvs + cat -> 1 gemv) for another ~3 dispatches/layer.
+
 ## Kernel design (2026-07-10, pre-implementation)
 
 One dispatch per layer per decode token, grid = 16 threadgroups (one per v-head) x 128 threads (one per v_dim column). No cross-threadgroup dependency exists: TG h owns its head's q/k/v conv channels (3x128 of the 6144), its gate scalars, its 128x128 state slab, its norm+z gating.
