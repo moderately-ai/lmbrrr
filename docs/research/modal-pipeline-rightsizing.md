@@ -31,3 +31,11 @@ Prep phase for round-2 training per the user directive: measure and rightsize th
 ## Revised round-2 costs (vs the corpus-scaling plan's estimates)
 
 ~110M generated tokens for 100k conversations at ≥1.4k tok/s/GPU → **~22 GPU-h ≈ $90** data-gen (plan said $160). Training 15–20 epochs at gb=512: with staged NVMe + lbs=2, projected **~10–14 s/step single-GPU → $130–180**, or ~4×H100 for ¼ the wall-clock at the same cost. Cache prep unchanged (unprofiled — it ran at acceptable cost in round 1; profile only if it surprises). Round-2 total tracks **~$250–300**, under the $310 plan.
+
+## Validation regen (fakequant checkpoint, budgeted batching) — PASSED
+
+500/500 conversations, 0 errors, 1249 padded-tok/s through the full length distribution (`/vol/data/regen-fakequant-500.jsonl`; samples verified coherent). Two hardening fixes came out of this gate: the fakequant export now backfills `chat_template.jinja`/`tokenizer_config.json` (lmbrrr's hub cache never fetches them), and batch admission is token-budgeted (32k positions) because sorted admission back-loads long conversations and HF generate materializes batch × padded-len × 248k-vocab prefill logits — the fixed-batch-128 config OOM'd at sample 414 on exactly that tail. Peak memory under budget: 22.5 GiB (budget has headroom to raise if the HF path stays the engine).
+
+## Open: continuous-batching engine probe
+
+HF generate is framework-bound (~43–46% util, ~1% of the 2.6 GB model's decode-bandwidth ceiling; composite lacks `logits_to_keep`). SGLang probe in flight (CUDA-devel base; first attempt failed on deep_gemm needing CUDA_HOME, not on the architecture). If SGLang serves the hybrid composite: expect ~10×+ data-gen throughput; else vLLM transformers-backend fallback; else the HF numbers above are the engine of record and round-2 economics stand as revised.
