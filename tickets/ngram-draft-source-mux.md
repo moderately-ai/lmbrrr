@@ -4,7 +4,7 @@ title: "Draft-free n-gram speculation: prompt-lookup + verify-logit token recycl
 status: in-progress
 priority: p1
 dependencies: []
-related: []
+related: [verify-logit-token-recycling-draft-source]
 scopes: [inference/speculative]
 shared_scopes: [docs/research]
 paths: []
