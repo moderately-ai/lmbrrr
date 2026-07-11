@@ -1297,3 +1297,51 @@ def round3_stage3_train() -> None:
         checkpoint=f"runs/checkpoints/lmbrrr/{R3_EXP}/step_latest",
         target_model="/vol/models/minicpm-v46-fakequant-q4kft",
     )
+
+
+@app.function(image=image, gpu="H100:8", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=1536 * 1024)
+def round3_prep_and_train() -> None:
+    """Fused stage 2+3: build the target cache on container-local NVMe and
+    train directly from it, skipping the 810 GiB volume round-trip entirely
+    (the single-stream copytree measured ~100 MB/s and stalled twice; a
+    rebuild is ~15 min of compute, cheaper than storing the cache). The
+    volume receives only checkpoints. Spawns the evaluator when done."""
+    build_dir = f"/tmp/cache-build/{R3_CACHE}"
+    _run(
+        [
+            "python",
+            "/deepspec/scripts/data/prepare_target_cache.py",
+            "--config",
+            TRAIN_CONFIG,
+            "--train-data-path",
+            f"/vol/data/{R3_REGEN}",
+            "--output-dir",
+            build_dir,
+            "--local-batch-size",
+            "8",
+            "--num-workers",
+            "2",
+            "--opts",
+            "model.target_model_name_or_path=/vol/models/minicpm-v46-fakequant-q4kft",
+        ],
+        cwd="/deepspec",
+    )
+    opts = [
+        f"data.target_cache_path={build_dir}",
+        "train.local_batch_size=2",
+        "model.target_model_name_or_path=/vol/models/minicpm-v46-fakequant-q4kft",
+        "train.lr=0.0006",
+        "train.num_train_epochs=10",
+        "logging.logging_steps=1",
+        "train.torch_compile=true",
+        f"exp_name={R3_EXP}",
+    ]
+    cmd = ["python", "/deepspec/train.py", "--config", TRAIN_CONFIG]
+    for opt in opts:
+        cmd.extend(["--opts", opt])
+    _run(cmd, cwd="/deepspec", env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+    volume.commit()
+    evaluate.spawn(
+        checkpoint=f"runs/checkpoints/lmbrrr/{R3_EXP}/step_latest",
+        target_model="/vol/models/minicpm-v46-fakequant-q4kft",
+    )
