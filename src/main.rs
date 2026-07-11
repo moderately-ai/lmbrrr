@@ -4779,21 +4779,40 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mut verify_seconds = 0.0f64;
     let mut readvance_seconds = 0.0f64;
 
+    // Greedy-fallback hysteresis: when the scheduler keeps choosing width 0
+    // (speculation structurally unprofitable at current costs, e.g. the
+    // quantized target's 3x chunk intercept), stop paying for drafts and
+    // probe again periodically instead of degrading to greedy-minus-draft.
+    let mut consecutive_zero_widths = 0usize;
+    let mut skipped_drafts = 0usize;
+    const SKIP_DRAFT_AFTER: usize = 3;
+    const PROBE_EVERY: usize = 8;
+
     if !eos_ids.contains(&first_token) {
         while committed.len() < args.max_new_tokens {
-            let draft_start = Instant::now();
-            let proposal = drafter.propose(anchor, start, gamma)?;
-            if loop_timing() {
-                device.synchronize()?;
-            }
-            draft_seconds += secs(draft_start.elapsed());
+            let skip_draft = args.schedule
+                && consecutive_zero_widths >= SKIP_DRAFT_AFTER
+                && (rounds % PROBE_EVERY) != 0;
+            let proposal = if skip_draft {
+                skipped_drafts += 1;
+                None
+            } else {
+                let draft_start = Instant::now();
+                let p = drafter.propose(anchor, start, gamma)?;
+                if loop_timing() {
+                    device.synchronize()?;
+                }
+                draft_seconds += secs(draft_start.elapsed());
+                Some(p)
+            };
 
             // Width selection: the Appendix-A scheduler when --schedule,
             // else static confidence truncation (floored at 1: a width-0
             // round pays the full draft for one committed token), else full
             // gamma.
-            let width = if args.schedule {
-                schedule_prefix_width(
+            let width = match &proposal {
+                None => 0,
+                Some(proposal) if args.schedule => schedule_prefix_width(
                     proposal
                         .confidence_logits
                         .iter()
@@ -4801,9 +4820,8 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                         .map(|(pos, logit)| sts.position_probability(pos, *logit) as f64),
                     |w| cost_model.t_round_ms(w),
                     gamma,
-                )
-            } else {
-                match args.confidence_threshold {
+                ),
+                Some(proposal) => match args.confidence_threshold {
                     Some(threshold) => proposal
                         .confidence_logits
                         .iter()
@@ -4811,14 +4829,24 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                         .count()
                         .max(1),
                     None => gamma,
-                }
+                },
             };
+            if args.schedule && !skip_draft {
+                if width == 0 {
+                    consecutive_zero_widths += 1;
+                } else {
+                    consecutive_zero_widths = 0;
+                }
+            }
             proposed_width_histogram[width] += 1;
+            let draft_tokens: &[u32] = proposal.as_ref().map_or(&[], |p| &p.tokens);
+            let draft_confidences: &[f32] =
+                proposal.as_ref().map_or(&[], |p| &p.confidence_logits);
 
             let snapshot = model.snapshot_decode_state();
             let mut chunk = Vec::with_capacity(width + 1);
             chunk.push(anchor);
-            chunk.extend_from_slice(&proposal.tokens[..width]);
+            chunk.extend_from_slice(&draft_tokens[..width]);
             let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), &device)?;
             let verify_start = Instant::now();
             let logits = model.forward_all_logits(
@@ -4836,7 +4864,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
 
             let accepted = match args.accept_margin {
                 // Exact: draft must equal the target argmax (lossless greedy).
-                None => proposal.tokens[..width]
+                None => draft_tokens[..width]
                     .iter()
                     .zip(targets.iter())
                     .take_while(|(draft, target)| draft == target)
@@ -4852,7 +4880,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                         .squeeze(0)?
                         .to_vec1::<f32>()?;
                     let idx =
-                        Tensor::from_slice(&proposal.tokens[..width], (1, width, 1), &device)?;
+                        Tensor::from_slice(&draft_tokens[..width], (1, width, 1), &device)?;
                     let draft_vals = verify_logits
                         .gather(&idx, D::Minus1)?
                         .to_dtype(DType::F32)?
@@ -4879,7 +4907,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 // acceptance, positions past it were never target-checked
                 // against a correct prefix, so stop at accepted + 1.
                 if j <= accepted {
-                    let logit = proposal.confidence_logits[j];
+                    let logit = draft_confidences[j];
                     round_records.push((j, logit, sts.probability(logit), j < accepted));
                 }
             }
@@ -4921,7 +4949,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 start += accepted + 1;
             }
 
-            committed.extend_from_slice(&proposal.tokens[..accepted]);
+            committed.extend_from_slice(&draft_tokens[..accepted]);
             committed.push(bonus);
             accepted_histogram[accepted] += 1;
             rounds += 1;
@@ -4984,6 +5012,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         },
         "sts_calibration": { "scale": sts.scale, "shift": sts.shift },
         "proposed_width_histogram": proposed_width_histogram,
+        "skipped_drafts": skipped_drafts,
         "confidence_records": confidence_records.iter()
             .map(|round| round.iter()
                 .map(|(pos, logit, p, acc)| serde_json::json!([pos, logit, p, acc]))
