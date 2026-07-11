@@ -598,6 +598,125 @@ def train_probe(
 # is the framework. SGLang supports the Qwen3-Next-class GatedDeltaNet
 # hybrid; this probe checks whether it loads the MiniCPM-V-4.6 composite
 # (fakequant checkpoint) and what a concurrent chat workload sustains.
+vllm_image = (
+    modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.12")
+    .apt_install("libnuma1", "numactl")
+    .uv_pip_install("vllm", "openai==2.6.1")
+    .env(
+        {
+            "HF_HOME": "/vol/hf",
+            "TOKENIZERS_PARALLELISM": "false",
+            "CUDA_HOME": "/usr/local/cuda",
+        }
+    )
+)
+
+
+@app.function(image=vllm_image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=2 * 3600)
+def vllm_probe(
+    model_path: str = "/vol/models/minicpm-v46-textonly-fakequant",
+    concurrency: int = 64,
+    samples: int = 192,
+    max_tokens: int = 512,
+) -> None:
+    """vLLM fallback probe (SGLang 0.5.7 verdict: no Qwen3.5-hybrid impl and
+    the transformers fallback rejects hybrids). Same load shape as
+    sglang_probe."""
+    import threading
+    import time
+    import urllib.request
+    from concurrent.futures import ThreadPoolExecutor
+
+    from openai import OpenAI
+
+    cmd = [
+        "vllm",
+        "serve",
+        model_path,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "30000",
+        "--dtype",
+        "bfloat16",
+        "--gpu-memory-utilization",
+        "0.85",
+    ]
+    print("+", " ".join(cmd), flush=True)
+    server = subprocess.Popen(cmd)
+    try:
+        deadline = time.monotonic() + 1200
+        while True:
+            if server.poll() is not None:
+                raise RuntimeError(f"vllm server exited early: {server.returncode}")
+            try:
+                urllib.request.urlopen("http://127.0.0.1:30000/health", timeout=5)
+                break
+            except Exception:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("vllm server never became healthy")
+                time.sleep(5)
+        print("server healthy", flush=True)
+
+        prompts = []
+        with open("/vol/data/perfectblend_train.jsonl", "r", encoding="utf-8") as handle:
+            for line in handle:
+                row = json.loads(line)
+                users = [m["content"] for m in row.get("conversations", []) if m.get("role") == "user"]
+                if users:
+                    prompts.append(users[0])
+                if len(prompts) >= samples:
+                    break
+
+        client = OpenAI(base_url="http://127.0.0.1:30000/v1", api_key="none")
+        monitor = GpuMonitor(tag="vllm")
+        monitor.start()
+        completed = 0
+        total_tokens = 0
+        lock = threading.Lock()
+
+        def one(prompt: str):
+            nonlocal completed, total_tokens
+            response = client.chat.completions.create(
+                model=model_path,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.0,
+            )
+            with lock:
+                completed += 1
+                total_tokens += response.usage.completion_tokens
+
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            list(pool.map(one, prompts))
+        wall = time.monotonic() - started
+        stats = monitor.stop()
+        print(
+            "VLLM_PROBE",
+            json.dumps(
+                {
+                    "samples": completed,
+                    "completion_tokens": total_tokens,
+                    "wall_s": round(wall, 1),
+                    "tok_per_s": round(total_tokens / max(wall, 1e-9), 1),
+                    "concurrency": concurrency,
+                    **stats,
+                }
+            ),
+            flush=True,
+        )
+        sample = client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Explain how tides work in two sentences."}],
+            max_tokens=80,
+            temperature=0.0,
+        )
+        print("SAMPLE", sample.choices[0].message.content[:400], flush=True)
+    finally:
+        server.terminate()
+
+
 sglang_image = (
     modal.Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu24.04", add_python="3.12")
     .apt_install("libnuma1", "numactl")
