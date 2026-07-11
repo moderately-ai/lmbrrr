@@ -13,6 +13,10 @@ claimed_from: todo
 assignee: claude
 lease_expires_at: 1783738814
 ---
+## Outcome update (2026-07-10 night)
+
+With the fork mv batching (ec0f74e5), q8 heads are clearly positive: gamma4+q8+--schedule = 115.9 tok/s math (0.78x greedy), draft 4.9 ms/round, tau unchanged. Acceptance target (propose <= ~5ms) MET at the operating point. Remaining stretch: Markov row-norm pruning; gamma8 blocked on the quantized mm path (see bf16-activation ticket).
+
 ## Progress (2026-07-10 late, commit ca4715c)
 
 Landed: --drafter-quantize (q8_0/q4k/q6k post-hoc head quantization; tau-IDENTICAL at q8 on math — the risk didn't materialize), width>=1 floor, and the measured operating point gamma=4 + threshold 0.3: math ratio 0.51 -> 0.62 (91.4 tok/s, draft 5.3 ms). SURPRISE FINDING: q8 heads are time-NEUTRAL today (draft 4.7 vs 5.3 bf16) because the F32-cast + per-row quantized-mv taxes eat the byte win; gamma=8+q8 draft ballooned to 21 ms — a live measurement of the fork's per-row mv dispatch loop (fwd_mv re-dispatching per row). q8 flips clearly positive when bf16-activation-quantized-matmul-metal lands (now measurably the gating item for BOTH quant lanes). Remaining scope: Markov row-norm pruning (stretch, ~-1 ms), and re-A/B q8 after the fork work.
