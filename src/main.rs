@@ -5039,7 +5039,7 @@ fn verify_table(args: VerifyTableArgs) -> Result<()> {
         "concurrency": 1,
         "concurrency_note": "single-request only; batched verify lands with batched-multi-stream-decode-runner",
         "rows": enriched,
-        "scheduler_contract": "T_verify(gamma) per context bucket = median_verify_seconds; T_round(gamma) = T_draft + T_verify(gamma).",
+        "scheduler_contract": "T_verify(gamma) per context bucket = median_verify_seconds; T_round(gamma) = T_fixed + T_draft + T_verify(gamma). T_fixed is the per-round host residual measured in-loop (dspark report round_residual_ms.drafter_rounds.median_ms), carried by the cost-model artifact's fixed_round_ms.",
     });
     write_json_report(args.output.as_ref(), &report)
 }
@@ -5381,8 +5381,20 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mut recycle_proposed_tokens = 0usize;
     let mut recycle_accepted_tokens = 0usize;
 
+    // Per-round host-cost residuals: round wall time minus the cost model's
+    // kernel-time prediction for that round's shape. The round boundary is a
+    // natural sync (the targets readback), so no extra synchronize() taints
+    // the measurement. The median over drafter rounds is the fixed_round_ms
+    // the scheduler contract needs; tree rounds are excluded (two segment
+    // dispatches per layer — not represented by the chunk table).
+    // (scheduled width, draft ran, residual ms); width is the verify chunk
+    // len minus 1 for copy rounds.
+    let mut drafter_round_residuals_ms: Vec<(usize, bool, f64)> = Vec::new();
+    let mut copy_round_residuals_ms: Vec<(usize, bool, f64)> = Vec::new();
+
     if !eos_ids.contains(&first_token) {
         while committed.len() < args.max_new_tokens {
+            let round_start = Instant::now();
             // Keep the lookup index in sync with everything committed so
             // far, regardless of which round type committed it.
             if args.pld {
@@ -5489,6 +5501,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                         start += accepted + 1;
                     }
 
+                    copy_round_residuals_ms.push((
+                        w,
+                        false,
+                        secs(round_start.elapsed()) * 1000.0
+                            - cost_model.verify_kernel_ms(w + 1),
+                    ));
                     committed.extend_from_slice(&pld_draft[..accepted]);
                     committed.push(bonus);
                     rounds += 1;
@@ -5843,6 +5861,16 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 start += accepted + 1;
             }
 
+            let kernel_est_ms = if skip_draft {
+                cost_model.verify_kernel_ms(1)
+            } else {
+                cost_model.kernel_ms(width)
+            };
+            drafter_round_residuals_ms.push((
+                width,
+                !skip_draft,
+                secs(round_start.elapsed()) * 1000.0 - kernel_est_ms,
+            ));
             committed.extend_from_slice(&draft_tokens[..accepted]);
             committed.push(bonus);
             accepted_histogram[accepted] += 1;
@@ -5892,6 +5920,25 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         .take_while(|(a, b)| a == b)
         .count();
 
+    let summarize_residuals = |values: &[(usize, bool, f64)]| -> serde_json::Value {
+        if values.is_empty() {
+            return serde_json::Value::Null;
+        }
+        let mut sorted = values.iter().map(|(_, _, r)| *r).collect::<Vec<_>>();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let pick = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+        serde_json::json!({
+            "count": sorted.len(),
+            "median_ms": pick(0.5),
+            "p10_ms": pick(0.1),
+            "p90_ms": pick(0.9),
+            "mean_ms": sorted.iter().sum::<f64>() / sorted.len() as f64,
+            "samples": values.iter()
+                .map(|(w, drafted, r)| serde_json::json!([w, drafted, r]))
+                .collect::<Vec<_>>(),
+        })
+    };
+
     let report = serde_json::json!({
         "kind": "lmbrrr_dspark_drafter_run",
         "schema_version": 1,
@@ -5925,6 +5972,14 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             "fixed_round_ms": cost_model.fixed_ms,
             "default_draft_ms": cost_model.draft_ms,
             "verify_ms_by_chunk_len": cost_model.verify_ms.clone(),
+        },
+        // Round wall minus the model's kernel-time prediction; the drafter
+        // median is the measured fixed_round_ms for this stack (tree rounds
+        // excluded — two segment dispatches per layer are outside the chunk
+        // table's contract).
+        "round_residual_ms": {
+            "drafter_rounds": summarize_residuals(&drafter_round_residuals_ms),
+            "copy_rounds": summarize_residuals(&copy_round_residuals_ms),
         },
         "proposed_width_histogram": proposed_width_histogram,
         "skipped_drafts": skipped_drafts,
@@ -6788,8 +6843,12 @@ impl RoundCostModel {
     /// like-with-like there while the admission objective below carries the
     /// full cost.
     fn kernel_ms(&self, width: usize) -> f64 {
-        let l = (width + 1).min(self.verify_ms.len() - 1);
-        self.draft_ms + self.verify_ms[l]
+        self.draft_ms + self.verify_kernel_ms(width + 1)
+    }
+
+    /// Table verify cost at chunk length l (clamped to the table tail).
+    fn verify_kernel_ms(&self, l: usize) -> f64 {
+        self.verify_ms[l.min(self.verify_ms.len() - 1)]
     }
 
     fn t_round_ms(&self, width: usize) -> f64 {
