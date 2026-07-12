@@ -205,6 +205,53 @@ impl QuantizedTextArtifact {
         Ok(Some(MixedLinear::from_qtensor(qweight)?))
     }
 
+    /// Loads several [out, in] weight tensors as ONE row-concatenated
+    /// quantized linear (width fusion: one wide GEMV instead of N skinny
+    /// ones). Bitwise-identical quantization to loading them separately:
+    /// GGML blocks span the in-dimension within a row, so concatenating
+    /// along out-rows never crosses a block boundary. Returns None if any
+    /// tensor is absent (caller falls back to separate loads); errors if
+    /// present tensors disagree on format or in-dim.
+    pub fn load_linear_fused(&self, names: &[&str]) -> Result<Option<MixedLinear>> {
+        let mut tensors = Vec::with_capacity(names.len());
+        for name in names {
+            match self.tensors.get(*name) {
+                Some(tensor) => tensors.push((*name, tensor)),
+                None => return Ok(None),
+            }
+        }
+        let in_dim = tensors[0].1.shape[1];
+        let dtype = tensors[0]
+            .1
+            .ggml_dtype()
+            .with_context(|| format!("map quantized tensor format for {}", tensors[0].0))?;
+        let mut values = Vec::new();
+        let mut out_dim = 0usize;
+        for (name, tensor) in &tensors {
+            if tensor.shape.len() != 2 || tensor.shape[1] != in_dim {
+                anyhow::bail!(
+                    "fused linear {name} has shape {:?}, expected [*, {in_dim}]",
+                    tensor.shape
+                );
+            }
+            let fmt = tensor
+                .ggml_dtype()
+                .with_context(|| format!("map quantized tensor format for {name}"))?;
+            if fmt != dtype {
+                anyhow::bail!(
+                    "fused linear {name} format {fmt:?} differs from {dtype:?}; \
+                     refusing to mix quantization rungs in one fused weight"
+                );
+            }
+            out_dim += tensor.shape[0];
+            values.extend(self.load_values(name, tensor)?);
+        }
+        let cpu_weight = Tensor::from_vec(values, (out_dim, in_dim), &Device::Cpu)?;
+        let qweight = QTensor::quantize_onto(&cpu_weight, dtype, &self.device)
+            .with_context(|| format!("requantize fused {names:?} into {dtype:?} QTensor"))?;
+        Ok(Some(MixedLinear::from_qtensor(qweight)?))
+    }
+
     fn load_values(&self, name: &str, tensor: &QuantizedTensor) -> Result<Vec<f32>> {
         // From-source formats read the original safetensors tensor directly,
         // so the only quantization applied is the final GGML one.

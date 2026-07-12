@@ -435,37 +435,42 @@ pub struct TreeForward {
 
 #[derive(Clone, Debug)]
 struct Mlp {
-    gate_proj: MixedLinear,
-    up_proj: MixedLinear,
+    // gate and up fused into one [2*intermediate, hidden] weight: one wide
+    // GEMV streams ~2x the GB/s of two skinny ones (width fusion, K2).
+    // Row-concatenation never crosses a quant block, so the fused quantized
+    // load is bitwise-identical to separate loads.
+    gate_up_proj: MixedLinear,
     down_proj: MixedLinear,
+    intermediate_size: usize,
     act: Activation,
 }
 
 impl Mlp {
     fn new(cfg: &TextConfig, vb: VarBuilder) -> Result<Self> {
+        let gate = vb.get(
+            (cfg.intermediate_size, cfg.hidden_size),
+            "gate_proj.weight",
+        )?;
+        let up = vb.get((cfg.intermediate_size, cfg.hidden_size), "up_proj.weight")?;
+        let gate_up = Tensor::cat(&[&gate, &up], 0)?;
         Ok(Self {
-            gate_proj: MixedLinear::dense(linear_no_bias(
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                vb.pp("gate_proj"),
-            )?),
-            up_proj: MixedLinear::dense(linear_no_bias(
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                vb.pp("up_proj"),
-            )?),
+            gate_up_proj: MixedLinear::dense(candle_nn::Linear::new(gate_up, None)),
             down_proj: MixedLinear::dense(linear_no_bias(
                 cfg.intermediate_size,
                 cfg.hidden_size,
                 vb.pp("down_proj"),
             )?),
+            intermediate_size: cfg.intermediate_size,
             act: cfg.hidden_act,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let lhs = self.gate_proj.forward(xs)?.apply(&self.act)?;
-        let rhs = self.up_proj.forward(xs)?;
+        let gate_up = self.gate_up_proj.forward(xs)?;
+        let lhs = gate_up
+            .narrow(D::Minus1, 0, self.intermediate_size)?
+            .apply(&self.act)?;
+        let rhs = gate_up.narrow(D::Minus1, self.intermediate_size, self.intermediate_size)?;
         self.down_proj.forward(&(lhs * rhs)?)
     }
 
@@ -476,16 +481,16 @@ impl Mlp {
     ) -> Result<usize> {
         let prefix = format!("model.language_model.layers.{layer_index}.mlp");
         let mut replaced = 0usize;
-        replaced += replace_quantized_linear(
-            &mut self.gate_proj,
-            &format!("{prefix}.gate_proj.weight"),
-            artifact,
-        )?;
-        replaced += replace_quantized_linear(
-            &mut self.up_proj,
-            &format!("{prefix}.up_proj.weight"),
-            artifact,
-        )?;
+        if let Some(fused) = artifact
+            .load_linear_fused(&[
+                &format!("{prefix}.gate_proj.weight"),
+                &format!("{prefix}.up_proj.weight"),
+            ])
+            .map_err(|err| candle::Error::Msg(format!("load fused mlp gate_up {err}")))?
+        {
+            self.gate_up_proj = fused;
+            replaced += 2;
+        }
         replaced += replace_quantized_linear(
             &mut self.down_proj,
             &format!("{prefix}.down_proj.weight"),
