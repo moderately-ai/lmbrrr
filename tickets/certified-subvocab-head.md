@@ -1,7 +1,7 @@
 ---
 id: certified-subvocab-head
 title: Certified-exact sub-vocabulary lm_head (CSV-Decode class) - measurement-gated
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: []
