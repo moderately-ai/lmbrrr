@@ -1,7 +1,7 @@
 ---
 id: regrid-fused-deltanet-decode-kernel
 title: Re-grid fused DeltaNet decode kernel to full-occupancy geometry
-status: in-progress
+status: done
 priority: p1
 dependencies: [ngram-draft-source-mux]
 related: []
