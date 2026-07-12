@@ -67,11 +67,11 @@ def main() -> int:
                 cmd = [str(ROOT / "target/release/lmbrrr"), "dspark-run",
                        "--drafter", drafter, "--prompt", prompt,
                        "--max-new-tokens", str(args.max_new_tokens),
-                       "--gamma", str(args.gamma),
                        "--quantized-manifest", str(ROOT / QMAN)]
                 # Defaults an arm's extra flags may override (dspark-run
                 # rejects duplicate flags).
-                for flag, value in [("--drafter-quantize", "q8-0"),
+                for flag, value in [("--gamma", str(args.gamma)),
+                                    ("--drafter-quantize", "q8-0"),
                                     ("--quantize-lm-head", "q4k"),
                                     ("--cost-model", str(ROOT / COST))]:
                     if flag not in extra:
