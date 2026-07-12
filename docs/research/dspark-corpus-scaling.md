@@ -107,3 +107,28 @@ Executed variant: vLLM regen (native MiniCPMV4_6 serving, 6,597 tok/s at concurr
 **Round-3 gate: cleared 3x over.** +1.46 tau_math over round-1 vs the +0.4 criterion. Config for round 3: FRESH init (not warm), 100k-500k corpus, same deployment-config trace path, argmax confidence labels (already merged in the DeepSpec fork), per-epoch held-out tau selection.
 
 Deployment sequencing before the default drafter flips to B: download step_1386, local fixed-gamma tau A/B vs round-1, argmax-event STS fit (the warm arm's fit measured +8.2% held-out over round-1 scheduled; rerun the same 10-minute procedure for B), scheduled validation must beat round-1 scheduled and B fixed-gamma, multi-class sweep.
+
+## Round-3 results (2026-07-12): 120k fresh, 10 epochs, 8x H100 fused pipeline
+
+Pipeline note: the volume-copy stage was removed mid-round after two failures (ENOSPC at ~600 GiB of stale caches, then a ~100 MB/s degrading single-stream copy of the 810 GiB cache). The fused stage (commit b0175b1) builds the cache on container-local NVMe and trains from it directly in one 8x H100 container; the volume receives only checkpoints. Wall clock: regen 67 min + prep 14 min + train 3.6 h (5.3 s/step, 1.94x the 4-GPU rate at fixed global batch).
+
+Per-epoch held-out gsm8k tau (fakequant deployment target, greedy, n=20):
+
+| epoch | tau | delta |
+| --- | --- | --- |
+| 1 | 2.251 | — |
+| 2 | 2.841 | +0.590 |
+| 3 | 3.310 | +0.469 |
+| 4 | 3.608 | +0.298 |
+| 5 | 3.634 | +0.026 |
+| 6 | 3.741 | +0.107 |
+| 7 | 3.864 | +0.123 |
+| 8 | 3.909 | +0.045 |
+| 9 | 3.812 | -0.097 |
+| 10 | **3.914** | +0.102 |
+
+Curve flattens at tau ~3.85-3.91 from epoch 7 (epochs 8/10 statistically tied at n=20). mt-bench final: **2.302** (pos-0 61.3%). Epoch-4 already exceeded the 40k arm's 18-epoch final — corpus size dominates epoch count decisively.
+
+**Corpus scaling law (gsm8k tau, fresh init, deployment-config traces):** 40k -> 3.54 (18 ep); 120k -> 3.91 (10 ep, plateau by 7). Marginal: **+0.37 per 3x corpus**, and cheaper per point than epochs. Round-1 gate comparison: +1.83 over round-1's 2.08 (gate was +0.4).
+
+**500k recommendation:** the slope supports one more scale step. With the fused pipeline the cost estimate drops from ~$880 to ~$330-380 (regen 4.5 h single-GPU, prep in-container, ~6 epochs at 8x H100 with the per-epoch plateau stop; projected tau ~4.3). One constraint to resolve first: a 500k cache is ~3.3 TiB on NVMe — above the 1.5 TiB this round used; either confirm Modal's ephemeral-disk ceiling supports ~3.5 TiB or cap the corpus at ~350-400k (~2.4-2.6 TiB). Epoch budget: 6 with the plateau stop armed.
