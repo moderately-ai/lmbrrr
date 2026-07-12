@@ -31,19 +31,21 @@ Greedy floor (no speculation): **~247 tok/s** bench-mode after the K1/K2/K5 fuse
 
 - **Tree speculation**: tau-positive (coding 2.44 -> 3.10) but cost-bound (-20% tok/s); unlocks when verify chunks get ~2x cheaper.
 - **Token recycling**: no margin threshold reaches viability at current verify costs (break-even ~77% acceptance at depth 1; drops to ~50% at roofline verify cost).
-- **q4_K matvec micro-optimizations**: three falsifications (row tile, load shape, half accumulate) pin the kernel as integer-unpack-pipe-bound (99 GB/s effective vs 262 q8_0 / 358 dense on the same shape).
+- **q4_K matvec micro-optimizations**: three falsifications (row tile, load shape, half accumulate) pin the kernel as integer-unpack-pipe-bound (99 GB/s effective vs 262 q8_0 / 358 dense on the same shape). Three more this session (u32 unpack, dot(), float4 loads) closed the schedule class.
+- **q4_K SoA plane-split repack (2026-07-12)**: the layout hypothesis is dead too. Planes (16B headers | 128B quants, perfect 128B cache-line alignment) vs 144B AoS: +3.7% lm_head, +1-2% projections, bitwise-identical outputs (fork 00adb831, `qmv-soa` gate task). With registers unconstrained (maxThreads 1024) and 62k TGs, the limiter is integer-dequant ISSUE RATE — no data-layout or schedule change fixes arithmetic. Absolute-time check: q4_K AoS is already the fastest head per token (142MB @ 1.16ms vs q8_0 1.28ms vs bf16 1.42ms), so the q8_0-head fallback is falsified a priori. **The floor moves by reading fewer weights, not by reading them faster.**
 - **Q8 lm_head swap**: wins isolated (-0.42 ms) but loses -1 to -6% in-stream; also improves tau (head fidelity shifts near-ties) — relevant to future head work.
 
 ## Deployment convention (locked in 2026-07-12)
 
 A drafter deploys as one directory: `model.safetensors + config.json + sts.json + draft_vocab.json + cost_model.json`. `dspark-run --drafter DIR --quantized-manifest M` reproduces the full stack with zero spec flags (gamma 6, schedule/pld/recycle default on; `--flag=false` ablates; explicit artifact flags override the bundle). Round-4 deploys by assembling its own bundle dir through the truthful flow: unscheduled gamma-6 records on the calibration split → `evals/fit_sts.py` → held-out validation vs the incumbent bundle.
 
-## Open levers, quantified (updated post round-4 ship)
+## Open levers, quantified (updated post K6 falsification)
 
 1. ~~Round-4 drafter~~ SHIPPED (tau 4.41 gsm8k final, beat projection; `target/dspark-drafter-round4/` is the default bundle).
-2. **q4_K SoA plane-split repack** (`q4k-soa-plane-repack`) — the only remaining floor-mover after six mv micro-opt falsifications; register-pressure hypothesis eliminated via pipeline stats (maxTotalThreads=1024); .gputrace captures ready for Xcode counter confirmation. Micro gate ≥1.5-2× GB/s or falsify (fallback: q8_0 head).
-3. **Certified sub-vocab target head**: gate re-runs in the residual measurement pass; post-K5 the non-model share (~2.9ms incl. head+argmax vs 1.4ms model stack) dominates the greedy step — this lever's stock went UP.
-4. **Beyond 400k corpus** (`dspark-cache-redesign-beyond-400k`): slope still steep (+0.50/3.33× at the 400k step); blocked only on the cache redesign (compression probe first).
-5. **Tree**: K4 landed (in-kernel segment restart, one dispatch/layer); mid-band ties coding, still off by default — re-run break-even after (2).
+2. ~~q4_K SoA repack~~ FALSIFIED (+3.7% vs the ≥1.5-2× gate; issue-rate-bound). GEMV-speed work on 4-bit formats is closed: schedule class (6 falsifications), layout class (SoA), and format fallback (q8_0 slower on absolute time) all dead.
+3. **Certified sub-vocab target head** (`certified-subvocab-head`, promoted to p1 keystone): the surviving floor lever — read FEWER weights. Head ≈ 1.2ms of the 5.09ms realized greedy step; a certified 32k sub-vocab cuts it toward ~0.15ms worst-case-bounded ⇒ floor ~5.09 → ~4.0ms ≈ +25%. The post-K5 decomposition (model stack 1.4ms vs non-model 2.9ms) says head+argmax is the dominant single item.
+4. **Barrier-minimal encoding** (K2 remainder): the qmv bench shows per-dispatch serialized latency at small n is ~10-40× the bandwidth roofline — overlap across independent projections is where that latency hides; measure what production overlap already achieves before investing.
+5. **Beyond 400k corpus** (`dspark-cache-redesign-beyond-400k`): slope still steep (+0.50/3.33×); blocked only on the cache redesign (compression probe first).
+6. **Tree**: K4 landed (in-kernel segment restart); mid-band ties coding, off by default — re-run break-even if (3) cheapens verify chunks (the head is read once per chunk, so (3) helps chunks MORE than singles).
 
-Rough composition to 1000 single-stream on structured domains: floor 247 → ~280-300 via (2)(+3), times tau_eff from tau 4.41 + tree once chunks cheapen = 950-1200. Bottleneck order: repack → head → tree; corpus scaling still buys tau cheaply when the cache redesign lands.
+Recomposed path to 1000 on structured domains: floor 247 → ~300+ via (3)(+4), × tau_eff from tau 4.41 + tree re-check after (3) = the target stays reachable but now runs through the head, not the GEMV. If (3) also falsifies, the honest ceiling is ~750-850 (Jump 1 landed on today's floor).
