@@ -716,6 +716,12 @@ struct DsparkRunArgs {
     #[arg(long)]
     cost_model: Option<PathBuf>,
 
+    /// Override the fixed per-round host cost (ms) in the scheduler's
+    /// throughput objective: T_round = T_fixed + T_draft + T_verify(w+1).
+    /// Overrides the artifact's fixed_round_ms for A/B.
+    #[arg(long)]
+    cost_model_fixed_ms: Option<f64>,
+
     /// Two-branch tree verification: draft the runner-up branch at position
     /// 1 (propose_branching) and verify both paths in one flattened forward,
     /// committing the longer-accepted one. Caps effective width at 5 so the
@@ -5324,10 +5330,13 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     model.set_verify_state_capture(!readvance_rollback());
 
     let sts = StsCalibration::load(drafter_dir)?;
-    let cost_model = match &args.cost_model {
+    let mut cost_model = match &args.cost_model {
         Some(path) => RoundCostModel::load(path)?,
         None => RoundCostModel::measured_default(),
     };
+    if let Some(fixed_ms) = args.cost_model_fixed_ms {
+        cost_model.fixed_ms = fixed_ms;
+    }
     let mut committed = vec![first_token];
     let mut anchor = first_token;
     let mut start = prompt_tokens.len();
@@ -5773,7 +5782,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 // (measured: -7% on weak Spec-Bench classes). A round only
                 // resets the counter when its realized rate, draft
                 // included, beat a plain greedy step.
-                let round_ms = cost_model.t_round_ms(width);
+                let round_ms = cost_model.kernel_ms(width);
                 let greedy_ms = cost_model.verify_ms[1];
                 if ((accepted + 1) as f64) * greedy_ms < round_ms {
                     consecutive_zero_widths += 1;
@@ -5912,6 +5921,11 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             "exact argmax acceptance (lossless greedy)"
         },
         "sts_calibration": { "scale": sts.scale, "shift": sts.shift },
+        "cost_model": {
+            "fixed_round_ms": cost_model.fixed_ms,
+            "default_draft_ms": cost_model.draft_ms,
+            "verify_ms_by_chunk_len": cost_model.verify_ms.clone(),
+        },
         "proposed_width_histogram": proposed_width_histogram,
         "skipped_drafts": skipped_drafts,
         "tree": args.tree,
@@ -6721,7 +6735,11 @@ impl StsCalibration {
 /// Measured round costs (ms) for the scheduler's throughput objective.
 /// verify_ms\[l\] is the chunk cost at length l = width + 1; defaults are the
 /// post-fusion in-loop table (target/vt-gdc2.json + measured draft).
+/// fixed_ms is the per-round host cost (readback waits, rollback bookkeeping,
+/// encode overhead) that kernel-time tables miss — omitting it biases the
+/// admission argmax narrow, because a constant amortizes over wider widths.
 struct RoundCostModel {
+    fixed_ms: f64,
     draft_ms: f64,
     verify_ms: Vec<f64>,
 }
@@ -6732,6 +6750,8 @@ impl RoundCostModel {
         struct Artifact {
             default_draft_ms: f64,
             verify_ms_by_chunk_len: Vec<f64>,
+            #[serde(default)]
+            fixed_round_ms: f64,
         }
         let artifact: Artifact = serde_json::from_reader(
             std::fs::File::open(path)
@@ -6742,6 +6762,7 @@ impl RoundCostModel {
             anyhow::bail!("cost model needs verify_ms for chunk lengths >= 2");
         }
         Ok(Self {
+            fixed_ms: artifact.fixed_round_ms,
             draft_ms: artifact.default_draft_ms,
             verify_ms: artifact.verify_ms_by_chunk_len,
         })
@@ -6749,6 +6770,9 @@ impl RoundCostModel {
 
     fn measured_default() -> Self {
         Self {
+            // Median per-round host residual (wall minus draft+verify kernel
+            // time); refreshed by the verify-table round_residual output.
+            fixed_ms: 1.0,
             draft_ms: 5.0,
             // Index by chunk length l (0 unused); interpolated from the
             // 2026-07-10 post-fusion verify table at short/medium context.
@@ -6758,9 +6782,18 @@ impl RoundCostModel {
         }
     }
 
-    fn t_round_ms(&self, width: usize) -> f64 {
+    /// Kernel-time round cost (no fixed term): the contract the rate-based
+    /// skip-hysteresis was validated on — its greedy counterfactual
+    /// (verify_ms\[1\]) is also kernel-only, so the comparison stays
+    /// like-with-like there while the admission objective below carries the
+    /// full cost.
+    fn kernel_ms(&self, width: usize) -> f64 {
         let l = (width + 1).min(self.verify_ms.len() - 1);
         self.draft_ms + self.verify_ms[l]
+    }
+
+    fn t_round_ms(&self, width: usize) -> f64 {
+        self.fixed_ms + self.kernel_ms(width)
     }
 }
 
@@ -7552,6 +7585,63 @@ mod tests {
         let width = schedule_prefix_width(probs, |w| 1.0 / sps[w], 2);
         assert_eq!(width, 0);
         assert_eq!(reads.get(), 1, "c_2 must never be read");
+    }
+
+    /// A fixed per-round cost amortizes over wider widths: admitting the
+    /// second row needs t2/t1 < E2/E1 = 2.35/1.9; at t = [10.0, 10.2, 12.8]
+    /// the ratio 12.8/10.2 fails that bare test but (12.8+2)/(10.2+2)
+    /// passes it. Omitting c therefore biases admission narrow — the
+    /// confirmed contract gap behind the truthful-STS regression.
+    #[test]
+    fn scheduler_fixed_cost_amortizes_toward_wider_widths() {
+        let probs = [0.9f64, 0.5];
+        let verify = [10.0f64, 10.2, 12.8];
+        let without_c = schedule_prefix_width(
+            probs.into_iter(),
+            |w| verify[w],
+            2,
+        );
+        let with_c = schedule_prefix_width(
+            probs.into_iter(),
+            |w| 2.0 + verify[w],
+            2,
+        );
+        assert_eq!(without_c, 1, "c = 0 must reject the marginal second row");
+        assert_eq!(with_c, 2, "c = 2 must admit the same second row");
+    }
+
+    /// Artifacts without fixed_round_ms (all pre-2026-07-12 cost models)
+    /// must parse with fixed_ms = 0.0; artifacts carrying the field must
+    /// load it into t_round_ms.
+    #[test]
+    fn cost_model_artifact_fixed_round_ms_back_compat() {
+        let dir = std::env::temp_dir().join(format!(
+            "lmbrrr-cost-model-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("legacy.json");
+        std::fs::write(
+            &legacy,
+            r#"{"default_draft_ms": 5.0, "verify_ms_by_chunk_len": [0.0, 6.5, 13.9, 14.2]}"#,
+        )
+        .unwrap();
+        let model = RoundCostModel::load(&legacy).unwrap();
+        assert_eq!(model.fixed_ms, 0.0);
+        assert_eq!(model.t_round_ms(1), 5.0 + 13.9);
+        assert_eq!(model.kernel_ms(1), model.t_round_ms(1));
+
+        let with_fixed = dir.join("fixed.json");
+        std::fs::write(
+            &with_fixed,
+            r#"{"default_draft_ms": 5.0, "verify_ms_by_chunk_len": [0.0, 6.5, 13.9, 14.2], "fixed_round_ms": 1.25}"#,
+        )
+        .unwrap();
+        let model = RoundCostModel::load(&with_fixed).unwrap();
+        assert_eq!(model.fixed_ms, 1.25);
+        assert_eq!(model.t_round_ms(1), 1.25 + 5.0 + 13.9);
+        assert_eq!(model.kernel_ms(1), 5.0 + 13.9);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Improving throughput admits positions and stops at the first decline.
