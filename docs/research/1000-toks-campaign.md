@@ -10,6 +10,7 @@ Running log of the single-stream campaign's measured multipliers. All figures ar
 | + rate-based skip-hysteresis (135409a) | 157.5 | 145.4 | 138.5 |
 | round-2 stack (B drafter + balanced STS + FR-Spec 32k + refit cost model) | 182.8 | 168.2 | 150.7 |
 | **round-3 stack (120k drafter, same recipe)** | **204.0** | **187.8** | **155.4** |
+| **+ in-loop cost model + truthful gamma6 STS (2026-07-12)** | **208-231 (3q)** | **185.7** | **+1.2% vs same-day incumbent** |
 
 Greedy floor (no speculation): ~215 tok/s device-resident. The speculative stack now beats greedy by ~2x on math/coding and the 6-class mean sits at 72% of the greedy floor because weak classes (translation, summarization) still run near-greedy — correctly, per the scheduler's own economics.
 
@@ -20,6 +21,9 @@ Greedy floor (no speculation): ~215 tok/s device-resident. The speculative stack
 - **Corpus scaling (the dominant lever)**: fresh-init tau on the fakequant target: round-1 2.08 -> 40k 3.54 -> 120k 3.914 (gsm8k; mt-bench 1.56 -> 2.08 -> 2.302). +0.37 tau per 3x corpus; epoch 4 at 120k beat 18 epochs at 40k. 400k in flight.
 - **Argmax-event STS calibration**: uncalibrated round-2 lost to round-1 (154.3 vs 160.7); calibrated it won (+8.2% held-out). Calibration is a gating multiplier, not a nicety. Flow codified in `evals/fit_sts.py`.
 - **FR-Spec 32k draft vocab** (assistant-ranked, control tokens pinned): tau exactly unchanged in all 6 classes, +11.6% mean, draft cost 5.37 -> 3.47 ms. The 8k profile locates the cliff (94.3% coverage -> -12% tau on math/coding).
+
+- **Cost-model contract fix (2026-07-12)**: the scheduler's kernel-time table missed two structural effects, measured in-loop across 1,109 rounds (18 calibration questions): drafted rounds run 0.1-0.7 ms UNDER the synchronized table (queue overlap hides host work), while no-draft rounds run 0.7-1.1 ms OVER it (the bare per-round host cost). The composite understated greedy pace ~19% and biased admission narrow — the mechanism the decision-optimal (upward-biased) STS was accidentally compensating for. Shipped: per-l in-loop-refit verify table + explicit greedy_step_ms (v32k-inloop artifact) + truthful gamma-6 STS; validation A/B: +1.2% 6-class mean, math +2.6%, coding +4.2%, weak classes parity. The truthful-calibration flow is now deployable as-is for round-4.
+- **Measurement confound found**: different width schedules invoke different chunk-length kernels; +/-ulp logit noise flips near-ties and diverges committed text between arms (e.g. qa q324: 81 vs 52 tokens) — tok/s deltas on such questions are content luck, not economics. The suite harness now prints DIVERGENT CONTENT on affected questions; averaging over per-class 3 questions bounds the residual luck.
 
 ## Recorded negatives with unlock conditions
 

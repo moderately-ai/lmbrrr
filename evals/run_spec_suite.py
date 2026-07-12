@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SUITE = ROOT / "evals/prompts/spec-suite.json"
 QUESTIONS = ROOT / "evals/prompts/spec_bench_question.jsonl"
 QMAN = "target/minicpm-v46-q4k-mlp-q8-text-full/manifest.json"
-COST = "target/spec-round-cost-model-q4kfull-mc.json"
+COST = "target/spec-round-cost-model-q4kfull-v32k-inloop.json"
 
 
 def load_questions():
@@ -88,6 +88,7 @@ def main() -> int:
 
     print(f"\n{'class':>15} {'qid':>4} {'arm':>8} {'tok/s':>12} {'tau':>5}")
     for cls, qid in qids:
+        texts = {}
         for name, _, _ in arms:
             reports = []
             for rep in range(1, args.reps + 1):
@@ -97,10 +98,18 @@ def main() -> int:
             if not reports:
                 print(f"{cls:>15} {qid:>4} {name:>8}  (no reports)")
                 continue
+            texts[name] = reports[0].get("committed_text")
             tps = [r["tokens_per_second"] for r in reports]
             tau = st.mean(r["mean_accepted_length"] for r in reports)
             print(f"{cls:>15} {qid:>4} {name:>8} {st.mean(tps):7.1f}"
                   f"±{st.pstdev(tps):3.1f} {tau:5.2f}")
+        # Different scheduling -> different chunk shapes -> kernel-noise
+        # tie-flips can diverge the committed text between arms; tok/s is
+        # then comparing different generations and must not be read as a
+        # scheduling-economics delta on this question.
+        if len(set(texts.values())) > 1:
+            print(f"{'':>15} {qid:>4} {'!':>8}  DIVERGENT CONTENT across arms "
+                  f"(tie-flip): tok/s not comparable on this question")
     return 0
 
 

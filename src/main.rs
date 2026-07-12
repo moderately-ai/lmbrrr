@@ -5801,7 +5801,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 // resets the counter when its realized rate, draft
                 // included, beat a plain greedy step.
                 let round_ms = cost_model.kernel_ms(width);
-                let greedy_ms = cost_model.verify_ms[1];
+                let greedy_ms = cost_model.greedy_step_ms;
                 if ((accepted + 1) as f64) * greedy_ms < round_ms {
                     consecutive_zero_widths += 1;
                 } else {
@@ -5971,6 +5971,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "cost_model": {
             "fixed_round_ms": cost_model.fixed_ms,
             "default_draft_ms": cost_model.draft_ms,
+            "greedy_step_ms": cost_model.greedy_step_ms,
             "verify_ms_by_chunk_len": cost_model.verify_ms.clone(),
         },
         // Round wall minus the model's kernel-time prediction; the drafter
@@ -6797,6 +6798,13 @@ struct RoundCostModel {
     fixed_ms: f64,
     draft_ms: f64,
     verify_ms: Vec<f64>,
+    /// Realized cost of a plain greedy step INSIDE the spec loop (the skip
+    /// probe / no-draft round). Measured in-loop it runs ~0.7-1.1 ms over
+    /// verify_ms\[1\]: with no draft to overlap behind, the per-round host
+    /// cost shows up bare. This is the hysteresis's greedy counterfactual;
+    /// understating it over-values skip mode by ~19% (2026-07-12, n=606
+    /// no-draft rounds across the calibration split).
+    greedy_step_ms: f64,
 }
 
 impl RoundCostModel {
@@ -6807,6 +6815,8 @@ impl RoundCostModel {
             verify_ms_by_chunk_len: Vec<f64>,
             #[serde(default)]
             fixed_round_ms: f64,
+            #[serde(default)]
+            greedy_step_ms: Option<f64>,
         }
         let artifact: Artifact = serde_json::from_reader(
             std::fs::File::open(path)
@@ -6819,21 +6829,29 @@ impl RoundCostModel {
         Ok(Self {
             fixed_ms: artifact.fixed_round_ms,
             draft_ms: artifact.default_draft_ms,
+            // Legacy artifacts (no greedy_step_ms) keep the historical
+            // kernel-only reference so their measured behaviour is unchanged.
+            greedy_step_ms: artifact
+                .greedy_step_ms
+                .unwrap_or(artifact.verify_ms_by_chunk_len[1]),
             verify_ms: artifact.verify_ms_by_chunk_len,
         })
     }
 
     fn measured_default() -> Self {
+        // Index by chunk length l (0 unused); interpolated from the
+        // 2026-07-10 post-fusion verify table at short/medium context.
+        let verify_ms = vec![
+            0.0, 6.5, 13.9, 14.2, 14.5, 14.9, 15.2, 15.5, 15.7, 16.0, 16.4, 16.8, 17.2,
+        ];
         Self {
-            // Median per-round host residual (wall minus draft+verify kernel
-            // time); refreshed by the verify-table round_residual output.
-            fixed_ms: 1.0,
+            // In-loop drafted-round residuals vs the kernel table sit within
+            // +/-0.7 ms of zero (2026-07-12); the width-dependent truth lives
+            // in the table, not a constant, so the default stays 0.
+            fixed_ms: 0.0,
             draft_ms: 5.0,
-            // Index by chunk length l (0 unused); interpolated from the
-            // 2026-07-10 post-fusion verify table at short/medium context.
-            verify_ms: vec![
-                0.0, 6.5, 13.9, 14.2, 14.5, 14.9, 15.2, 15.5, 15.7, 16.0, 16.4, 16.8, 17.2,
-            ],
+            greedy_step_ms: verify_ms[1],
+            verify_ms,
         }
     }
 
@@ -7689,17 +7707,20 @@ mod tests {
         assert_eq!(model.fixed_ms, 0.0);
         assert_eq!(model.t_round_ms(1), 5.0 + 13.9);
         assert_eq!(model.kernel_ms(1), model.t_round_ms(1));
+        // Legacy hysteresis reference: the kernel-only l=1 entry.
+        assert_eq!(model.greedy_step_ms, 6.5);
 
         let with_fixed = dir.join("fixed.json");
         std::fs::write(
             &with_fixed,
-            r#"{"default_draft_ms": 5.0, "verify_ms_by_chunk_len": [0.0, 6.5, 13.9, 14.2], "fixed_round_ms": 1.25}"#,
+            r#"{"default_draft_ms": 5.0, "verify_ms_by_chunk_len": [0.0, 6.5, 13.9, 14.2], "fixed_round_ms": 1.25, "greedy_step_ms": 7.4}"#,
         )
         .unwrap();
         let model = RoundCostModel::load(&with_fixed).unwrap();
         assert_eq!(model.fixed_ms, 1.25);
         assert_eq!(model.t_round_ms(1), 1.25 + 5.0 + 13.9);
         assert_eq!(model.kernel_ms(1), 5.0 + 13.9);
+        assert_eq!(model.greedy_step_ms, 7.4);
         std::fs::remove_dir_all(&dir).ok();
     }
 
