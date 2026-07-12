@@ -2,4 +2,5 @@
 //! Appendix-A prefix scheduler, the measured round-cost model, and the STS
 //! confidence calibration.
 
+pub mod recycle_topk;
 pub mod scheduler;
