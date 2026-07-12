@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use candle::{
-    quantized::{GgmlDType, QMatMul, QTensor},
+    quantized::{GgmlDType, QTensor},
     safetensors::Load,
     DType, Device, Module, Tensor, D,
 };
@@ -660,7 +660,10 @@ struct DsparkRunArgs {
     #[arg(long)]
     prompt: String,
 
-    #[arg(long, default_value_t = 8)]
+    /// Deployed default: gamma 6 beat 4 and 8 on the strong Spec-Bench
+    /// classes with the scheduled round-3 stack (the scheduler truncates
+    /// per-round, so gamma is a cap, not a fixed width).
+    #[arg(long, default_value_t = 6)]
     gamma: usize,
 
     #[arg(long, default_value_t = 128)]
@@ -707,8 +710,9 @@ struct DsparkRunArgs {
     /// Hardware-aware prefix scheduling (paper Appendix A): per-round
     /// admission maximizing expected tokens/sec from calibrated cumulative
     /// survival and the measured round-cost table. Supersedes
-    /// --confidence-threshold when set.
-    #[arg(long)]
+    /// --confidence-threshold when set. Deployed default: on (ablate with
+    /// --schedule=false); the stub-oracle path ignores it.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     schedule: bool,
 
     /// Round-cost artifact for the scheduler (target/spec-round-cost-model
@@ -740,8 +744,9 @@ struct DsparkRunArgs {
     /// sequence matches an earlier occurrence in prompt+history, propose the
     /// tokens that followed it (verified exactly like any draft). Fires only
     /// on a match, so the greedy floor is preserved; the trained drafter
-    /// handles non-matching rounds.
-    #[arg(long)]
+    /// handles non-matching rounds. Deployed default: on (--pld=false to
+    /// ablate).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pld: bool,
 
     /// Max tokens proposed per prompt-lookup match (chunk cap is 11).
@@ -759,8 +764,9 @@ struct DsparkRunArgs {
     /// Verify-logit token recycling: bank top-k candidates from every verify
     /// pass and, when no prompt-lookup match fires, chain the banked top-1
     /// through rows whose logit margin clears --recycle-margin. Same gate as
-    /// PLD (fires only where the scheduler skips drafting).
-    #[arg(long)]
+    /// PLD (fires only where the scheduler skips drafting). Deployed
+    /// default: on (--recycle=false to ablate).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     recycle: bool,
 
     /// Max recycled chain depth (chained acceptance compounds; keep short).
@@ -3559,21 +3565,24 @@ fn bench_quant_matmul(
     warmup: usize,
     iterations: usize,
 ) -> serde_json::Value {
+    // Route through MixedLinear so the bench measures the DEPLOYED path:
+    // bf16_direct kernels for Q8_0/Q4K/Q6K on Metal (F32 accumulate + one
+    // output hop), the F32 input cast only where the runner actually pays it.
+    let bf16_direct = activation_dtype == DType::BF16
+        && device.is_metal()
+        && matches!(
+            quant_dtype,
+            GgmlDType::Q8_0 | GgmlDType::Q4K | GgmlDType::Q6K
+        );
     let result = (|| -> Result<(Duration, Duration)> {
         let prepare_started = Instant::now();
         let qweight = QTensor::quantize_onto(weight_cpu, quant_dtype, device)?;
-        let qmatmul = QMatMul::from_qtensor(qweight)?;
+        let linear = lmbrrr::quantized_linear::MixedLinear::from_qtensor(qweight)?;
         let input = input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
         device.synchronize()?;
         let prepare_elapsed = prepare_started.elapsed();
-        let elapsed = if activation_dtype == DType::F32 {
-            time_iterations(device, warmup, iterations, || Ok(qmatmul.forward(&input)?))?
-        } else {
-            time_iterations(device, warmup, iterations, || {
-                let input = input.to_dtype(DType::F32)?;
-                Ok(qmatmul.forward(&input)?)
-            })?
-        };
+        let elapsed =
+            time_iterations(device, warmup, iterations, || Ok(linear.forward(&input)?))?;
         Ok((prepare_elapsed, elapsed))
     })();
     matmul_bench_row(
@@ -3582,7 +3591,13 @@ fn bench_quant_matmul(
         "quantized",
         Some(format!("{quant_dtype:?}")),
         activation_dtype,
-        (activation_dtype != DType::F32).then_some("to_f32"),
+        if activation_dtype == DType::F32 {
+            None
+        } else if bf16_direct {
+            Some("bf16_direct")
+        } else {
+            Some("to_f32")
+        },
         result,
         iterations,
         input_cpu.dim(1).unwrap_or(1),
@@ -5273,7 +5288,15 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
-    let draft_vocab_ids: Option<Vec<u32>> = match &args.draft_vocab {
+    // The drafter dir is an artifact bundle (same pattern as sts.json):
+    // draft_vocab.json and cost_model.json auto-load when present so a
+    // deployed drafter is one directory, not a flag soup. Explicit flags
+    // override.
+    let draft_vocab_path = args.draft_vocab.clone().or_else(|| {
+        let bundled = drafter_dir.join("draft_vocab.json");
+        bundled.exists().then_some(bundled)
+    });
+    let draft_vocab_ids: Option<Vec<u32>> = match &draft_vocab_path {
         None => None,
         Some(path) => {
             #[derive(serde::Deserialize)]
@@ -5330,7 +5353,11 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     model.set_verify_state_capture(!readvance_rollback());
 
     let sts = StsCalibration::load(drafter_dir)?;
-    let mut cost_model = match &args.cost_model {
+    let cost_model_path = args.cost_model.clone().or_else(|| {
+        let bundled = drafter_dir.join("cost_model.json");
+        bundled.exists().then_some(bundled)
+    });
+    let mut cost_model = match &cost_model_path {
         Some(path) => RoundCostModel::load(path)?,
         None => RoundCostModel::measured_default(),
     };
@@ -5944,6 +5971,8 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "schema_version": 1,
         "model_id": args.model.model_id.as_str(),
         "drafter": drafter_dir,
+        "draft_vocab_path": draft_vocab_path,
+        "cost_model_path": cost_model_path,
         "device": format!("{device:?}"),
         "dtype": format!("{dtype:?}"),
         "load_seconds": secs(load_elapsed),
@@ -7722,6 +7751,39 @@ mod tests {
         assert_eq!(model.kernel_ms(1), 5.0 + 13.9);
         assert_eq!(model.greedy_step_ms, 7.4);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Positions beyond the fitted range clamp to the LAST per-position fit
+    /// (deep positions behave like the deepest fitted one, not the global
+    /// fallback); an empty positions vec falls back to the global fit.
+    #[test]
+    fn sts_position_probability_clamps_to_last_fit() {
+        let sts = StsCalibration {
+            scale: 1.0,
+            shift: 0.0,
+            positions: vec![
+                StsPositionCalibration { scale: 2.0, shift: 0.0 },
+                StsPositionCalibration { scale: 0.5, shift: 1.0 },
+            ],
+        };
+        assert_eq!(sts.position_probability(1, 2.0), sts.position_probability(7, 2.0));
+        assert!(sts.position_probability(0, 2.0) != sts.position_probability(7, 2.0));
+
+        let global_only = StsCalibration {
+            scale: 1.0,
+            shift: 0.0,
+            positions: Vec::new(),
+        };
+        assert_eq!(global_only.position_probability(3, 1.5), global_only.probability(1.5));
+    }
+
+    /// Committed per round = accepted + bonus, exactly from the histogram.
+    #[test]
+    fn mean_committed_per_round_from_histogram() {
+        // 3 rounds at 0 accepted, 2 at 2, 1 at 5 -> (3*1 + 2*3 + 1*6) / 6.
+        let histogram = [3usize, 0, 2, 0, 0, 1];
+        assert_eq!(mean_committed_per_round(&histogram, 6), 15.0 / 6.0);
+        assert_eq!(mean_committed_per_round(&histogram, 0), 0.0);
     }
 
     /// Improving throughput admits positions and stops at the first decline.

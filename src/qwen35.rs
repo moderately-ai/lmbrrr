@@ -380,8 +380,11 @@ impl TruncatableKvCache {
                 (Some(k), Some(v)) => (k, v),
                 _ => candle::bail!("compact_rows on an empty KV cache"),
             };
-            let k_rows = k.narrow(2, src, count)?.contiguous()?;
-            let v_rows = v.narrow(2, src, count)?.contiguous()?;
+            // copy(), not contiguous(): a contiguous narrow (e.g. single
+            // head) would alias the cache storage and slice_set rejects
+            // overlapping self/src.
+            let k_rows = k.narrow(2, src, count)?.copy()?;
+            let v_rows = v.narrow(2, src, count)?.copy()?;
             k.slice_set(&k_rows, 2, dst)?;
             v.slice_set(&v_rows, 2, dst)?;
         }
@@ -1948,6 +1951,37 @@ fn l2norm(xs: &Tensor) -> Result<Tensor> {
     xs.broadcast_mul(&denom)
 }
 
+/// Row-major ancestor-visibility data for [`Qwen35TextModel::tree_mask`]
+/// ((1 + 2w) x (offset + 1 + 2w); 0 = visible, -inf = masked), pure so the
+/// visibility rules are unit-testable without a model.
+fn tree_mask_data(w: usize, offset: usize) -> Vec<f32> {
+    let l = 1 + 2 * w;
+    let total = offset + l;
+    let mut data = vec![f32::NEG_INFINITY; l * total];
+    for row in 0..l {
+        for col in 0..=offset {
+            data[row * total + col] = 0.0; // history + anchor (col offset)
+        }
+        let (seg_start, seg_pos) = if row == 0 {
+            (0, 0)
+        } else if row <= w {
+            (1, row) // a-segment, 1-based index within branch
+        } else {
+            (w + 1, row - w) // b-segment
+        };
+        if seg_pos > 0 {
+            for i in 0..seg_pos {
+                data[row * total + offset + seg_start + i] = 0.0;
+            }
+        }
+    }
+    data
+}
+
+#[cfg(test)]
+#[path = "qwen35_tests.rs"]
+mod tests;
+
 #[derive(Clone, Debug)]
 enum TokenMixer {
     Full(FullAttention),
@@ -2316,24 +2350,7 @@ impl Qwen35TextModel {
     fn tree_mask(&self, w: usize, offset: usize) -> Result<Tensor> {
         let l = 1 + 2 * w;
         let total = offset + l;
-        let mut data = vec![f32::NEG_INFINITY; l * total];
-        for row in 0..l {
-            for col in 0..=offset {
-                data[row * total + col] = 0.0; // history + anchor (col offset)
-            }
-            let (seg_start, seg_pos) = if row == 0 {
-                (0, 0)
-            } else if row <= w {
-                (1, row) // a-segment, 1-based index within branch
-            } else {
-                (w + 1, row - w) // b-segment
-            };
-            if seg_pos > 0 {
-                for i in 0..seg_pos {
-                    data[row * total + offset + seg_start + i] = 0.0;
-                }
-            }
-        }
+        let data = tree_mask_data(w, offset);
         Tensor::from_vec(data, (1, 1, l, total), &self.device)?.to_dtype(self.dtype)
     }
 
