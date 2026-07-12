@@ -1,7 +1,7 @@
 ---
 id: certified-subvocab-head
 title: Certified-exact sub-vocabulary lm_head (CSV-Decode class) - measurement-gated
-status: in-progress
+status: closed
 priority: p1
 dependencies: []
 related: []
@@ -9,6 +9,8 @@ scopes: [runtime/metal, runtime/candle, candle-fork]
 shared_scopes: []
 paths: []
 tags: [kernels, frontier-survey]
+closed_reason: wontdo
+closed_note: "falsified offline: cluster bounds f=0.996, SVD+tail bounds f=0.994; queries 91% out-of-subspace, bounds 50-100x the logit gaps"
 ---
 ## Goal
 Bit-exact greedy head via cluster upper bounds (k-means over tied embedding, Cauchy-Schwarz cluster bounds, best-first opening, certified stop, <2% full fallback; ~18% of vocab scored). Tied anisotropic embeddings tighten bounds.
