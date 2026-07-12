@@ -1,7 +1,7 @@
 ---
 id: q4k-soa-plane-repack
 title: SoA q4_K plane-split repack (device layout) — the floor-mover
-status: todo
+status: closed
 priority: p1
 dependencies: []
 related: [gemv-width-splitk-concurrency, certified-subvocab-head]
@@ -9,6 +9,8 @@ scopes: [candle-fork, runtime/metal]
 shared_scopes: []
 paths: []
 tags: [kernels, jump2]
+closed_reason: wontdo
+closed_note: "falsified at micro gate: +3.7% vs the >=1.5-2x bar; kernel is issue-rate-bound, not layout-bound"
 ---
 ## Why (evidence, 2026-07-12)
 

@@ -2,7 +2,7 @@
 id: certified-subvocab-head
 title: Certified-exact sub-vocabulary lm_head (CSV-Decode class) - measurement-gated
 status: todo
-priority: p3
+priority: p1
 dependencies: []
 related: []
 scopes: [runtime/metal, runtime/candle, candle-fork]
