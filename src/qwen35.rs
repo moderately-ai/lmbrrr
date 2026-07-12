@@ -635,15 +635,15 @@ impl FullAttention {
         // Decode (l == 1, no mask) routes to the fused SDPA vector kernel:
         // native GQA (no repeat_kv materialization of the whole cache) and
         // strided k/v (the cache narrows feed in directly, no k_t
-        // transpose+contiguous copy). Chunks/prefill (l > 1 with the model's
-        // causal mask) route to SDPA-full with do_causal: the kernel's
-        // bottom-right-aligned causal masking equals the offset-causal mask,
-        // so no mask materializes and the whole-cache repeat_kv copies leave
-        // verify chunks AND prefill. LMBRRR_UNFUSED_SDPA=1 restores both
-        // reference paths.
-        // The masked route covers verify chunks only (l <= 16): the kernel
-        // needs a materialized (b, qheads, l, kv) mask, tiny for chunks but
-        // heavy for long prefill, and stride-0 broadcast masks measure wrong.
+        // transpose+contiguous copy). Verify chunks (2 <= l <= 16 with the
+        // model's causal mask) route to SDPA-full with an explicitly
+        // materialized (b, qheads, l, kv) mask — the kernel's do_causal
+        // alignment does NOT match the offset-causal semantics (measured;
+        // gates rejected it), and stride-0 broadcast masks measure wrong,
+        // so the mask copy is the price of the fused path. It is tiny for
+        // chunks but heavy for long prefill, hence the l <= 16 bound; long
+        // prefill stays on the tensor path below. LMBRRR_UNFUSED_SDPA=1
+        // restores both reference paths.
         let use_sdpa =
             (l == 1 && mask.is_none() || (2..=16).contains(&l) && mask.is_some())
                 && !unfused_sdpa();
