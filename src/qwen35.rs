@@ -801,8 +801,10 @@ struct DeltaVerifyCapture {
 
 #[derive(Clone, Debug)]
 struct GatedDeltaNet {
-    in_proj_qkv: MixedLinear,
-    in_proj_z: MixedLinear,
+    // qkv (conv_dim rows) + z (value_dim rows) fused into one wide weight
+    // (K2 width fusion); b/a stay separate — tiny protected-dense decay
+    // gates. The fused output IS the kernel's [qkv | z] prefix layout.
+    in_proj_qkvz: MixedLinear,
     in_proj_b: MixedLinear,
     in_proj_a: MixedLinear,
     out_proj: MixedLinear,
@@ -864,17 +866,11 @@ impl GatedDeltaNet {
                 .to_dtype(DType::F32)?
                 .exp()?
                 .reshape((1, 1, cfg.linear_num_value_heads))?;
+        let qkv_w = vb.get((conv_dim, cfg.hidden_size), "in_proj_qkv.weight")?;
+        let z_w = vb.get((value_dim, cfg.hidden_size), "in_proj_z.weight")?;
+        let qkvz_w = Tensor::cat(&[&qkv_w, &z_w], 0)?;
         Ok(Self {
-            in_proj_qkv: MixedLinear::dense(linear_no_bias(
-                cfg.hidden_size,
-                conv_dim,
-                vb.pp("in_proj_qkv"),
-            )?),
-            in_proj_z: MixedLinear::dense(linear_no_bias(
-                cfg.hidden_size,
-                value_dim,
-                vb.pp("in_proj_z"),
-            )?),
+            in_proj_qkvz: MixedLinear::dense(candle_nn::Linear::new(qkvz_w, None)),
             in_proj_b: MixedLinear::dense(linear_no_bias(
                 cfg.hidden_size,
                 cfg.linear_num_value_heads,
@@ -1021,16 +1017,16 @@ impl GatedDeltaNet {
     ) -> Result<usize> {
         let prefix = format!("model.language_model.layers.{layer_index}.linear_attn");
         let mut replaced = 0usize;
-        replaced += replace_quantized_linear(
-            &mut self.in_proj_qkv,
-            &format!("{prefix}.in_proj_qkv.weight"),
-            artifact,
-        )?;
-        replaced += replace_quantized_linear(
-            &mut self.in_proj_z,
-            &format!("{prefix}.in_proj_z.weight"),
-            artifact,
-        )?;
+        if let Some(fused) = artifact
+            .load_linear_fused(&[
+                &format!("{prefix}.in_proj_qkv.weight"),
+                &format!("{prefix}.in_proj_z.weight"),
+            ])
+            .map_err(|err| candle::Error::Msg(format!("load fused deltanet qkvz {err}")))?
+        {
+            self.in_proj_qkvz = fused;
+            replaced += 2;
+        }
         replaced += replace_quantized_linear(
             &mut self.in_proj_b,
             &format!("{prefix}.in_proj_b.weight"),
@@ -1054,11 +1050,10 @@ impl GatedDeltaNet {
     /// populated conv state (i.e. any step after prefill).
     fn forward_fused_decode(&mut self, xs: &Tensor) -> Result<Tensor> {
         self.ensure_v1_state_layout()?;
-        let qkv = self.in_proj_qkv.forward(xs)?;
-        let z = self.in_proj_z.forward(xs)?;
+        let qkvz = self.in_proj_qkvz.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
         let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?
+        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?
             .flatten_all()?
             .contiguous()?;
         let conv_state = self
@@ -1133,11 +1128,10 @@ impl GatedDeltaNet {
     /// rollback-capture assembly matching the tensor path's semantics.
     fn forward_fused_chunk(&mut self, xs: &Tensor, l: usize) -> Result<Tensor> {
         self.ensure_v1_state_layout()?;
-        let qkv = self.in_proj_qkv.forward(xs)?;
-        let z = self.in_proj_z.forward(xs)?;
+        let qkvz = self.in_proj_qkvz.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
         let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
+        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
         let conv_state = self
             .conv_state
             .as_ref()
@@ -1259,11 +1253,10 @@ impl GatedDeltaNet {
     /// untouched, exactly like the v1 decode route) and forward_fused_chunk
     /// (l >= 2: capture assembly) semantics.
     fn forward_fused_v2(&mut self, xs: &Tensor, b: usize, l: usize) -> Result<Tensor> {
-        let qkv = self.in_proj_qkv.forward(xs)?;
-        let z = self.in_proj_z.forward(xs)?;
+        let qkvz = self.in_proj_qkvz.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
         let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?;
+        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?;
         let conv_state = self
             .conv_state
             .as_ref()
@@ -1342,11 +1335,10 @@ impl GatedDeltaNet {
         // the tree-check equivalence gate compares like with like: v2 chunk
         // kernels (transposed state) when active, else v1.
         let use_v2 = deltanet_v2();
-        let qkv = self.in_proj_qkv.forward(xs)?;
-        let z = self.in_proj_z.forward(xs)?;
+        let qkvz = self.in_proj_qkvz.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
         let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkv, &z, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
+        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
         let conv_state = self
             .conv_state
             .as_ref()
@@ -1502,7 +1494,9 @@ impl GatedDeltaNet {
                 || self.forward_fused_chunk(xs, l),
             );
         }
-        let mixed = profiled(
+        // One fused qkv+z projection; the z slice is consumed later at the
+        // output-gate stage (same math, computed a stage earlier).
+        let qkvz = profiled(
             profiler,
             &device,
             Some(layer_index),
@@ -1510,8 +1504,12 @@ impl GatedDeltaNet {
             "deltanet_qkv_projection",
             l,
             offset,
-            || self.in_proj_qkv.forward(xs)?.transpose(1, 2),
+            || self.in_proj_qkvz.forward(xs),
         )?;
+        let z_flat = qkvz.narrow(D::Minus1, self.conv_dim, self.value_dim)?;
+        let mixed = qkvz
+            .narrow(D::Minus1, 0, self.conv_dim)?
+            .transpose(1, 2)?;
         let mixed = profiled(
             profiler,
             &device,
@@ -1574,7 +1572,7 @@ impl GatedDeltaNet {
             l,
             offset,
             || {
-                let z = self.in_proj_z.forward(xs)?.reshape((
+                let z = z_flat.reshape((
                     b,
                     l,
                     self.num_v_heads,
