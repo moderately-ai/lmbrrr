@@ -1097,18 +1097,11 @@ fn select_device(cpu: bool) -> Result<Device> {
     if cpu {
         return Ok(Device::Cpu);
     }
-    #[cfg(feature = "metal")]
-    {
-        match Device::new_metal(0) {
-            Ok(device) => Ok(device),
-            Err(err) => {
-                eprintln!("Metal unavailable ({err}); falling back to CPU");
-                Ok(Device::Cpu)
-            }
+    match Device::new_metal(0) {
+        Ok(device) => Ok(device),
+        Err(err) => {
+            eprintln!("Metal unavailable ({err}); falling back to CPU");
+            Ok(Device::Cpu)
         }
-    }
-    #[cfg(not(feature = "metal"))]
-    {
-        Ok(Device::Cpu)
     }
 }

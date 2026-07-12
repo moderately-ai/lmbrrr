@@ -1,7 +1,6 @@
 pub mod artifacts;
 pub mod config;
 pub mod dspark;
-#[cfg(feature = "metal")]
 pub mod fused_deltanet;
 pub mod generate;
 pub mod image_processor;

@@ -1054,7 +1054,6 @@ impl GatedDeltaNet {
     /// Whole-layer fused decode step (one Metal dispatch after the packed
     /// projection cat); requires the shapes the kernel supports and a
     /// populated conv state (i.e. any step after prefill).
-    #[cfg(feature = "metal")]
     fn forward_fused_decode(&mut self, xs: &Tensor) -> Result<Tensor> {
         self.ensure_v1_state_layout()?;
         let qkv = self.in_proj_qkv.forward(xs)?;
@@ -1107,7 +1106,6 @@ impl GatedDeltaNet {
         self.out_proj.forward(&out)
     }
 
-    #[cfg(feature = "metal")]
     fn fused_decode_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
         (1..=32).contains(&b)
             && l == 1
@@ -1121,7 +1119,6 @@ impl GatedDeltaNet {
             && self.head_v_dim <= 256
     }
 
-    #[cfg(feature = "metal")]
     fn fused_chunk_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
         b == 1
             && (2..=12).contains(&l)
@@ -1136,7 +1133,6 @@ impl GatedDeltaNet {
 
     /// Whole-layer fused chunk step (one dispatch, 2 <= l <= 12) with
     /// rollback-capture assembly matching the tensor path's semantics.
-    #[cfg(feature = "metal")]
     fn forward_fused_chunk(&mut self, xs: &Tensor, l: usize) -> Result<Tensor> {
         self.ensure_v1_state_layout()?;
         let qkv = self.in_proj_qkv.forward(xs)?;
@@ -1224,7 +1220,6 @@ impl GatedDeltaNet {
 
     /// F32, offset-0, v2-transposed (b, h, dv, dk) copy of the live state
     /// for the v2 kernels; flips the layout flag.
-    #[cfg(feature = "metal")]
     fn take_state_for_v2(&mut self, b: usize, device: &Device) -> Result<Tensor> {
         let state = match &self.recurrent_state {
             Some(state) if state.dtype() == DType::F32 => state.clone(),
@@ -1244,7 +1239,6 @@ impl GatedDeltaNet {
         Ok(state)
     }
 
-    #[cfg(feature = "metal")]
     fn fused_v2_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
         // Chunks only: the re-gridded core wins there and compounds with l
         // (measured -7%/-8% at l=8/12), but the three-dispatch structure
@@ -1266,7 +1260,6 @@ impl GatedDeltaNet {
     /// transposed state. Mirrors forward_fused_decode (l == 1: captures
     /// untouched, exactly like the v1 decode route) and forward_fused_chunk
     /// (l >= 2: capture assembly) semantics.
-    #[cfg(feature = "metal")]
     fn forward_fused_v2(&mut self, xs: &Tensor, b: usize, l: usize) -> Result<Tensor> {
         let qkv = self.in_proj_qkv.forward(xs)?;
         let z = self.in_proj_z.forward(xs)?;
@@ -1337,7 +1330,6 @@ impl GatedDeltaNet {
     /// per root-to-leaf segment, with the alternate segment seeded from the
     /// closed-form branch-point (post-anchor) state of the main segment's
     /// capture — no weight re-reads, two kernel dispatches per layer.
-    #[cfg(feature = "metal")]
     fn forward_tree(&mut self, xs: &Tensor, branch_width: usize) -> Result<Tensor> {
         let w = branch_width;
         let seg1 = w + 1;
@@ -1476,7 +1468,6 @@ impl GatedDeltaNet {
     ) -> Result<Tensor> {
         let (b, l, _) = xs.dims3()?;
         let device = xs.device().clone();
-        #[cfg(feature = "metal")]
         if self.fused_v2_eligible(xs, b, l) {
             return profiled(
                 profiler,
@@ -1489,7 +1480,6 @@ impl GatedDeltaNet {
                 || self.forward_fused_v2(xs, b, l),
             );
         }
-        #[cfg(feature = "metal")]
         if self.fused_decode_eligible(xs, b, l) {
             return profiled(
                 profiler,
@@ -1502,7 +1492,6 @@ impl GatedDeltaNet {
                 || self.forward_fused_decode(xs),
             );
         }
-        #[cfg(feature = "metal")]
         if self.fused_chunk_eligible(xs, b, l) {
             return profiled(
                 profiler,
@@ -2088,13 +2077,8 @@ impl DecoderLayer {
             (TokenMixer::Linear(attn), None) => {
                 attn.forward(&hidden, layer_index, offset, profiler)?
             }
-            #[cfg(feature = "metal")]
             (TokenMixer::Linear(attn), Some(tree)) => {
                 attn.forward_tree(&hidden, tree.branch_width)?
-            }
-            #[cfg(not(feature = "metal"))]
-            (TokenMixer::Linear(_), Some(_)) => {
-                candle::bail!("tree verification requires the metal feature")
             }
         };
         let xs = (residual + hidden)?;
