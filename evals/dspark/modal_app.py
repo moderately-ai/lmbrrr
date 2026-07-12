@@ -1345,3 +1345,123 @@ def round3_prep_and_train() -> None:
         checkpoint=f"runs/checkpoints/lmbrrr/{R3_EXP}/step_latest",
         target_model="/vol/models/minicpm-v46-fakequant-q4kft",
     )
+
+
+# --------------------------- round-4 detached chain ---------------------------
+# 400k fresh: sized by Modal's measured ephemeral-disk ceiling (3.0 TiB; a
+# 500k cache at ~3.3 TiB does not fit single-container). Same fused design as
+# round 3 (cache on NVMe, volume gets checkpoints only); 6-epoch budget from
+# round-3's epoch-7 plateau, with per-epoch checkpoints for the plateau stop.
+
+R4_POOL = "perfectblend_train_400k_clean.jsonl"
+R4_REGEN = "regen-r4-400k.jsonl"
+R4_CACHE = "target-cache-r4-400k"
+R4_EXP = "dspark_r4_fresh400k"
+R4_SAMPLES = 400000
+
+
+@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=7200)
+def round4_stage0_pool() -> None:
+    """First R4_SAMPLES contamination-free rows of the 600k pool (word-13-gram
+    screen vs gsm8k test + Spec-Bench), then spawns regen."""
+    import json as _json
+    import re
+
+    from datasets import load_dataset
+
+    out_path = f"/vol/data/{R4_POOL}"
+    if os.path.exists(out_path):
+        print(f"{R4_POOL} exists; skipping filter", flush=True)
+    else:
+        def norm_ngrams(text: str, n: int = 13) -> set:
+            words = re.sub(r"[^a-z0-9 ]", " ", text.lower()).split()
+            return {" ".join(words[i : i + n]) for i in range(len(words) - n + 1)}
+
+        eval_grams: set = set()
+        for row in load_dataset("openai/gsm8k", "main", split="test"):
+            eval_grams |= norm_ngrams(row["question"])
+        with open("/vol/data/spec_bench_question.jsonl") as f:
+            for line in f:
+                for turn in _json.loads(line)["turns"]:
+                    eval_grams |= norm_ngrams(turn)
+
+        kept = 0
+        dropped = 0
+        with open("/vol/data/perfectblend_train_600k.jsonl") as src, open(
+            out_path + ".tmp", "w"
+        ) as dst:
+            for line in src:
+                if kept >= R4_SAMPLES:
+                    break
+                row = _json.loads(line)
+                texts = [m.get("content", "") for m in row.get("conversations", [])]
+                if any(norm_ngrams(t) & eval_grams for t in texts if t):
+                    dropped += 1
+                    continue
+                dst.write(line)
+                kept += 1
+        os.rename(out_path + ".tmp", out_path)
+        print(f"pool: kept {kept}, dropped {dropped} contaminated", flush=True)
+        volume.commit()
+    round4_stage1_regen.spawn()
+
+
+@app.function(image=vllm_image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=8 * 3600)
+def round4_stage1_regen() -> None:
+    """400k regen (vLLM, greedy, deployment-config target; ~3.6 h at the
+    measured 40k-in-21:38 pace), then spawns the fused prep+train."""
+    if os.path.exists(f"/vol/data/{R4_REGEN}"):
+        print(f"{R4_REGEN} exists; skipping regen", flush=True)
+    else:
+        vllm_regenerate.local(
+            num_samples=R4_SAMPLES,
+            input_name=R4_POOL,
+            output_name=R4_REGEN,
+        )
+    round4_prep_and_train.spawn()
+
+
+@app.function(image=image, gpu="H100:8", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=3 * 1024 * 1024)
+def round4_prep_and_train() -> None:
+    """Fused prep+train at the 3.0 TiB ephemeral ceiling: ~2.64 TiB cache on
+    NVMe, 6 epochs (round-3 plateaued by 7 on a 3x smaller corpus), per-epoch
+    checkpoints; spawns the evaluator on completion."""
+    build_dir = f"/tmp/cache-build/{R4_CACHE}"
+    _run(
+        [
+            "python",
+            "/deepspec/scripts/data/prepare_target_cache.py",
+            "--config",
+            TRAIN_CONFIG,
+            "--train-data-path",
+            f"/vol/data/{R4_REGEN}",
+            "--output-dir",
+            build_dir,
+            "--local-batch-size",
+            "8",
+            "--num-workers",
+            "2",
+            "--opts",
+            "model.target_model_name_or_path=/vol/models/minicpm-v46-fakequant-q4kft",
+        ],
+        cwd="/deepspec",
+    )
+    opts = [
+        f"data.target_cache_path={build_dir}",
+        "train.local_batch_size=2",
+        "model.target_model_name_or_path=/vol/models/minicpm-v46-fakequant-q4kft",
+        "train.lr=0.0006",
+        "train.num_train_epochs=6",
+        "logging.logging_steps=1",
+        "train.torch_compile=true",
+        f"exp_name={R4_EXP}",
+    ]
+    cmd = ["python", "/deepspec/train.py", "--config", TRAIN_CONFIG]
+    for opt in opts:
+        cmd.extend(["--opts", opt])
+    _run(cmd, cwd="/deepspec", env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
+    volume.commit()
+    evaluate.spawn(
+        checkpoint=f"runs/checkpoints/lmbrrr/{R4_EXP}/step_latest",
+        target_model="/vol/models/minicpm-v46-fakequant-q4kft",
+    )
