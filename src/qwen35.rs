@@ -380,11 +380,15 @@ impl TruncatableKvCache {
                 (Some(k), Some(v)) => (k, v),
                 _ => candle::bail!("compact_rows on an empty KV cache"),
             };
-            // copy(), not contiguous(): a contiguous narrow (e.g. single
-            // head) would alias the cache storage and slice_set rejects
-            // overlapping self/src.
-            let k_rows = k.narrow(2, src, count)?.copy()?;
-            let v_rows = v.narrow(2, src, count)?.copy()?;
+            // slice_set needs a src that is contiguous AND does not alias
+            // the cache storage. copy() clones storage but keeps the narrow's
+            // strided layout (non-contiguous whenever heads > 1), while
+            // contiguous() on an already-contiguous narrow aliases the cache
+            // — so pick per case.
+            let k_rows = k.narrow(2, src, count)?;
+            let v_rows = v.narrow(2, src, count)?;
+            let k_rows = if k_rows.is_contiguous() { k_rows.copy()? } else { k_rows.contiguous()? };
+            let v_rows = if v_rows.is_contiguous() { v_rows.copy()? } else { v_rows.contiguous()? };
             k.slice_set(&k_rows, 2, dst)?;
             v.slice_set(&v_rows, 2, dst)?;
         }
@@ -1317,10 +1321,12 @@ impl GatedDeltaNet {
 
     /// Two-branch tree verify: segment decomposition over the flattened
     /// [anchor, a_1..a_w, b_1..b_w] layout. Projections/MLP shapes upstream
-    /// ran once over the whole flattened chunk; here the chunk kernel runs
-    /// per root-to-leaf segment, with the alternate segment seeded from the
-    /// closed-form branch-point (post-anchor) state of the main segment's
-    /// capture — no weight re-reads, two kernel dispatches per layer.
+    /// ran once over the whole flattened chunk. On the v2 path both segments
+    /// run in ONE fused dispatch — the alternate restarts inside the core
+    /// kernel from the post-anchor state (returned as the alternate
+    /// capture's S0). The v1 fallback runs the chunk kernel per segment with
+    /// the branch seed composed on the host from the main capture's closed
+    /// form.
     fn forward_tree(&mut self, xs: &Tensor, branch_width: usize) -> Result<Tensor> {
         let w = branch_width;
         let seg1 = w + 1;
@@ -1367,46 +1373,90 @@ impl GatedDeltaNet {
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
         };
-        // Both segments run whichever kernel generation is active; captures
-        // record the state layout so reconstruction matches.
+        if use_v2 {
+            // Single fused dispatch: the alternate segment restarts inside
+            // the core kernel from the post-anchor state, which comes back
+            // as state_mid — the alternate capture's S0. No host-composed
+            // branch seed, no second per-layer kernel call.
+            let flat = proj.flatten_all()?.contiguous()?;
+            let (out, conv_main, state_main, state_mid, cap) =
+                crate::fused_deltanet::gated_delta_v2_tree(
+                    &flat,
+                    seg1,
+                    w,
+                    1,
+                    &conv_state,
+                    &s0.contiguous()?,
+                    &self.conv_weight_full,
+                    &self.dt_bias_f32.flatten_all()?,
+                    &self.a_log_exp_f32.flatten_all()?,
+                    &self.norm.weight_f32,
+                    &dims,
+                    1e-6,
+                    self.norm.eps as f32,
+                )
+                .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
+            let mixed_t = proj
+                .narrow(D::Minus1, 0, self.conv_dim)?
+                .transpose(1, 2)?
+                .contiguous()?; // [1, conv_dim, l]
+            let ksz = self.conv_kernel_size;
+            // Post-anchor conv window = last ksz of [conv_state | anchor
+            // input] — the same view reconstruct_capture_state(cap_main, 1)
+            // produces on the host-composed path.
+            let branch_conv = Tensor::cat(&[&conv_state, &mixed_t.narrow(2, 0, 1)?], 2)?
+                .narrow(2, 1, ksz)?;
+            let conv_full_main = Tensor::cat(&[&conv_state, &mixed_t.narrow(2, 0, seg1)?], 2)?;
+            let conv_full_alt = Tensor::cat(&[&branch_conv, &mixed_t.narrow(2, seg1, w)?], 2)?;
+            let cap_main = DeltaVerifyCapture {
+                s0: s0.clone(),
+                kc: cap.kc.narrow(2, 0, seg1)?,
+                delta: cap.delta.narrow(2, 0, seg1)?,
+                gcs: cap.gcs.narrow(2, 0, seg1)?,
+                conv_full: conv_full_main,
+                prev_conv_len: conv_state.dim(2)?,
+                dtype: xs.dtype(),
+                transposed: true,
+            };
+            let cap_alt = DeltaVerifyCapture {
+                s0: state_mid,
+                kc: cap.kc.narrow(2, seg1, w)?,
+                delta: cap.delta.narrow(2, seg1, w)?,
+                gcs: cap.gcs.narrow(2, seg1, w)?,
+                conv_full: conv_full_alt,
+                prev_conv_len: ksz,
+                dtype: xs.dtype(),
+                transposed: true,
+            };
+            self.tree_captured = Some((cap_main, cap_alt));
+            self.verify_captured = None;
+            // Live state stays at the main segment's end, as on the
+            // two-dispatch path.
+            self.conv_state = Some(conv_main);
+            self.recurrent_state = Some(state_main);
+            return self.out_proj.forward(&out);
+        }
+        // v1 fallback: two dispatches with the host-composed branch seed.
         let run_segment = |proj_seg: &Tensor,
                            seg_len: usize,
                            conv: &Tensor,
                            state: &Tensor|
          -> Result<(Tensor, Tensor, Tensor, DeltaVerifyCapture)> {
             let flat = proj_seg.flatten_to(1)?.contiguous()?;
-            let (out, conv_new, state_new, cap) = if use_v2 {
-                crate::fused_deltanet::gated_delta_v2(
-                    &flat.flatten_all()?.contiguous()?,
-                    seg_len,
-                    1,
-                    conv,
-                    &state.contiguous()?,
-                    &self.conv_weight_full,
-                    &self.dt_bias_f32.flatten_all()?,
-                    &self.a_log_exp_f32.flatten_all()?,
-                    &self.norm.weight_f32,
-                    &dims,
-                    1e-6,
-                    self.norm.eps as f32,
-                )
-                .map_err(|e| candle::Error::msg(format!("{e:#}")))?
-            } else {
-                crate::fused_deltanet::gated_delta_chunk(
-                    &flat,
-                    seg_len,
-                    conv,
-                    &state.contiguous()?,
-                    &self.conv_weight_full,
-                    &self.dt_bias_f32.flatten_all()?,
-                    &self.a_log_exp_f32.flatten_all()?,
-                    &self.norm.weight_f32,
-                    &dims,
-                    1e-6,
-                    self.norm.eps as f32,
-                )
-                .map_err(|e| candle::Error::msg(format!("{e:#}")))?
-            };
+            let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_chunk(
+                &flat,
+                seg_len,
+                conv,
+                &state.contiguous()?,
+                &self.conv_weight_full,
+                &self.dt_bias_f32.flatten_all()?,
+                &self.a_log_exp_f32.flatten_all()?,
+                &self.norm.weight_f32,
+                &dims,
+                1e-6,
+                self.norm.eps as f32,
+            )
+            .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
             let mixed_t = proj_seg
                 .narrow(D::Minus1, 0, self.conv_dim)?
                 .transpose(1, 2)?
@@ -1420,7 +1470,7 @@ impl GatedDeltaNet {
                 conv_full,
                 prev_conv_len: conv.dim(2)?,
                 dtype: xs.dtype(),
-                transposed: use_v2,
+                transposed: false,
             };
             Ok((out, conv_new, state_new, capture))
         };

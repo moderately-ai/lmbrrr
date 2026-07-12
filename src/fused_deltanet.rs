@@ -487,3 +487,170 @@ pub fn gated_delta_v2(
     };
     Ok((out, conv_out, state_out, capture))
 }
+
+/// Runs the v2 tree-verify step: main segment (rows [0, seg1)) and alternate
+/// segment (rows [seg1, seg1+alt_len)) in ONE prep/core/epilogue pass; the
+/// alternate restarts inside the core dispatch from the state after main row
+/// `branch_after`-1. Returns (out [1, seg1+alt, value_dim], conv_out (main
+/// end), state_out (main end, transposed), state_mid (branch point,
+/// transposed — the alternate capture's S0), capture spanning ALL rows with
+/// the gcs cumsum restarted at the segment boundary; callers slice it per
+/// segment).
+#[allow(clippy::too_many_arguments)]
+pub fn gated_delta_v2_tree(
+    proj: &Tensor,
+    seg1: usize,
+    alt_len: usize,
+    branch_after: usize,
+    conv_state: &Tensor,
+    recurrent_state_t: &Tensor,
+    conv_weight: &Tensor,
+    dt_bias_f32: &Tensor,
+    a_log_exp_f32: &Tensor,
+    norm_weight_f32: &Tensor,
+    dims: &GatedDeltaDims,
+    l2_eps: f32,
+    norm_eps: f32,
+) -> Result<(Tensor, Tensor, Tensor, Tensor, FusedChunkCapture)> {
+    use candle_metal_kernels::kernels::{call_gated_delta_v2_tree, GatedDeltaV2Stages};
+    let Device::Metal(device) = proj.device() else {
+        anyhow::bail!("fused gated-delta v2 tree requires a Metal device");
+    };
+    let sanitized = [
+        offset0(proj)?,
+        offset0(conv_state)?,
+        offset0(recurrent_state_t)?,
+        offset0(conv_weight)?,
+        offset0(dt_bias_f32)?,
+        offset0(a_log_exp_f32)?,
+        offset0(norm_weight_f32)?,
+    ];
+    let dtypes = [
+        DType::BF16,
+        DType::BF16,
+        DType::F32,
+        DType::BF16,
+        DType::F32,
+        DType::F32,
+        DType::F32,
+    ];
+    let mut guards = Vec::with_capacity(sanitized.len());
+    for (t, dtype) in sanitized.iter().zip(dtypes.iter()) {
+        if t.dtype() != *dtype {
+            anyhow::bail!("fused gated-delta v2 tree: dtype mismatch {:?} vs {dtype:?}", t.dtype());
+        }
+        let (storage, _) = t.storage_and_layout();
+        guards.push(storage);
+    }
+    let buffer = |i: usize| -> Result<_> {
+        match &*guards[i] {
+            Storage::Metal(ms) => Ok(ms.buffer().clone()),
+            _ => anyhow::bail!("fused gated-delta v2 tree: input {i} not on Metal"),
+        }
+    };
+    let bufs: Vec<_> = (0..sanitized.len()).map(&buffer).collect::<Result<_>>()?;
+
+    let alloc = |count: usize, dtype: DType, label: &str| {
+        device
+            .new_buffer_builder()
+            .with_size_for(count, dtype)
+            .with_label(label)
+            .build()
+    };
+    let l = seg1 + alt_len;
+    let bh = dims.heads;
+    let out_buf = alloc(l * dims.value_dim, DType::BF16, "gd2t_out")?;
+    let conv_out_buf = alloc(dims.conv_dim * dims.ksz, DType::BF16, "gd2t_conv")?;
+    let state_out_buf = alloc(bh * dims.dk * dims.dv, DType::F32, "gd2t_state")?;
+    let state_mid_buf = alloc(bh * dims.dk * dims.dv, DType::F32, "gd2t_state_mid")?;
+    let kn_buf = alloc(bh * l * dims.dk, DType::F32, "gd2t_kn")?;
+    let qn_buf = alloc(bh * l * dims.dk, DType::F32, "gd2t_qn")?;
+    let vc_buf = alloc(bh * l * dims.dv, DType::F32, "gd2t_vc")?;
+    let g_step_buf = alloc(bh * l, DType::F32, "gd2t_gstep")?;
+    let beta_buf = alloc(bh * l, DType::F32, "gd2t_beta")?;
+    let cap_gcs_buf = alloc(bh * l, DType::F32, "gd2t_cap_gcs")?;
+    let cap_delta_buf = alloc(bh * l * dims.dv, DType::F32, "gd2t_cap_delta")?;
+    let o_pre_buf = alloc(l * dims.value_dim, DType::F32, "gd2t_o_pre")?;
+
+    let encoder = device.command_encoder()?;
+    call_gated_delta_v2_tree(
+        device.metal_device(),
+        &encoder,
+        device.kernels(),
+        GatedDeltaParams {
+            heads: dims.heads as u32,
+            dk: dims.dk as u32,
+            dv: dims.dv as u32,
+            conv_dim: dims.conv_dim as u32,
+            key_dim: dims.key_dim as u32,
+            value_dim: dims.value_dim as u32,
+            ksz: dims.ksz as u32,
+            l2_eps,
+            norm_eps,
+        },
+        seg1,
+        alt_len,
+        branch_after,
+        &bufs[0],
+        &bufs[1],
+        &bufs[2],
+        &bufs[3],
+        &bufs[4],
+        &bufs[5],
+        &bufs[6],
+        &out_buf,
+        &conv_out_buf,
+        &state_out_buf,
+        &state_mid_buf,
+        GatedDeltaV2Stages {
+            kn: &kn_buf,
+            qn: &qn_buf,
+            vc: &vc_buf,
+            g_step: &g_step_buf,
+            beta: &beta_buf,
+            cap_gcs: &cap_gcs_buf,
+            cap_delta: &cap_delta_buf,
+            o_pre: &o_pre_buf,
+        },
+    )
+    .map_err(candle::Error::wrap)
+    .context("fused gated-delta v2 tree dispatch")?;
+    drop(encoder);
+    drop(guards);
+
+    let mk = |buf, count: usize, dtype, shape: Vec<usize>| -> Tensor {
+        let storage = candle::MetalStorage::new(buf, device.clone(), count, dtype);
+        Tensor::from_storage(Storage::Metal(storage), shape, BackpropOp::none(), false)
+    };
+    let out = mk(out_buf, l * dims.value_dim, DType::BF16, vec![1, l, dims.value_dim]);
+    let conv_out = mk(
+        conv_out_buf,
+        dims.conv_dim * dims.ksz,
+        DType::BF16,
+        vec![1, dims.conv_dim, dims.ksz],
+    );
+    // Transposed layout: (1, heads, dv, dk).
+    let state_out = mk(
+        state_out_buf,
+        bh * dims.dk * dims.dv,
+        DType::F32,
+        vec![1, dims.heads, dims.dv, dims.dk],
+    );
+    let state_mid = mk(
+        state_mid_buf,
+        bh * dims.dk * dims.dv,
+        DType::F32,
+        vec![1, dims.heads, dims.dv, dims.dk],
+    );
+    let capture = FusedChunkCapture {
+        kc: mk(kn_buf, bh * l * dims.dk, DType::F32, vec![1, dims.heads, l, dims.dk]),
+        delta: mk(
+            cap_delta_buf,
+            bh * l * dims.dv,
+            DType::F32,
+            vec![1, dims.heads, l, dims.dv],
+        ),
+        gcs: mk(cap_gcs_buf, bh * l, DType::F32, vec![1, dims.heads, l]),
+    };
+    Ok((out, conv_out, state_out, state_mid, capture))
+}

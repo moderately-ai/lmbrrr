@@ -83,6 +83,29 @@ fn kv_cache_compact_rows_moves_alt_branch_down() {
 }
 
 #[test]
+fn kv_cache_compact_rows_multi_head() {
+    // heads > 1 makes the dim-2 narrow strided — the production shape;
+    // regression for slice_set rejecting the non-contiguous source (copy()
+    // clones storage but keeps the narrow's layout).
+    let mut cache = TruncatableKvCache::new();
+    let rows: Vec<f32> = (0..2 * 7 * 2).map(|i| i as f32).collect();
+    let t = Tensor::from_slice(&rows, (1, 2, 7, 2), &Device::Cpu).unwrap();
+    cache.append(&t, &t).unwrap();
+
+    cache.compact_rows(3, 5, 2).unwrap();
+    assert_eq!(cache.len(), 5);
+    let probe = Tensor::from_slice(&[99f32, 99., 98., 98.], (1, 2, 1, 2), &Device::Cpu).unwrap();
+    let (k, _) = cache.append(&probe, &probe).unwrap();
+    let got = kv_rows(&k, 6);
+    assert_eq!(&got[..6], &[0., 1., 2., 3., 4., 5.], "head-0 prefix untouched");
+    assert_eq!(&got[6..10], &[10., 11., 12., 13.], "head-0 b rows compacted");
+    assert_eq!(&got[10..12], &[99., 99.]);
+    assert_eq!(&got[12..18], &[14., 15., 16., 17., 18., 19.], "head-1 prefix untouched");
+    assert_eq!(&got[18..22], &[24., 25., 26., 27.], "head-1 b rows compacted");
+    assert_eq!(&got[22..24], &[98., 98.]);
+}
+
+#[test]
 fn tree_mask_visibility_rules() {
     // w = 2, offset = 3: rows [anchor, a1, a2, b1, b2], cols
     // [h0 h1 h2 | anchor a1 a2 b1 b2].
