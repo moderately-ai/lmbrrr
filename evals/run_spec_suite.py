@@ -66,11 +66,11 @@ def main() -> int:
                 out = ROOT / f"target/suite-{args.tag}-{name}-{qid}-{rep}.json"
                 cmd = [str(ROOT / "target/release/lmbrrr"), "dspark-run",
                        "--drafter", drafter, "--prompt", prompt,
-                       "--max-new-tokens", str(args.max_new_tokens),
-                       "--quantized-manifest", str(ROOT / QMAN)]
+                       "--max-new-tokens", str(args.max_new_tokens)]
                 # Defaults an arm's extra flags may override (dspark-run
                 # rejects duplicate flags).
-                for flag, value in [("--gamma", str(args.gamma)),
+                for flag, value in [("--quantized-manifest", str(ROOT / QMAN)),
+                                    ("--gamma", str(args.gamma)),
                                     ("--drafter-quantize", "q8-0"),
                                     ("--quantize-lm-head", "q4k"),
                                     ("--cost-model", str(ROOT / COST))]:
