@@ -334,8 +334,8 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mut tree_rounds = 0usize;
     let mut alt_wins = 0usize;
     let mut alt_tokens_gained = 0usize;
-    const SKIP_DRAFT_AFTER: usize = 3;
-    const PROBE_EVERY: usize = 8;
+    let skip_draft_after = args.skip_draft_after;
+    let probe_every = args.probe_every.max(1);
 
     // Prompt-lookup index over prompt + committed tokens; synced at the top
     // of every round so all round types (drafter/tree/lookup) feed it.
@@ -386,7 +386,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             let copy_gate_open = (args.pld || args.recycle)
                 && (args.pld_ungated
                     || !args.schedule
-                    || consecutive_zero_widths >= SKIP_DRAFT_AFTER);
+                    || consecutive_zero_widths >= skip_draft_after);
             let copy_draft: Option<(Vec<u32>, bool)> = if copy_gate_open {
                 let from_pld = if args.pld {
                     ngram_index.propose(pld_span)
@@ -508,8 +508,8 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             }
 
             let skip_draft = args.schedule
-                && consecutive_zero_widths >= SKIP_DRAFT_AFTER
-                && (rounds % PROBE_EVERY) != 0;
+                && consecutive_zero_widths >= skip_draft_after
+                && (rounds % probe_every) != 0;
             let proposal = if skip_draft {
                 skipped_drafts += 1;
                 None
@@ -558,7 +558,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             // zero and must count toward skip mode, not reset it. (Measured
             // on a weak-drafter class: schedule-time resets turned 12
             // fully-rejected rounds into 2x drafter invocations, because
-            // every reset buys >=SKIP_DRAFT_AFTER more probes.)
+            // every reset buys >=skip_draft_after more probes.)
             if args.schedule && !skip_draft && width == 0 {
                 consecutive_zero_widths += 1;
             }

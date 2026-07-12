@@ -691,6 +691,15 @@ struct DsparkRunArgs {
     #[arg(long, default_value_t = 3)]
     pld_min_ngram: usize,
 
+    /// Consecutive zero-width (scheduler-rejected) rounds before the
+    /// skip-hysteresis stops paying for drafts.
+    #[arg(long, default_value_t = 3)]
+    skip_draft_after: usize,
+
+    /// While parked, probe a drafted round every Nth round.
+    #[arg(long, default_value_t = 8)]
+    probe_every: usize,
+
     #[arg(long)]
     enable_thinking: bool,
 
