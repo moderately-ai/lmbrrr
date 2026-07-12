@@ -502,9 +502,9 @@ impl Mlp {
 
 #[derive(Clone, Debug)]
 struct FullAttention {
-    q_proj: MixedLinear,
-    k_proj: MixedLinear,
-    v_proj: MixedLinear,
+    // q (incl. packed output gate) + k + v fused into one wide weight (K2
+    // width fusion): rows are [2*heads*hd | kv*hd | kv*hd].
+    qkv_proj: MixedLinear,
     o_proj: MixedLinear,
     q_norm: Qwen35RmsNorm,
     k_norm: Qwen35RmsNorm,
@@ -519,25 +519,22 @@ struct FullAttention {
 
 impl FullAttention {
     fn new(cfg: &TextConfig, rotary: Arc<RotaryEmbedding>, vb: VarBuilder) -> Result<Self> {
+        let q_out = cfg.num_attention_heads * cfg.head_dim * 2;
+        let kv_out = cfg.num_key_value_heads * cfg.head_dim;
+        let qw = vb.get((q_out, cfg.hidden_size), "q_proj.weight")?;
+        let kw = vb.get((kv_out, cfg.hidden_size), "k_proj.weight")?;
+        let vw = vb.get((kv_out, cfg.hidden_size), "v_proj.weight")?;
+        let qkv_w = Tensor::cat(&[&qw, &kw, &vw], 0)?;
+        let qkv_b = if cfg.attention_bias {
+            let qb = vb.get(q_out, "q_proj.bias")?;
+            let kb = vb.get(kv_out, "k_proj.bias")?;
+            let vbias = vb.get(kv_out, "v_proj.bias")?;
+            Some(Tensor::cat(&[&qb, &kb, &vbias], 0)?)
+        } else {
+            None
+        };
         Ok(Self {
-            q_proj: MixedLinear::dense(linear_b(
-                cfg.hidden_size,
-                cfg.num_attention_heads * cfg.head_dim * 2,
-                cfg.attention_bias,
-                vb.pp("q_proj"),
-            )?),
-            k_proj: MixedLinear::dense(linear_b(
-                cfg.hidden_size,
-                cfg.num_key_value_heads * cfg.head_dim,
-                cfg.attention_bias,
-                vb.pp("k_proj"),
-            )?),
-            v_proj: MixedLinear::dense(linear_b(
-                cfg.hidden_size,
-                cfg.num_key_value_heads * cfg.head_dim,
-                cfg.attention_bias,
-                vb.pp("v_proj"),
-            )?),
+            qkv_proj: MixedLinear::dense(candle_nn::Linear::new(qkv_w, qkv_b)),
             o_proj: MixedLinear::dense(linear_b(
                 cfg.num_attention_heads * cfg.head_dim,
                 cfg.hidden_size,
@@ -591,7 +588,9 @@ impl FullAttention {
     ) -> Result<Tensor> {
         let (b, l, _) = xs.dims3()?;
         let device = xs.device().clone();
-        let q_gate = profiled(
+        let q_out = self.num_heads * self.head_dim * 2;
+        let kv_out = self.num_kv_heads * self.head_dim;
+        let qkv = profiled(
             profiler,
             &device,
             Some(layer_index),
@@ -599,12 +598,11 @@ impl FullAttention {
             "full_attention_q_gate_projection",
             l,
             offset,
-            || {
-                self.q_proj
-                    .forward(xs)?
-                    .reshape((b, l, self.num_heads, self.head_dim * 2))
-            },
+            || self.qkv_proj.forward(xs),
         )?;
+        let q_gate = qkv
+            .narrow(D::Minus1, 0, q_out)?
+            .reshape((b, l, self.num_heads, self.head_dim * 2))?;
         let q = q_gate.narrow(D::Minus1, 0, self.head_dim)?;
         let gate = q_gate
             .narrow(D::Minus1, self.head_dim, self.head_dim)?
@@ -621,16 +619,15 @@ impl FullAttention {
                 let q = self.q_norm.forward(&q)?.transpose(1, 2)?;
                 let k = self
                     .k_norm
-                    .forward(&self.k_proj.forward(xs)?.reshape((
+                    .forward(&qkv.narrow(D::Minus1, q_out, kv_out)?.reshape((
                         b,
                         l,
                         self.num_kv_heads,
                         self.head_dim,
                     ))?)?
                     .transpose(1, 2)?;
-                let v = self
-                    .v_proj
-                    .forward(xs)?
+                let v = qkv
+                    .narrow(D::Minus1, q_out + kv_out, kv_out)?
                     .reshape((b, l, self.num_kv_heads, self.head_dim))?
                     .transpose(1, 2)?;
                 Ok((q, k, v))
@@ -756,21 +753,17 @@ impl FullAttention {
     ) -> Result<usize> {
         let prefix = format!("model.language_model.layers.{layer_index}.self_attn");
         let mut replaced = 0usize;
-        replaced += replace_quantized_linear(
-            &mut self.q_proj,
-            &format!("{prefix}.q_proj.weight"),
-            artifact,
-        )?;
-        replaced += replace_quantized_linear(
-            &mut self.k_proj,
-            &format!("{prefix}.k_proj.weight"),
-            artifact,
-        )?;
-        replaced += replace_quantized_linear(
-            &mut self.v_proj,
-            &format!("{prefix}.v_proj.weight"),
-            artifact,
-        )?;
+        if let Some(fused) = artifact
+            .load_linear_fused(&[
+                &format!("{prefix}.q_proj.weight"),
+                &format!("{prefix}.k_proj.weight"),
+                &format!("{prefix}.v_proj.weight"),
+            ])
+            .map_err(|err| candle::Error::Msg(format!("load fused attn qkv {err}")))?
+        {
+            self.qkv_proj = fused;
+            replaced += 3;
+        }
         replaced += replace_quantized_linear(
             &mut self.o_proj,
             &format!("{prefix}.o_proj.weight"),
