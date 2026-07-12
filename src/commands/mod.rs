@@ -4,3 +4,4 @@
 //! verbatim, with `pub(crate)` on the entry points only.
 
 pub(crate) mod dspark;
+pub(crate) mod verify;
