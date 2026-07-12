@@ -1,7 +1,7 @@
 ---
 id: frspec-drafter-vocab-trim
 title: FR-Spec drafter vocabulary trimming (top-32k head for drafting)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: []
