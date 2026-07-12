@@ -132,3 +132,13 @@ Curve flattens at tau ~3.85-3.91 from epoch 7 (epochs 8/10 statistically tied at
 **Corpus scaling law (gsm8k tau, fresh init, deployment-config traces):** 40k -> 3.54 (18 ep); 120k -> 3.91 (10 ep, plateau by 7). Marginal: **+0.37 per 3x corpus**, and cheaper per point than epochs. Round-1 gate comparison: +1.83 over round-1's 2.08 (gate was +0.4).
 
 **500k recommendation:** the slope supports one more scale step. With the fused pipeline the cost estimate drops from ~$880 to ~$330-380 (regen 4.5 h single-GPU, prep in-container, ~6 epochs at 8x H100 with the per-epoch plateau stop; projected tau ~4.3). One constraint to resolve first: a 500k cache is ~3.3 TiB on NVMe — above the 1.5 TiB this round used; either confirm Modal's ephemeral-disk ceiling supports ~3.5 TiB or cap the corpus at ~350-400k (~2.4-2.6 TiB). Epoch budget: 6 with the plateau stop armed.
+
+## Round-4 results (2026-07-12): 400k fresh, 6 epochs, plateau stop armed
+
+Corpus capped at 400k per the NVMe ceiling analysis above. Per-epoch held-out gsm8k tau (fakequant deployment target, greedy, n=20): 3.361 → 3.94 → 4.20 → 4.18 (dip, strike one) → 4.37 (reset) → **4.41 final** (step_4638). mt-bench final **2.58**. Confidence head well-calibrated: ece 0.033 gsm8k / 0.025 mt-bench, auc 0.859 / 0.899 — the truthful per-position Platt fit rides on clean raw signal.
+
+**Corpus scaling law update (gsm8k tau, fresh init, deployment-config traces):** 40k → 3.54, 120k → 3.91 (+0.37 per 3×), 400k → 4.41 (**+0.50 per 3.33×**). The slope did not flatten at this step — it steepened slightly (the 6-epoch plateau-stop budget was also tighter than round-3's 10, and e6 was still +0.04, so 4.41 may modestly undershoot the checkpoint family's ceiling).
+
+**Held-out validation vs the round-3 bundle** (local Metal runner, post-K1/K2/K5 fused stack, truthful STS refit from 958 records, rotated 3 reps): math 219.3 → 228.2 tok/s (+4.1%, tau 2.93 → 3.76), qa 160.3 → 175.8 (+9.7%, tau 1.12 → 1.39), translation flat (tau 1.00 both — hysteresis floor), summarization −3.5% (≈2σ, same content); coding/writing DIVERGENT CONTENT (excluded per protocol). **Shipped: `target/dspark-drafter-round4/` is the deployed bundle.** Note the conversion gap: tau gains (+28% math) convert to single-digit tok/s because chunk-verify costs and the greedy floor bound the exchange rate — the binding constraint is now kernel-side (q4_K SoA repack), not tau.
+
+**Beyond-400k decision (slope rule):** slope healthy → the tau path is more corpus, NOT the MTP head. Full-scale (~1.4M PerfectBlend) implies a ~9 TiB cache — far past the NVMe ceiling; requires the cache redesign (sharded/streaming prep or capture compression) before any launch. Tracked on `dspark-cache-redesign-beyond-400k`.

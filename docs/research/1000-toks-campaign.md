@@ -11,8 +11,10 @@ Running log of the single-stream campaign's measured multipliers. All figures ar
 | round-2 stack (B drafter + balanced STS + FR-Spec 32k + refit cost model) | 182.8 | 168.2 | 150.7 |
 | **round-3 stack (120k drafter, same recipe)** | **204.0** | **187.8** | **155.4** |
 | **+ in-loop cost model + truthful gamma6 STS (2026-07-12)** | **208-231 (3q)** | **185.7** | **+1.2% vs same-day incumbent** |
+| + K1/K2/K5 kernel fuse (mc hoist, mm routing, width fusion, v2 decode) | 219.3 (r3 arm) | 185.5 | greedy floor 215 → **246-249** |
+| **round-4 stack (400k drafter, tau 4.41, truthful STS refit) — SHIPPED** | **228.2 (+4.1%)** | divergent | qa +9.7% (tau 1.12→1.39); summ −3.5%≈noise |
 
-Greedy floor (no speculation): ~215 tok/s device-resident. The speculative stack now beats greedy by ~2x on math/coding and the 6-class mean sits at 72% of the greedy floor because weak classes (translation, summarization) still run near-greedy — correctly, per the scheduler's own economics.
+Greedy floor (no speculation): **~247 tok/s** bench-mode after the K1/K2/K5 fuse (was ~215). τ is now abundant (4.41 gsm8k) relative to what the kernel economics can convert — math τ +28% bought +4.1% tok/s — so the binding constraint has flipped to chunk-verify cost and the mv floor (`q4k-soa-plane-repack`). Weak classes run near-greedy, correctly, per the scheduler's own economics.
 
 ## Measured stage contributions this week
 
@@ -36,11 +38,12 @@ Greedy floor (no speculation): ~215 tok/s device-resident. The speculative stack
 
 A drafter deploys as one directory: `model.safetensors + config.json + sts.json + draft_vocab.json + cost_model.json`. `dspark-run --drafter DIR --quantized-manifest M` reproduces the full stack with zero spec flags (gamma 6, schedule/pld/recycle default on; `--flag=false` ablates; explicit artifact flags override the bundle). Round-4 deploys by assembling its own bundle dir through the truthful flow: unscheduled gamma-6 records on the calibration split → `evals/fit_sts.py` → held-out validation vs the incumbent bundle.
 
-## Open levers, quantified
+## Open levers, quantified (updated post round-4 ship)
 
-1. **Round-4 drafter (400k, in flight)**: projected tau ~4.2-4.3; deploys through the codified STS + validation flow.
-2. **simdgroup-matrix q4_K rewrite**: eliminate per-element integer unpack; bounded ~1 ms/token on the lm_head plus chunk-cost reductions that unlock tree (+tau) and recycling.
-3. **Certified sub-vocab target head**: ~1.1-1.2 ms/token ceiling at 99.45% coverage with ~1/180 fallback rate; shares head-clustering analysis with (2).
-4. **Beyond 400k corpus**: needs the >3 TiB cache redesign (sharded/streaming or capture compression).
+1. ~~Round-4 drafter~~ SHIPPED (tau 4.41 gsm8k final, beat projection; `target/dspark-drafter-round4/` is the default bundle).
+2. **q4_K SoA plane-split repack** (`q4k-soa-plane-repack`) — the only remaining floor-mover after six mv micro-opt falsifications; register-pressure hypothesis eliminated via pipeline stats (maxTotalThreads=1024); .gputrace captures ready for Xcode counter confirmation. Micro gate ≥1.5-2× GB/s or falsify (fallback: q8_0 head).
+3. **Certified sub-vocab target head**: gate re-runs in the residual measurement pass; post-K5 the non-model share (~2.9ms incl. head+argmax vs 1.4ms model stack) dominates the greedy step — this lever's stock went UP.
+4. **Beyond 400k corpus** (`dspark-cache-redesign-beyond-400k`): slope still steep (+0.50/3.33× at the 400k step); blocked only on the cache redesign (compression probe first).
+5. **Tree**: K4 landed (in-kernel segment restart, one dispatch/layer); mid-band ties coding, still off by default — re-run break-even after (2).
 
-Rough composition to 1000 single-stream on structured domains: greedy floor to ~280-300 f/s via (2)+(3), times tau_eff 3.5-4 via round-4 + unlocked tree = 950-1200. The bottleneck order is now kernels-then-tree, with corpus scaling still buying tau cheaply until it flattens.
+Rough composition to 1000 single-stream on structured domains: floor 247 → ~280-300 via (2)(+3), times tau_eff from tau 4.41 + tree once chunks cheapen = 950-1200. Bottleneck order: repack → head → tree; corpus scaling still buys tau cheaply when the cache redesign lands.
