@@ -3,6 +3,7 @@
 //! args structs and harness helpers via `use crate::*` — command moves stay
 //! verbatim, with `pub(crate)` on the entry points only.
 
+pub(crate) mod diag;
 pub(crate) mod dspark;
 pub(crate) mod quant;
 pub(crate) mod verify;
