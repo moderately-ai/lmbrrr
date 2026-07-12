@@ -371,7 +371,11 @@ pub fn tensor_family(name: &str) -> &'static str {
     }
 }
 
-fn load_tensor_values(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>> {
+/// Shared with quant_convert and quantized_linear: one canonical
+/// safetensors-view -> f32 loader.
+pub(crate) fn load_tensor_values(
+    view: &safetensors::tensor::TensorView<'_>,
+) -> Result<Vec<f32>> {
     let tensor = view.load(&Device::Cpu)?;
     Ok(tensor
         .to_dtype(DType::F32)?
@@ -530,11 +534,11 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
     }
 }
 
-fn shape_num_elements(shape: &[usize]) -> usize {
+pub(crate) fn shape_num_elements(shape: &[usize]) -> usize {
     shape.iter().copied().product()
 }
 
-fn dtype_size_bytes(dtype: SafeDtype) -> usize {
+pub(crate) fn dtype_size_bytes(dtype: SafeDtype) -> usize {
     match dtype {
         SafeDtype::BOOL
         | SafeDtype::U8

@@ -271,7 +271,7 @@ impl QuantizedTextArtifact {
         let view = safetensors
             .tensor(name)
             .with_context(|| format!("source tensor {name} missing from {}", path.display()))?;
-        crate::quant_convert::load_tensor_values(&view)
+        crate::quant_sensitivity::load_tensor_values(&view)
     }
 }
 

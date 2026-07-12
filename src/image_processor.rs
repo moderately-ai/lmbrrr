@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use candle::{Device, Tensor};
@@ -271,9 +271,6 @@ fn ensure_divide(length: usize, divisor: usize) -> usize {
     let rounded = ((length as f64 / divisor as f64).round() as usize) * divisor;
     rounded.max(divisor)
 }
-
-#[allow(dead_code)]
-fn _assert_path(_: &Path) {}
 
 #[cfg(test)]
 mod tests {

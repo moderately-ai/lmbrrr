@@ -6,13 +6,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle::{safetensors::Load, DType, Device};
 use memmap2::MmapOptions;
-use safetensors::{tensor::Dtype as SafeDtype, SafeTensors};
+use safetensors::SafeTensors;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::quant_sensitivity::{is_protected_tensor, tensor_family, tensor_protection_reason};
+use crate::quant_sensitivity::{
+    dtype_size_bytes, is_protected_tensor, load_tensor_values, shape_num_elements,
+    tensor_family, tensor_protection_reason,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum MixedPrecisionPolicy {
@@ -553,13 +555,6 @@ fn quantize_symmetric(value: f32, scale: f32, qmax: f32) -> i32 {
     }
 }
 
-pub(crate) fn load_tensor_values(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>> {
-    let tensor = view.load(&Device::Cpu)?;
-    Ok(tensor
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?)
-}
 
 fn expected_weight_bytes(num_elements: usize, source_bytes: usize, format: TensorFormat) -> usize {
     match format {
@@ -593,24 +588,6 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn shape_num_elements(shape: &[usize]) -> usize {
-    shape.iter().copied().product()
-}
-
-fn dtype_size_bytes(dtype: SafeDtype) -> usize {
-    match dtype {
-        SafeDtype::BOOL
-        | SafeDtype::U8
-        | SafeDtype::I8
-        | SafeDtype::F8_E5M2
-        | SafeDtype::F8_E4M3 => 1,
-        SafeDtype::I16 | SafeDtype::U16 | SafeDtype::F16 | SafeDtype::BF16 => 2,
-        SafeDtype::I32 | SafeDtype::U32 | SafeDtype::F32 => 4,
-        SafeDtype::I64 | SafeDtype::U64 | SafeDtype::F64 => 8,
-        SafeDtype::F6_E2M3 | SafeDtype::F6_E3M2 | SafeDtype::F4 | SafeDtype::F8_E8M0 => 1,
-        _ => 1,
-    }
-}
 
 #[cfg(test)]
 mod tests {
