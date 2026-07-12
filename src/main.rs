@@ -359,6 +359,13 @@ struct TraceArgs {
     #[arg(long, default_value_t = 8)]
     top_k_logits: usize,
 
+    /// Wrap exactly one decode step (this index) in a Metal .gputrace
+    /// capture. Disables hidden-state capture (no recorder readbacks in the
+    /// trace) and requires METAL_CAPTURE_ENABLED=1. The trace lands next to
+    /// --output (or the cwd) as decode-step-<N>.gputrace.
+    #[arg(long)]
+    gpu_capture_step: Option<usize>,
+
     #[arg(long)]
     output: Option<PathBuf>,
 }

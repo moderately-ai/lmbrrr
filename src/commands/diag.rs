@@ -459,10 +459,22 @@ pub(crate) fn trace_hidden_states(args: TraceArgs) -> Result<()> {
     }
 
     let bundle = resolve_artifacts(&args.model)?;
-    let capture_layers = trace_capture_layers(
-        &args.capture_layers,
-        bundle.config.text_config.num_hidden_layers,
-    )?;
+    // A GPU capture run wants a pristine step: no hidden-state recorder
+    // readbacks polluting the trace.
+    let capture_layers = if args.gpu_capture_step.is_some() {
+        if std::env::var("METAL_CAPTURE_ENABLED").is_err() {
+            anyhow::bail!(
+                "--gpu-capture-step needs METAL_CAPTURE_ENABLED=1 in the environment \
+                 (undocumented Metal requirement)"
+            );
+        }
+        Vec::new()
+    } else {
+        trace_capture_layers(
+            &args.capture_layers,
+            bundle.config.text_config.num_hidden_layers,
+        )?
+    };
     let device = select_device(args.model.cpu)?;
     let dtype = args.model.dtype.resolve(&device);
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
@@ -546,6 +558,23 @@ pub(crate) fn trace_hidden_states(args: TraceArgs) -> Result<()> {
         seq_len = 1;
         trace_recorder.clear();
         let input = Tensor::from_slice(&[next_token], (1, 1), &device)?;
+        // Bounded Metal capture around exactly this decode forward (the
+        // preceding steps warm the shader caches; argmax is excluded — its
+        // cost is separately known).
+        let capture_this = args.gpu_capture_step == Some(generated_token_ids.len() - 1);
+        let capture_path = std::env::current_dir()?.join(format!(
+            "decode-step-{}.gputrace",
+            generated_token_ids.len() - 1
+        ));
+        if capture_this {
+            if capture_path.exists() {
+                std::fs::remove_dir_all(&capture_path)?;
+            }
+            match &device {
+                Device::Metal(md) => md.capture(&capture_path)?,
+                _ => anyhow::bail!("--gpu-capture-step requires the Metal device"),
+            }
+        }
         let forward_start = Instant::now();
         logits = model.forward(
             &input,
@@ -554,6 +583,12 @@ pub(crate) fn trace_hidden_states(args: TraceArgs) -> Result<()> {
             offset,
         )?;
         device.synchronize()?;
+        if capture_this {
+            if let Device::Metal(md) = &device {
+                md.stop_capture();
+            }
+            println!("gpu capture written: {}", capture_path.display());
+        }
         forward_elapsed = forward_start.elapsed();
         hidden_states = trace_recorder.take();
     }
