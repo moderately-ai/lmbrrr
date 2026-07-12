@@ -15,4 +15,5 @@ pub mod quantized_linear;
 pub mod qwen35;
 pub mod spec;
 pub mod token_stream;
+pub mod tui;
 pub mod weights;
