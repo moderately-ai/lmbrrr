@@ -1053,7 +1053,13 @@ impl GatedDeltaNet {
     /// projection cat); requires the shapes the kernel supports and a
     /// populated conv state (i.e. any step after prefill).
     fn forward_fused_decode(&mut self, xs: &Tensor) -> Result<Tensor> {
-        self.ensure_v1_state_layout()?;
+        let (b_sz, _, _) = xs.dims3()?;
+        // v2 decode keeps the transposed layout end-to-end (no per-round
+        // v1<->v2 state transposes between decode and chunk rounds).
+        let use_v2 = deltanet_v2() && self.head_k_dim == 128 && self.head_v_dim == 128;
+        if !use_v2 {
+            self.ensure_v1_state_layout()?;
+        }
         let qkvz = self.in_proj_qkvz.forward(xs)?;
         let b_in = self.in_proj_b.forward(xs)?;
         let a_in = self.in_proj_a.forward(xs)?;
@@ -1065,15 +1071,6 @@ impl GatedDeltaNet {
             .as_ref()
             .expect("fused decode requires a populated conv state")
             .clone();
-        let recurrent_state = match &self.recurrent_state {
-            Some(state) if state.dtype() == DType::F32 => state.clone(),
-            Some(state) => state.to_dtype(DType::F32)?,
-            None => Tensor::zeros(
-                (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
-                DType::F32,
-                xs.device(),
-            )?,
-        };
         let dims = crate::fused_deltanet::GatedDeltaDims {
             heads: self.num_v_heads,
             dk: self.head_k_dim,
@@ -1083,7 +1080,35 @@ impl GatedDeltaNet {
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
         };
-        let (b_sz, _, _) = xs.dims3()?;
+        if use_v2 {
+            let state_t = self.take_state_for_v2(b_sz, xs.device())?;
+            let (out, conv_new, state_new) = crate::fused_deltanet::gated_delta_v2_decode(
+                &proj,
+                b_sz,
+                &conv_state,
+                &state_t.contiguous()?,
+                &self.conv_weight_full,
+                &self.dt_bias_f32.flatten_all()?,
+                &self.a_log_exp_f32.flatten_all()?,
+                &self.norm.weight_f32,
+                &dims,
+                1e-6,
+                self.norm.eps as f32,
+            )
+            .map_err(|e| candle::Error::wrap(e))?;
+            self.conv_state = Some(conv_new);
+            self.recurrent_state = Some(state_new);
+            return self.out_proj.forward(&out);
+        }
+        let recurrent_state = match &self.recurrent_state {
+            Some(state) if state.dtype() == DType::F32 => state.clone(),
+            Some(state) => state.to_dtype(DType::F32)?,
+            None => Tensor::zeros(
+                (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                DType::F32,
+                xs.device(),
+            )?,
+        };
         let (out, conv_new, state_new) = crate::fused_deltanet::gated_delta_decode(
             &proj,
             b_sz,
