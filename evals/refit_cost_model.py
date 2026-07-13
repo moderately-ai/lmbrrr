@@ -61,7 +61,7 @@ def main() -> int:
         base = json.load(open(args.base))
     if base is None:
         raise SystemExit("no base cost model found in reports; pass --base")
-    base_verify = base["verify_ms_by_chunk_len"] if "verify_ms_by_chunk_len" in base else base["verify_ms"]
+    base_verify = base.get("verify_ms_by_chunk_len") or base["verify_ms"]
 
     max_len = len(base_verify) - 1
     verify_ms = [0.0] * (max_len + 1)
@@ -84,16 +84,16 @@ def main() -> int:
 
     model = {
         "fixed_round_ms": 0.0,
-        "draft_ms": round(draft_ms, 4),
+        "default_draft_ms": round(draft_ms, 4),
         "greedy_step_ms": round(verify_ms[1], 4),
-        "verify_ms": [round(v, 4) for v in verify_ms],
+        "verify_ms_by_chunk_len": [round(v, 4) for v in verify_ms],
     }
     json.dump(model, open(args.out, "w"), indent=1)
     print(f"{len(files)} reports; {len(drafted)} drafted rounds, "
           f"{sum(len(v) for v in no_draft.values())} no-draft rounds "
           f"(anchored lens: {sorted(anchors)}); table scale {scale:.3f}")
-    print(f"draft {model['draft_ms']} ms, greedy {model['greedy_step_ms']} ms "
-          f"-> {args.out}")
+    print(f"draft {model['default_draft_ms']} ms, "
+          f"greedy {model['greedy_step_ms']} ms -> {args.out}")
     return 0
 
 
