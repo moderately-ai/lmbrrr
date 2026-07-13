@@ -287,6 +287,13 @@ pub fn generate_tokens(
             let draining = !can_encode;
             if (draining || produced - consumed >= RUN_AHEAD) && consumed < produced {
                 let readback_start = Instant::now();
+                // The awaited signal may sit in the not-yet-committed command
+                // buffer (commits happen every CPB dispatches; the tail is
+                // partial unless the token count lands on the quantum) —
+                // commit it before blocking or the wait deadlocks.
+                metal_dev
+                    .flush()
+                    .map_err(|e| anyhow::anyhow!("flush before wait: {e}"))?;
                 anyhow::ensure!(
                     event.wait_until(consumed + 1, 60_000),
                     "shared-event wait timed out (queue stalled?)"
