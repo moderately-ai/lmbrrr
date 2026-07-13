@@ -2,7 +2,7 @@
 id: metal-elementwise-fusion
 title: Elementwise fusion of the norm/add/silu confetti (post wave-1/2)
 status: todo
-priority: p3
+priority: p2
 dependencies: [metal-wave2-host-encode-rlist]
 related: []
 scopes: [candle-fork, runtime/candle]
