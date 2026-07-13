@@ -271,6 +271,7 @@ pub(crate) fn bench(args: BenchArgs) -> Result<()> {
                     "warmup_iterations": args.warmup,
                     "prompt_tokens": stats.prompt_tokens,
                     "generated_tokens": stats.generated_tokens,
+                    "generated_token_ids": stats.generated_token_ids,
                     "total_tokens": stats.total_generated_tokens(),
                     "max_generated_tokens": args.generation.max_new_tokens,
                     "max_total_tokens": stats.prompt_tokens + args.generation.max_new_tokens,
