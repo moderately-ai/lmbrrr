@@ -232,6 +232,121 @@ pub fn generate_tokens(
     let mut eos_overshoot_forwards = 0usize;
     let mut token_emit_at: Vec<Duration> = Vec::with_capacity(generation.max_new_tokens);
 
+    // Async readback (round: greedy-host-path-deferred-readback): the GPU
+    // signals a shared event after each argmax; the host polls the value and
+    // reads committed ids straight from shared memory — no cat, no flush, no
+    // queue drain. The event signal is the visibility guarantee (fires only
+    // after all prior commands complete), so no synchronize is needed.
+    // Env-gated for the production A/B against the flush path below.
+    let async_readback = device_chain
+        && matches!(device, Device::Metal(_))
+        && std::env::var("LMBRRR_ASYNC_READBACK").map_or(false, |v| v == "1");
+    if async_readback {
+        // Encoder run-ahead cap: bounds EOS overshoot (wasted forwards past
+        // the stop token) and pending-tensor memory.
+        const RUN_AHEAD: u64 = 32;
+        let metal_dev = match device {
+            Device::Metal(m) => m,
+            _ => unreachable!("async_readback requires metal"),
+        };
+        let event = metal_dev
+            .new_shared_event()
+            .map_err(|e| anyhow::anyhow!("shared event: {e}"))?;
+        // Held until consumed: keeps each id tensor's buffer out of the
+        // allocator pool so later ops can't recycle it before the host read.
+        let mut pending: std::collections::VecDeque<Tensor> = std::collections::VecDeque::new();
+        let mut produced = 0u64;
+        let mut consumed = 0u64;
+        loop {
+            let can_encode =
+                (produced as usize) < generation.max_new_tokens && !eos_reached;
+            if can_encode {
+                let sampling_start = Instant::now();
+                let next_id = model.remap_head_id(&logits.argmax(D::Minus1)?)?;
+                pending.push_back(next_id.clone());
+                produced += 1;
+                metal_dev
+                    .signal_event(&event, produced)
+                    .map_err(|e| anyhow::anyhow!("signal event: {e}"))?;
+                sampling_elapsed += sampling_start.elapsed();
+                if (produced as usize) < generation.max_new_tokens {
+                    let decode_model_start = Instant::now();
+                    let input = next_id.reshape((1, 1))?;
+                    logits = model.forward(
+                        &input,
+                        None::<&ProcessedImages>,
+                        downsample_mode,
+                        position,
+                    )?;
+                    decode_model_elapsed += decode_model_start.elapsed();
+                    position += 1;
+                }
+            }
+            // Block only under backpressure or when draining the tail; the
+            // steady state consumes opportunistically off signaled_value.
+            let draining = !can_encode;
+            if (draining || produced - consumed >= RUN_AHEAD) && consumed < produced {
+                let readback_start = Instant::now();
+                anyhow::ensure!(
+                    event.wait_until(consumed + 1, 60_000),
+                    "shared-event wait timed out (queue stalled?)"
+                );
+                readback_wait_elapsed += readback_start.elapsed();
+            }
+            while consumed < event.signaled_value().min(produced) {
+                let id_tensor = pending.pop_front().expect("pending underflow");
+                let id = read_committed_id(&id_tensor)?;
+                consumed += 1;
+                if eos_ids.contains(&id) {
+                    eos_reached = true;
+                    eos_overshoot_forwards = (produced - consumed) as usize;
+                    break;
+                }
+                let emit_at = decode_start.elapsed();
+                match first_token_after_prefill {
+                    None => first_token_after_prefill = Some(emit_at),
+                    Some(window_start) => {
+                        steady_window_tokens += 1;
+                        steady_window_elapsed = emit_at.saturating_sub(window_start);
+                    }
+                }
+                generated_token_ids.push(id);
+                token_emit_at.push(emit_at);
+                generated += 1;
+                let callback_start = Instant::now();
+                on_token(id, generated, emit_at, prefill_elapsed)?;
+                callback_elapsed += callback_start.elapsed();
+                if generated == generation.max_new_tokens {
+                    break;
+                }
+            }
+            if eos_reached || generated == generation.max_new_tokens {
+                break;
+            }
+            if draining && consumed == produced {
+                break;
+            }
+        }
+        return Ok(GenerationStats {
+            prompt_tokens: input_tokens.len(),
+            generated_tokens: generated,
+            generated_token_ids,
+            eos_reached,
+            prefill_elapsed,
+            decode_elapsed: decode_start.elapsed(),
+            decode_model_elapsed,
+            sampling_elapsed,
+            readback_wait_elapsed,
+            next_input_elapsed,
+            callback_elapsed,
+            first_token_after_prefill,
+            steady_window_tokens,
+            steady_window_elapsed,
+            eos_overshoot_forwards,
+            token_emit_at,
+        });
+    }
+
     if device_chain {
         const READBACK_EVERY: usize = 8;
         let mut pending: Vec<Tensor> = Vec::with_capacity(READBACK_EVERY);
@@ -402,6 +517,23 @@ pub fn generate_tokens(
         eos_overshoot_forwards,
         token_emit_at,
     })
+}
+
+/// Read a committed u32 id straight from shared GPU memory WITHOUT any
+/// synchronize. Callers must hold a shared-event visibility guarantee for
+/// this tensor's producing work (signaled_value >= its signal value) — the
+/// event signal orders after all prior commands, and StorageModeShared is
+/// CPU-coherent on Apple silicon.
+fn read_committed_id(t: &Tensor) -> Result<u32> {
+    let (storage, layout) = t.storage_and_layout();
+    match &*storage {
+        candle::Storage::Metal(ms) => {
+            let ptr = ms.buffer().contents();
+            anyhow::ensure!(!ptr.is_null(), "null buffer contents");
+            Ok(unsafe { *(ptr as *const u32).add(layout.start_offset()) })
+        }
+        _ => anyhow::bail!("async readback requires metal storage"),
+    }
 }
 
 // No leading synchronize in either helper: to_scalar/to_vec1 already wait
