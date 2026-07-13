@@ -227,6 +227,12 @@ pub struct DsparkDrafter {
     // this id table. Committed output is unaffected (verification is exact);
     // only draft cost and tau move.
     draft_vocab_ids: Option<Tensor>,
+    // Single-dispatch chain scratch: [block_size] interleaved (packed-max,
+    // counter) u32 pairs, zeroed at allocation and self-cleaned by the
+    // kernel (fork dspark.metal documents the protocol). Lazily allocated on
+    // the first eligible propose; held for the drafter's lifetime so the
+    // pool never recycles it.
+    markov_fused_slots: std::sync::OnceLock<std::sync::Arc<candle_metal_kernels::metal::Buffer>>,
     device: Device,
     dtype: DType,
 }
@@ -396,6 +402,7 @@ impl DsparkDrafter {
             ),
             rotary: Rotary::new(head_dim, config.rope_parameters.rope_theta, dtype, device)?,
             layers,
+            markov_fused_slots: std::sync::OnceLock::new(),
             device: device.clone(),
             dtype,
             config,
@@ -855,6 +862,21 @@ impl DsparkDrafter {
             .with_size(gamma * r * 2)
             .with_label("markov_prev_embs")
             .build()?;
+        // Single-dispatch steps whenever the packed atomic key can carry the
+        // vocabulary index; the two-dispatch shape covers larger vocabs.
+        let fused_slots = if vd <= candle_metal_kernels::MARKOV_FUSED_MAX_VD {
+            if self.markov_fused_slots.get().is_none() {
+                let slots = metal_dev
+                    .new_buffer_builder()
+                    .with_zeros(self.config.block_size.max(gamma) * 8)
+                    .with_label("markov_fused_slots")
+                    .build()?;
+                let _ = self.markov_fused_slots.set(slots);
+            }
+            self.markov_fused_slots.get()
+        } else {
+            None
+        };
 
         {
             let encoder = metal_dev.command_encoder()?;
@@ -879,6 +901,7 @@ impl DsparkDrafter {
                     remap,
                     tokens: &tokens_buf,
                     prev_embs: &prev_embs_buf,
+                    fused_scratch: fused_slots.map(|b| &**b),
                 },
             )
             .map_err(|e| anyhow::anyhow!("markov chain dispatch: {e}"))?;
