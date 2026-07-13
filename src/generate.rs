@@ -65,6 +65,10 @@ pub struct GenerationStats {
     pub decode_elapsed: Duration,
     pub decode_model_elapsed: Duration,
     pub sampling_elapsed: Duration,
+    /// Device-chain only: host time blocked in flush readbacks (the cat +
+    /// to_vec wait for queued GPU work). Zero on the non-chain path, where
+    /// the per-token argmax readback is inseparable from sampling_elapsed.
+    pub readback_wait_elapsed: Duration,
     pub next_input_elapsed: Duration,
     pub callback_elapsed: Duration,
     pub first_token_after_prefill: Option<Duration>,
@@ -131,6 +135,7 @@ impl GenerationStats {
         self.decode_elapsed.saturating_sub(
             self.decode_model_elapsed
                 + self.sampling_elapsed
+                + self.readback_wait_elapsed
                 + self.next_input_elapsed
                 + self.callback_elapsed,
         )
@@ -210,6 +215,7 @@ pub fn generate_tokens(
     let mut eos_reached = false;
     let mut decode_model_elapsed = Duration::ZERO;
     let mut sampling_elapsed = Duration::ZERO;
+    let mut readback_wait_elapsed = Duration::ZERO;
     let mut next_input_elapsed = Duration::ZERO;
     let mut callback_elapsed = Duration::ZERO;
 
@@ -249,13 +255,13 @@ pub fn generate_tokens(
             let produced = generated_token_ids.len() + pending.len();
             let flush = pending.len() >= READBACK_EVERY || produced >= generation.max_new_tokens;
             if flush {
-                let sampling_start = Instant::now();
+                let readback_start = Instant::now();
                 let refs = pending.iter().collect::<Vec<_>>();
                 let ids = Tensor::cat(&refs, 0)?
                     .to_device(&Device::Cpu)?
                     .to_vec1::<u32>()?;
                 pending.clear();
-                sampling_elapsed += sampling_start.elapsed();
+                readback_wait_elapsed += readback_start.elapsed();
                 let flush_end = decode_start.elapsed();
                 let mut accepted_in_flush = 0usize;
                 let mut eos_in_flush = false;
@@ -314,6 +320,7 @@ pub fn generate_tokens(
             decode_elapsed: decode_start.elapsed(),
             decode_model_elapsed,
             sampling_elapsed,
+            readback_wait_elapsed,
             next_input_elapsed,
             callback_elapsed,
             first_token_after_prefill,
@@ -386,6 +393,7 @@ pub fn generate_tokens(
         decode_elapsed: decode_start.elapsed(),
         decode_model_elapsed,
         sampling_elapsed,
+        readback_wait_elapsed,
         next_input_elapsed,
         callback_elapsed,
         first_token_after_prefill,
@@ -468,6 +476,7 @@ mod tests {
             decode_elapsed: Duration::from_millis(100),
             decode_model_elapsed: Duration::from_millis(70),
             sampling_elapsed: Duration::from_millis(12),
+            readback_wait_elapsed: Duration::ZERO,
             next_input_elapsed: Duration::from_millis(3),
             callback_elapsed: Duration::from_millis(5),
             first_token_after_prefill: Some(Duration::from_millis(10)),
@@ -502,6 +511,7 @@ mod tests {
             decode_elapsed: Duration::from_millis(120),
             decode_model_elapsed: Duration::from_millis(90),
             sampling_elapsed: Duration::from_millis(10),
+            readback_wait_elapsed: Duration::ZERO,
             next_input_elapsed: Duration::ZERO,
             callback_elapsed: Duration::ZERO,
             first_token_after_prefill: Some(Duration::from_millis(40)),
@@ -534,6 +544,7 @@ mod tests {
             decode_elapsed: Duration::from_millis(30),
             decode_model_elapsed: Duration::ZERO,
             sampling_elapsed: Duration::ZERO,
+            readback_wait_elapsed: Duration::ZERO,
             next_input_elapsed: Duration::ZERO,
             callback_elapsed: Duration::ZERO,
             first_token_after_prefill: Some(Duration::from_millis(5)),
