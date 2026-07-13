@@ -432,14 +432,17 @@ impl DsparkDrafter {
         self.propose_inner(anchor_token, anchor_pos, gamma, true, false)
     }
 
-    fn propose_inner(
+    /// Device-side stage of a proposal: backbone forward + Markov chains,
+    /// returning un-materialized tensors. No host readback happens here —
+    /// callers choose between the synchronous pack+read (propose_inner) and
+    /// the deferred-drain form (propose_device).
+    fn propose_tensors(
         &mut self,
         anchor_token: u32,
         anchor_pos: usize,
         gamma: usize,
-        diagnostics: bool,
         branch: bool,
-    ) -> Result<DraftProposal> {
+    ) -> Result<ProposalTensors> {
         let block = self.config.block_size;
         if gamma == 0 || gamma > block {
             anyhow::bail!("gamma {gamma} outside 1..={block}");
@@ -582,24 +585,57 @@ impl DsparkDrafter {
             }
         }
 
-        let feature_refs = features.iter().chain(alt_features.iter()).collect::<Vec<_>>();
+        Ok(ProposalTensors {
+            token_tensors,
+            alt_token_tensors,
+            features,
+            alt_features,
+            corrected,
+            block_hidden,
+            base_logits,
+        })
+    }
+
+    /// Device-side [confidences (main then alt) | token ids as f32] pack —
+    /// the single buffer a proposal readback drains (u32 < 2^24 is exact in
+    /// f32, so ids ride the confidence buffer).
+    fn pack_proposal(&self, t: &ProposalTensors) -> Result<Tensor> {
+        let feature_refs = t
+            .features
+            .iter()
+            .chain(t.alt_features.iter())
+            .collect::<Vec<_>>();
         let confidences = self
             .confidence
             .forward(&Tensor::cat(&feature_refs, 0)?)?
             .to_dtype(DType::F32)?
             .squeeze(D::Minus1)?;
-        // Single host readback: confidences and token ids ride one buffer
-        // (u32 < 2^24 is exact in f32), halving the per-proposal sync count.
-        let token_refs = token_tensors
+        let token_refs = t
+            .token_tensors
             .iter()
-            .chain(alt_token_tensors.iter())
+            .chain(t.alt_token_tensors.iter())
             .collect::<Vec<_>>();
         let tokens_f32 = Tensor::cat(&token_refs, 0)?.to_dtype(DType::F32)?;
-        let packed = Tensor::cat(&[&confidences, &tokens_f32], 0)?
+        Ok(Tensor::cat(&[&confidences, &tokens_f32], 0)?)
+    }
+
+    fn propose_inner(
+        &mut self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        gamma: usize,
+        diagnostics: bool,
+        branch: bool,
+    ) -> Result<DraftProposal> {
+        let t = self.propose_tensors(anchor_token, anchor_pos, gamma, branch)?;
+        // Single host readback: confidences and token ids ride one buffer.
+        let packed = self
+            .pack_proposal(&t)?
             .to_device(&Device::Cpu)?
             .to_vec1::<f32>()?;
-        let n_alt = alt_token_tensors.len();
-        let (conf_all, token_vals) = packed.split_at(gamma + if branch && gamma > 0 { gamma } else { 0 });
+        let n_alt = t.alt_token_tensors.len();
+        let (conf_all, token_vals) =
+            packed.split_at(gamma + if branch && gamma > 0 { gamma } else { 0 });
         let (confidence_logits, alt_confidence_logits) = conf_all.split_at(gamma);
         let (token_main, token_alt) = token_vals.split_at(gamma);
         let tokens = token_main.iter().map(|v| *v as u32).collect::<Vec<_>>();
@@ -607,7 +643,7 @@ impl DsparkDrafter {
         let alt_confidence_logits = alt_confidence_logits.to_vec();
         let confidence_logits = confidence_logits.to_vec();
         let corrected_logits = if diagnostics {
-            let corrected_refs = corrected.iter().collect::<Vec<_>>();
+            let corrected_refs = t.corrected.iter().collect::<Vec<_>>();
             Some(Tensor::cat(&corrected_refs, 0)?.unsqueeze(0)?)
         } else {
             None
@@ -617,9 +653,53 @@ impl DsparkDrafter {
             confidence_logits,
             alt_tokens,
             alt_confidence_logits,
-            block_hidden: diagnostics.then_some(block_hidden),
-            base_logits: diagnostics.then_some(base_logits),
+            block_hidden: diagnostics.then_some(t.block_hidden),
+            base_logits: diagnostics.then_some(t.base_logits),
             corrected_logits,
         })
     }
+
+    /// Device-resident proposal for deferred-drain scheduling (on-device
+    /// chunk assembly): the token chain stays on device for the verify-chunk
+    /// cat, and the packed confidences/ids buffer is read back only after
+    /// the verify chunk is enqueued — draft and verify then share ONE
+    /// pipeline drain instead of paying the ~1-2ms OS wait twice per round.
+    pub fn propose_device(
+        &mut self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        gamma: usize,
+    ) -> Result<DeviceProposal> {
+        let t = self.propose_tensors(anchor_token, anchor_pos, gamma, false)?;
+        let token_refs = t.token_tensors.iter().collect::<Vec<_>>();
+        let tokens_dev = Tensor::cat(&token_refs, 0)?;
+        let packed = self.pack_proposal(&t)?;
+        Ok(DeviceProposal {
+            packed,
+            tokens_dev,
+            gamma,
+        })
+    }
+}
+
+/// Un-materialized device tensors of one proposal (see
+/// [`DsparkDrafter::propose_tensors`]).
+struct ProposalTensors {
+    token_tensors: Vec<Tensor>,
+    alt_token_tensors: Vec<Tensor>,
+    features: Vec<Tensor>,
+    alt_features: Vec<Tensor>,
+    corrected: Vec<Tensor>,
+    block_hidden: Tensor,
+    base_logits: Tensor,
+}
+
+/// A proposal whose tokens/confidences are still on device. `tokens_dev`
+/// feeds the on-device verify-chunk cat; `packed` ([conf(gamma) |
+/// tokens_f32(gamma)]) is read back together with the verify targets so the
+/// round pays a single drain.
+pub struct DeviceProposal {
+    pub packed: Tensor,
+    pub tokens_dev: Tensor,
+    pub gamma: usize,
 }

@@ -643,6 +643,16 @@ struct DsparkRunArgs {
     #[arg(long)]
     tree: bool,
 
+    /// One-round-lag scheduling with on-device chunk assembly: draft ids
+    /// stay on device, the verify chunk is a device-side cat, and the
+    /// proposal readback rides the verify drain — 2 pipeline drains per
+    /// drafted round become 1 (~1-2ms OS wait each). Width for round r is
+    /// scheduled from round r-1's confidence vector (offline EV probe: 68.8%
+    /// width agreement, ~2% mean regret); the first drafted round and --tree
+    /// runs stay synchronous. Requires --schedule.
+    #[arg(long)]
+    lag_schedule: bool,
+
     /// Branch only when the calibrated position-0 survival lands in this
     /// inclusive band (lo,hi): outside it the runner-up carries too little
     /// mass (high) or the whole draft is doomed (low). Chain rounds

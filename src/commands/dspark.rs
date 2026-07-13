@@ -326,6 +326,10 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     // one-round-lag EV probe for on-device chunk assembly) need the raw
     // vectors the scheduler actually saw.
     let mut proposal_confidence_log: Vec<(Vec<f32>, usize)> = Vec::new();
+    // Last drafted round's full confidence vector — the width prior for
+    // --lag-schedule rounds (one-round-lag scheduling; EV probe on the
+    // ticket: 68.8% width agreement, ~2% mean regret vs fresh confidences).
+    let mut prev_draft_confidences: Option<Vec<f32>> = None;
     let mut proposed_width_histogram = vec![0usize; gamma + 1];
     let mut draft_seconds = 0.0f64;
     let mut verify_seconds = 0.0f64;
@@ -516,9 +520,29 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             let skip_draft = args.schedule
                 && consecutive_zero_widths >= skip_draft_after
                 && (rounds % probe_every) != 0;
-            let proposal = if skip_draft {
+            // One-round-lag rounds keep the proposal on device: width comes
+            // from the PREVIOUS drafted round's confidences, the verify
+            // chunk is assembled device-side, and the proposal readback
+            // rides the verify drain (2 pipeline drains per round -> 1).
+            // The first drafted round has no lag prior and stays
+            // synchronous, as does everything under --tree (alt chains need
+            // host tokens before verify).
+            let lag_round = args.lag_schedule
+                && args.schedule
+                && !args.tree
+                && !skip_draft
+                && prev_draft_confidences.is_some();
+            let (mut proposal, device_proposal) = if skip_draft {
                 skipped_drafts += 1;
-                None
+                (None, None)
+            } else if lag_round {
+                let draft_start = Instant::now();
+                let dp = drafter.propose_device(anchor, start, gamma)?;
+                if loop_timing() {
+                    device.synchronize()?;
+                }
+                draft_seconds += secs(draft_start.elapsed());
+                (None, Some(dp))
             } else {
                 let draft_start = Instant::now();
                 let p = if args.tree {
@@ -530,16 +554,27 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                     device.synchronize()?;
                 }
                 draft_seconds += secs(draft_start.elapsed());
-                Some(p)
+                (Some(p), None)
             };
 
             // Width selection: the Appendix-A scheduler when --schedule,
             // else static confidence truncation (floored at 1: a width-0
             // round pays the full draft for one committed token), else full
-            // gamma.
-            let width = match &proposal {
-                None => 0,
-                Some(proposal) if args.schedule => schedule_prefix_width(
+            // gamma. Lag rounds schedule from the previous drafted round's
+            // vector — the proposal's own confidences are still on device.
+            let width = match (&proposal, &device_proposal) {
+                (None, Some(_)) => schedule_prefix_width(
+                    prev_draft_confidences
+                        .as_ref()
+                        .expect("lag rounds require a previous confidence vector")
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, logit)| sts.position_probability(pos, *logit) as f64),
+                    |w| cost_model.t_round_ms(w),
+                    gamma,
+                ),
+                (None, None) => 0,
+                (Some(proposal), _) if args.schedule => schedule_prefix_width(
                     proposal
                         .confidence_logits
                         .iter()
@@ -548,7 +583,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                     |w| cost_model.t_round_ms(w),
                     gamma,
                 ),
-                Some(proposal) => match args.confidence_threshold {
+                (Some(proposal), _) => match args.confidence_threshold {
                     Some(threshold) => proposal
                         .confidence_logits
                         .iter()
@@ -708,8 +743,21 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             let snapshot = model.snapshot_decode_state();
             let mut chunk = Vec::with_capacity(width + 1);
             chunk.push(anchor);
-            chunk.extend_from_slice(&draft_tokens[..width]);
-            let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), &device)?;
+            if device_proposal.is_none() {
+                // Lag rounds fill the draft suffix after materialization —
+                // their ids are still on device here.
+                chunk.extend_from_slice(&draft_tokens[..width]);
+            }
+            let chunk_input = match &device_proposal {
+                // On-device chunk assembly: draft ids never visit the host
+                // before verification.
+                Some(dp) if width > 0 => {
+                    let anchor_dev = Tensor::from_slice(&[anchor], 1, &device)?;
+                    Tensor::cat(&[&anchor_dev, &dp.tokens_dev.narrow(0, 0, width)?], 0)?
+                        .reshape((1, width + 1))?
+                }
+                _ => Tensor::from_slice(&chunk, (1, chunk.len()), &device)?,
+            };
             let verify_start = Instant::now();
             let logits = model.forward_all_logits(
                 &chunk_input,
@@ -721,7 +769,26 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 device.synchronize()?;
             }
             verify_seconds += secs(verify_start.elapsed());
-            let targets: Vec<u32> = if args.recycle && copy_gate_open {
+            let mut lag_materialized: Option<(Vec<u32>, Vec<f32>)> = None;
+            let targets: Vec<u32> = if let Some(dp) = &device_proposal {
+                // The round's single drain: verify targets and the packed
+                // proposal confidences/ids ride one readback (ids < 2^24
+                // are exact in f32).
+                let argmax_f32 = logits
+                    .argmax(D::Minus1)?
+                    .flatten_all()?
+                    .to_dtype(DType::F32)?;
+                let combined = Tensor::cat(&[&argmax_f32, &dp.packed], 0)?
+                    .to_device(&Device::Cpu)?
+                    .to_vec1::<f32>()?;
+                let (target_vals, rest) = combined.split_at(width + 1);
+                let (conf, token_vals) = rest.split_at(dp.gamma);
+                lag_materialized = Some((
+                    token_vals.iter().map(|v| *v as u32).collect(),
+                    conf.to_vec(),
+                ));
+                target_vals.iter().map(|v| *v as u32).collect()
+            } else if args.recycle && copy_gate_open {
                 // Harvest candidates from drafter-round verifies too, but
                 // only while the copy gate is open: the two-stage top-k costs
                 // a second device round-trip per round (measured -2.1%/-3.5%
@@ -736,6 +803,27 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 argmax_tokens(&logits, &device)?.0
             };
             let chunk_captures = model.take_device_captures();
+            if let Some((tokens, confidence_logits)) = lag_materialized {
+                proposal_confidence_log.push((confidence_logits.clone(), width));
+                proposal = Some(lmbrrr::dspark::DraftProposal {
+                    tokens,
+                    confidence_logits,
+                    alt_tokens: Vec::new(),
+                    alt_confidence_logits: Vec::new(),
+                    block_hidden: None,
+                    base_logits: None,
+                    corrected_logits: None,
+                });
+            }
+            // Rebind for the shared tail: lag rounds materialized their
+            // proposal only now, and the host chunk needs its draft suffix
+            // for the rollback/readvance paths.
+            let draft_tokens: &[u32] = proposal.as_ref().map_or(&[], |p| &p.tokens);
+            let draft_confidences: &[f32] =
+                proposal.as_ref().map_or(&[], |p| &p.confidence_logits);
+            if device_proposal.is_some() {
+                chunk.extend_from_slice(&draft_tokens[..width]);
+            }
 
             let accepted = match args.accept_margin {
                 // Exact: draft must equal the target argmax (lossless greedy).
@@ -851,6 +939,9 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 !skip_draft,
                 secs(round_start.elapsed()) * 1000.0 - kernel_est_ms,
             ));
+            if let Some(p) = &proposal {
+                prev_draft_confidences = Some(p.confidence_logits.clone());
+            }
             committed.extend_from_slice(&draft_tokens[..accepted]);
             committed.push(bonus);
             accepted_histogram[accepted] += 1;
