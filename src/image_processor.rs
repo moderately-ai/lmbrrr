@@ -60,7 +60,7 @@ pub fn preprocess_rgb_images(
             cfg.patch_size,
             best_grid.is_none(),
         );
-        let source_img = resize_rgb(&image, source_h, source_w);
+        let source_img = resize_rgb(image, source_h, source_w);
 
         let mut patches = vec![source_img];
         let mut patch_height = 0usize;
@@ -68,7 +68,7 @@ pub fn preprocess_rgb_images(
         if let Some(grid) = best_grid {
             let (refine_h, refine_w) =
                 get_refine_size(image_size, grid, cfg.scale_resolution, cfg.patch_size);
-            let refine_img = resize_rgb(&image, refine_h, refine_w);
+            let refine_img = resize_rgb(image, refine_h, refine_w);
             let grid_y = grid.0;
             let grid_x = grid.1;
             patch_height = refine_h / grid_y;

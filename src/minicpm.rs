@@ -257,7 +257,7 @@ impl WindowAttentionMerger {
             start += num_patches;
         }
         let refs = chunks.iter().collect::<Vec<_>>();
-        Ok(Tensor::cat(&refs, 0)?.unsqueeze(0)?)
+        Tensor::cat(&refs, 0)?.unsqueeze(0)
     }
 }
 

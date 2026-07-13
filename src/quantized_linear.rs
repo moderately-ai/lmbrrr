@@ -480,7 +480,7 @@ mod tests {
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0.5f32.to_le_bytes());
-        bytes.extend(std::iter::repeat(2u8).take(32));
+        bytes.extend(std::iter::repeat_n(2u8, 32));
         let mut data_file = std::fs::File::create(&data_path).unwrap();
         data_file.write_all(&bytes).unwrap();
 

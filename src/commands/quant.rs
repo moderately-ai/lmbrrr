@@ -210,17 +210,15 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
             let input_cpu =
                 Tensor::from_vec(input_values, (1, tokens, shape.in_dim), &Device::Cpu)?;
 
+            let ctx = MatmulBenchCtx {
+                weight_cpu: &weight_cpu,
+                input_cpu: &input_cpu,
+                device: &device,
+                warmup: args.warmup,
+                iterations: args.iterations,
+            };
             for activation_dtype in activation_dtypes {
-                rows.push(bench_dense_matmul(
-                    &shape,
-                    mode,
-                    activation_dtype,
-                    &weight_cpu,
-                    &input_cpu,
-                    &device,
-                    args.warmup,
-                    args.iterations,
-                ));
+                rows.push(bench_dense_matmul(&shape, mode, activation_dtype, &ctx));
             }
 
             for quant_dtype in quant_dtypes {
@@ -230,11 +228,7 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
                         mode,
                         quant_dtype,
                         activation_dtype,
-                        &weight_cpu,
-                        &input_cpu,
-                        &device,
-                        args.warmup,
-                        args.iterations,
+                        &ctx,
                     ));
                 }
             }
@@ -324,14 +318,21 @@ pub(crate) fn quant_quality(args: QuantQualityArgs) -> Result<()> {
         policy_specs.push(("q4k-full-text", Some(&args.full_text_manifest)));
     }
 
+    let ctx = QuantQualityCtx {
+        bundle: &bundle,
+        device: &device,
+        dtype,
+        tokenizer: &tokenizer,
+        eos_ids: &eos_ids,
+        args: &args,
+    };
     let mut policy_runs = Vec::new();
     for (label, manifest) in policy_specs {
         eprintln!("running quant-quality policy {label}");
         let started = Instant::now();
-        let (generations, load_elapsed, quantized_load) = run_quant_quality_policy(
-            &bundle, &device, dtype, manifest, &text_rows, &tokenizer, &eos_ids, &args,
-        )
-        .with_context(|| format!("run quant-quality policy {label}"))?;
+        let (generations, load_elapsed, quantized_load) =
+            run_quant_quality_policy(&ctx, manifest, &text_rows)
+                .with_context(|| format!("run quant-quality policy {label}"))?;
         policy_runs.push(QuantQualityPolicyRun {
             label: label.to_string(),
             manifest: manifest.cloned(),
@@ -448,36 +449,47 @@ pub(crate) fn quant_quality(args: QuantQualityArgs) -> Result<()> {
     write_json_report(args.output.as_ref(), &report)
 }
 
-fn run_quant_quality_policy(
-    bundle: &ArtifactBundle,
-    device: &Device,
+/// Everything shared across the per-policy quality runs: the resolved model
+/// bundle, execution device/dtype, and decode references.
+struct QuantQualityCtx<'a> {
+    bundle: &'a ArtifactBundle,
+    device: &'a Device,
     dtype: DType,
+    tokenizer: &'a Tokenizer,
+    eos_ids: &'a [u32],
+    args: &'a QuantQualityArgs,
+}
+
+fn run_quant_quality_policy(
+    ctx: &QuantQualityCtx,
     quantized_manifest: Option<&PathBuf>,
     rows: &[&CalibrationRow],
-    tokenizer: &Tokenizer,
-    eos_ids: &[u32],
-    args: &QuantQualityArgs,
 ) -> Result<(
     Vec<QuantQualityGeneration>,
     Duration,
     Option<QuantizedLoadStats>,
 )> {
-    let (mut model, load_elapsed, quantized_load) =
-        load_model_with_optional_quantization(bundle, dtype, device, quantized_manifest, None)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        ctx.bundle,
+        ctx.dtype,
+        ctx.device,
+        quantized_manifest,
+        None,
+    )?;
     let mut generations = Vec::with_capacity(rows.len());
     for row in rows {
-        let generation = quality_generation_args(&args.generation, row);
+        let generation = quality_generation_args(&ctx.args.generation, row);
         let stats = generate_tokens(
             &mut model,
-            device,
+            ctx.device,
             &generation,
             &row.token_ids,
             None::<&ProcessedImages>,
-            &args.model.downsample_mode,
-            eos_ids,
+            &ctx.args.model.downsample_mode,
+            ctx.eos_ids,
             |_, _, _, _| Ok(()),
         )?;
-        let raw_text = decode_tokens(tokenizer, &stats.generated_token_ids)?;
+        let raw_text = decode_tokens(ctx.tokenizer, &stats.generated_token_ids)?;
         let parts = split_reasoning_text(&raw_text, row.enable_thinking);
         generations.push(QuantQualityGeneration {
             stats,
@@ -782,23 +794,30 @@ fn quant_matmul_shapes(cfg: &MiniCpmConfig, include_lm_head: bool) -> Vec<Matmul
     shapes
 }
 
+/// Deterministic host-side inputs plus timing knobs shared by every
+/// dense/quantized arm of one (shape, mode) bench cell.
+struct MatmulBenchCtx<'a> {
+    weight_cpu: &'a Tensor,
+    input_cpu: &'a Tensor,
+    device: &'a Device,
+    warmup: usize,
+    iterations: usize,
+}
+
 fn bench_dense_matmul(
     shape: &MatmulShape,
     mode: MatmulMode,
     activation_dtype: DType,
-    weight_cpu: &Tensor,
-    input_cpu: &Tensor,
-    device: &Device,
-    warmup: usize,
-    iterations: usize,
+    ctx: &MatmulBenchCtx,
 ) -> serde_json::Value {
+    let device = ctx.device;
     let result = (|| -> Result<(Duration, Duration)> {
         let prepare_started = Instant::now();
-        let weight = weight_cpu.to_device(device)?.to_dtype(activation_dtype)?;
-        let input = input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
+        let weight = ctx.weight_cpu.to_device(device)?.to_dtype(activation_dtype)?;
+        let input = ctx.input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
         device.synchronize()?;
         let prepare_elapsed = prepare_started.elapsed();
-        let elapsed = time_iterations(device, warmup, iterations, || {
+        let elapsed = time_iterations(device, ctx.warmup, ctx.iterations, || {
             let w = weight.t()?;
             let tokens = input.dim(1)?;
             Ok(input
@@ -811,13 +830,14 @@ fn bench_dense_matmul(
     matmul_bench_row(
         shape,
         mode,
-        "dense",
-        Some(format!("{activation_dtype:?}")),
-        activation_dtype,
-        None,
+        BenchRowBackend {
+            backend: "dense",
+            weight_dtype: Some(format!("{activation_dtype:?}")),
+            activation_dtype,
+            activation_cast: None,
+        },
         result,
-        iterations,
-        input_cpu.dim(1).unwrap_or(1),
+        ctx,
     )
 }
 
@@ -826,12 +846,9 @@ fn bench_quant_matmul(
     mode: MatmulMode,
     quant_dtype: GgmlDType,
     activation_dtype: DType,
-    weight_cpu: &Tensor,
-    input_cpu: &Tensor,
-    device: &Device,
-    warmup: usize,
-    iterations: usize,
+    ctx: &MatmulBenchCtx,
 ) -> serde_json::Value {
+    let device = ctx.device;
     // Route through MixedLinear so the bench measures the DEPLOYED path:
     // bf16_direct kernels for Q8_0/Q4K/Q6K on Metal (F32 accumulate + one
     // output hop), the F32 input cast only where the runner actually pays it.
@@ -843,45 +860,59 @@ fn bench_quant_matmul(
         );
     let result = (|| -> Result<(Duration, Duration)> {
         let prepare_started = Instant::now();
-        let qweight = QTensor::quantize_onto(weight_cpu, quant_dtype, device)?;
+        let qweight = QTensor::quantize_onto(ctx.weight_cpu, quant_dtype, device)?;
         let linear = lmbrrr::quantized_linear::MixedLinear::from_qtensor(qweight)?;
-        let input = input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
+        let input = ctx.input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
         device.synchronize()?;
         let prepare_elapsed = prepare_started.elapsed();
-        let elapsed =
-            time_iterations(device, warmup, iterations, || Ok(linear.forward(&input)?))?;
+        let elapsed = time_iterations(device, ctx.warmup, ctx.iterations, || {
+            Ok(linear.forward(&input)?)
+        })?;
         Ok((prepare_elapsed, elapsed))
     })();
     matmul_bench_row(
         shape,
         mode,
-        "quantized",
-        Some(format!("{quant_dtype:?}")),
-        activation_dtype,
-        if activation_dtype == DType::F32 {
-            None
-        } else if bf16_direct {
-            Some("bf16_direct")
-        } else {
-            Some("to_f32")
+        BenchRowBackend {
+            backend: "quantized",
+            weight_dtype: Some(format!("{quant_dtype:?}")),
+            activation_dtype,
+            activation_cast: if activation_dtype == DType::F32 {
+                None
+            } else if bf16_direct {
+                Some("bf16_direct")
+            } else {
+                Some("to_f32")
+            },
         },
         result,
-        iterations,
-        input_cpu.dim(1).unwrap_or(1),
+        ctx,
     )
+}
+
+/// How one bench row computed its matmul, for the report columns.
+struct BenchRowBackend<'a> {
+    backend: &'a str,
+    weight_dtype: Option<String>,
+    activation_dtype: DType,
+    activation_cast: Option<&'a str>,
 }
 
 fn matmul_bench_row(
     shape: &MatmulShape,
     mode: MatmulMode,
-    backend: &str,
-    weight_dtype: Option<String>,
-    activation_dtype: DType,
-    activation_cast: Option<&str>,
+    backend: BenchRowBackend,
     result: Result<(Duration, Duration)>,
-    iterations: usize,
-    tokens_per_iteration: usize,
+    ctx: &MatmulBenchCtx,
 ) -> serde_json::Value {
+    let BenchRowBackend {
+        backend,
+        weight_dtype,
+        activation_dtype,
+        activation_cast,
+    } = backend;
+    let iterations = ctx.iterations;
+    let tokens_per_iteration = ctx.input_cpu.dim(1).unwrap_or(1);
     match result {
         Ok((prepare_elapsed, elapsed)) => serde_json::json!({
             "shape": shape.name,

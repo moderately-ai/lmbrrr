@@ -671,10 +671,10 @@ pub(crate) fn profile_decode(args: ProfileArgs) -> Result<()> {
     let prefill_events = profiler.events();
     let (mut next_token, prefill_argmax_elapsed) = argmax_token(&logits, &device)?;
 
-    let mut position = tokens.len();
     let mut decode_events = Vec::new();
     let mut decode_steps = Vec::with_capacity(args.max_new_tokens);
     for step in 0..args.max_new_tokens {
+        let position = tokens.len() + step;
         profiler.clear();
         let input = Tensor::from_slice(&[next_token], (1, 1), &device)?;
         let forward_started = Instant::now();
@@ -701,7 +701,6 @@ pub(crate) fn profile_decode(args: ProfileArgs) -> Result<()> {
         }));
         decode_events.extend(events);
         next_token = sampled;
-        position += 1;
     }
     model.set_text_profiler(None);
 
@@ -1020,7 +1019,7 @@ pub(crate) fn fakequant_export(args: FakequantExportArgs) -> Result<()> {
                 || name.contains(".linear_attn."))
             && !name.ends_with(".in_proj_a.weight")
             && !name.ends_with(".in_proj_b.weight")
-            && shape[shape.len() - 1] % 256 == 0
+            && shape[shape.len() - 1].is_multiple_of(256)
     };
 
     let mut quantized = 0usize;

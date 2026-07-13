@@ -495,26 +495,43 @@ pub fn gated_delta_v2(
     Ok((out, conv_out, state_out, capture))
 }
 
-/// Runs the v2 fused single-token decode (fused prep+core at full occupancy
-/// + epilogue; two dispatches on one encoder). State layout is TRANSPOSED
-/// (b, heads, dv, dk) like the other v2 kernels. Returns
-/// (out [b, 1, value_dim], conv_state, recurrent_state (transposed)).
-#[allow(clippy::too_many_arguments)]
+/// The layer-resident inputs to [`gated_delta_v2_decode`]: weights and norm
+/// constants that do not change between steps, as the caller's layer holds
+/// them.
+#[derive(Clone, Copy)]
+pub struct GatedDeltaDecodeWeights<'a> {
+    pub conv_weight: &'a Tensor,
+    pub dt_bias_f32: &'a Tensor,
+    pub a_log_exp_f32: &'a Tensor,
+    pub norm_weight_f32: &'a Tensor,
+    pub dims: &'a GatedDeltaDims,
+    pub l2_eps: f32,
+    pub norm_eps: f32,
+}
+
+/// Runs the v2 fused single-token decode (fused prep+core at full
+/// occupancy plus epilogue; two dispatches on one encoder). State layout is
+/// TRANSPOSED as `(b, heads, dv, dk)` like the other v2 kernels. Returns
+/// the tuple `(out [b, 1, value_dim], conv_state, recurrent_state
+/// (transposed))`.
 pub fn gated_delta_v2_decode(
     proj: &Tensor,
     ba: &Tensor,
     batch: usize,
     conv_state: &Tensor,
     recurrent_state_t: &Tensor,
-    conv_weight: &Tensor,
-    dt_bias_f32: &Tensor,
-    a_log_exp_f32: &Tensor,
-    norm_weight_f32: &Tensor,
-    dims: &GatedDeltaDims,
-    l2_eps: f32,
-    norm_eps: f32,
+    weights: &GatedDeltaDecodeWeights,
 ) -> Result<(Tensor, Tensor, Tensor)> {
     use candle_metal_kernels::kernels::call_gated_delta_v2_decode;
+    let GatedDeltaDecodeWeights {
+        conv_weight,
+        dt_bias_f32,
+        a_log_exp_f32,
+        norm_weight_f32,
+        dims,
+        l2_eps,
+        norm_eps,
+    } = *weights;
     let Device::Metal(device) = proj.device() else {
         anyhow::bail!("fused gated-delta v2 decode requires a Metal device");
     };

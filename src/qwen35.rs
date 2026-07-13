@@ -212,7 +212,7 @@ impl Qwen35RmsNorm {
         } else {
             xs.contiguous()?
         };
-        Ok(candle_nn::ops::rms_norm(&xs, weight, self.eps as f32)?)
+        candle_nn::ops::rms_norm(&xs, weight, self.eps as f32)
     }
 
     /// Fused `(a + b, rms_norm(a + b))`: one dispatch for the residual add +
@@ -328,6 +328,12 @@ pub struct TruncatableKvCache {
     len: usize,
 }
 
+impl Default for TruncatableKvCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TruncatableKvCache {
     const MIN_CAPACITY: usize = 1024;
 
@@ -347,6 +353,10 @@ impl TruncatableKvCache {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn truncate(&mut self, len: usize) -> Result<()> {
@@ -624,8 +634,7 @@ impl FullAttention {
         let qkv = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("full_attention"),
+            Some((layer_index, "full_attention")),
             "full_attention_q_gate_projection",
             l,
             offset,
@@ -641,8 +650,7 @@ impl FullAttention {
         let (mut q, mut k, v) = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("full_attention"),
+            Some((layer_index, "full_attention")),
             "full_attention_kv_projection_norm",
             l,
             offset,
@@ -683,8 +691,7 @@ impl FullAttention {
         let (q, k, v, k_t) = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("full_attention"),
+            Some((layer_index, "full_attention")),
             "full_attention_rotary_kv_cache",
             l,
             offset,
@@ -712,8 +719,7 @@ impl FullAttention {
         let out = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("full_attention"),
+            Some((layer_index, "full_attention")),
             "full_attention_matmul_softmax",
             l,
             offset,
@@ -757,8 +763,7 @@ impl FullAttention {
         profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("full_attention"),
+            Some((layer_index, "full_attention")),
             "full_attention_output_projection",
             l,
             offset,
@@ -1131,15 +1136,17 @@ impl GatedDeltaNet {
                 b_sz,
                 &conv_state,
                 &state_t.contiguous()?,
-                &self.conv_weight_full,
-                &self.dt_bias_f32.flatten_all()?,
-                &self.a_log_exp_f32.flatten_all()?,
-                &self.norm.weight_f32,
-                &dims,
-                1e-6,
-                self.norm.eps as f32,
+                &crate::fused_deltanet::GatedDeltaDecodeWeights {
+                    conv_weight: &self.conv_weight_full,
+                    dt_bias_f32: &self.dt_bias_f32.flatten_all()?,
+                    a_log_exp_f32: &self.a_log_exp_f32.flatten_all()?,
+                    norm_weight_f32: &self.norm.weight_f32,
+                    dims: &dims,
+                    l2_eps: 1e-6,
+                    norm_eps: self.norm.eps as f32,
+                },
             )
-            .map_err(|e| candle::Error::wrap(e))?;
+            .map_err(candle::Error::wrap)?;
             self.conv_state = Some(conv_new);
             self.recurrent_state = Some(state_new);
             return self.out_proj.forward(&out);
@@ -1171,7 +1178,7 @@ impl GatedDeltaNet {
             1e-6,
             self.norm.eps as f32,
         )
-        .map_err(|e| candle::Error::wrap(e))?;
+        .map_err(candle::Error::wrap)?;
         self.conv_state = Some(conv_new);
         self.recurrent_state = Some(state_new);
         self.out_proj.forward(&out)
@@ -1186,7 +1193,7 @@ impl GatedDeltaNet {
             && self.conv_state.is_some()
             && self.num_k_heads == self.num_v_heads
             && self.head_k_dim == self.head_v_dim
-            && self.head_v_dim % 32 == 0
+            && self.head_v_dim.is_multiple_of(32)
             && self.head_v_dim <= 256
     }
 
@@ -1584,8 +1591,7 @@ impl GatedDeltaNet {
             return profiled(
                 profiler,
                 &device,
-                Some(layer_index),
-                Some("linear_attention"),
+                Some((layer_index, "linear_attention")),
                 if l == 1 { "deltanet_fused_v2_decode" } else { "deltanet_fused_v2_chunk" },
                 l,
                 offset,
@@ -1596,8 +1602,7 @@ impl GatedDeltaNet {
             return profiled(
                 profiler,
                 &device,
-                Some(layer_index),
-                Some("linear_attention"),
+                Some((layer_index, "linear_attention")),
                 "deltanet_fused_decode",
                 l,
                 offset,
@@ -1608,8 +1613,7 @@ impl GatedDeltaNet {
             return profiled(
                 profiler,
                 &device,
-                Some(layer_index),
-                Some("linear_attention"),
+                Some((layer_index, "linear_attention")),
                 "deltanet_fused_chunk",
                 l,
                 offset,
@@ -1621,8 +1625,7 @@ impl GatedDeltaNet {
         let qkvz = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("linear_attention"),
+            Some((layer_index, "linear_attention")),
             "deltanet_qkv_projection",
             l,
             offset,
@@ -1635,8 +1638,7 @@ impl GatedDeltaNet {
         let mixed = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("linear_attention"),
+            Some((layer_index, "linear_attention")),
             "deltanet_depthwise_conv",
             l,
             offset,
@@ -1658,8 +1660,7 @@ impl GatedDeltaNet {
         let (query, key, beta, g) = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("linear_attention"),
+            Some((layer_index, "linear_attention")),
             "deltanet_gates_and_repeat",
             l,
             offset,
@@ -1684,8 +1685,7 @@ impl GatedDeltaNet {
         let core = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("linear_attention"),
+            Some((layer_index, "linear_attention")),
             "deltanet_recurrent_rule",
             l,
             offset,
@@ -1694,8 +1694,7 @@ impl GatedDeltaNet {
         profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some("linear_attention"),
+            Some((layer_index, "linear_attention")),
             "deltanet_output_gate_norm_projection",
             l,
             offset,
@@ -2026,8 +2025,7 @@ fn maybe_repeat_heads(xs: Tensor, n_rep: usize) -> Result<Tensor> {
 fn profiled<T>(
     profiler: Option<&Qwen35Profiler>,
     device: &Device,
-    layer_index: Option<usize>,
-    layer_kind: Option<&'static str>,
+    layer: Option<(usize, &'static str)>,
     component: &'static str,
     seq_len: usize,
     offset: usize,
@@ -2040,8 +2038,8 @@ fn profiled<T>(
         device.synchronize()?;
         profiler.record(
             component,
-            layer_index,
-            layer_kind,
+            layer.map(|(index, _)| index),
+            layer.map(|(_, kind)| kind),
             seq_len,
             offset,
             started.elapsed().as_secs_f64(),
@@ -2098,7 +2096,7 @@ mod tests;
 #[derive(Clone, Debug)]
 enum TokenMixer {
     Full(FullAttention),
-    Linear(GatedDeltaNet),
+    Linear(Box<GatedDeltaNet>),
 }
 
 impl TokenMixer {
@@ -2141,7 +2139,7 @@ impl DecoderLayer {
                 TokenMixer::Full(FullAttention::new(cfg, rotary, vb.pp("self_attn"))?)
             }
             LayerType::LinearAttention => {
-                TokenMixer::Linear(GatedDeltaNet::new(cfg, vb.pp("linear_attn"))?)
+                TokenMixer::Linear(Box::new(GatedDeltaNet::new(cfg, vb.pp("linear_attn"))?))
             }
         };
         Ok(Self {
@@ -2182,8 +2180,7 @@ impl DecoderLayer {
         let hidden = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some(layer_kind),
+            Some((layer_index, layer_kind)),
             "input_layernorm",
             seq_len,
             offset,
@@ -2211,8 +2208,7 @@ impl DecoderLayer {
         let (xs, hidden) = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some(layer_kind),
+            Some((layer_index, layer_kind)),
             "post_attention_layernorm",
             seq_len,
             offset,
@@ -2222,8 +2218,7 @@ impl DecoderLayer {
         let hidden = profiled(
             profiler,
             &device,
-            Some(layer_index),
-            Some(layer_kind),
+            Some((layer_index, layer_kind)),
             "mlp",
             seq_len,
             offset,
@@ -2389,7 +2384,6 @@ impl Qwen35TextModel {
         profiled(
             profiler.as_ref(),
             &self.device,
-            None,
             None,
             "final_norm",
             l,

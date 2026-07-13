@@ -56,7 +56,7 @@ pub fn fused_rms_norm_add(
         );
     }
     let elem_count = a.elem_count();
-    if elem_count % dim != 0 {
+    if !elem_count.is_multiple_of(dim) {
         anyhow::bail!("fused rms_norm_add: elem_count {elem_count} not a multiple of dim {dim}");
     }
     let rows = elem_count / dim;

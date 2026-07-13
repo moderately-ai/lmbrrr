@@ -320,7 +320,7 @@ impl DsparkDrafter {
         }
         let weights = dir.join("model.safetensors");
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights.clone()], dtype, device)
+            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&weights), dtype, device)
                 .with_context(|| format!("mmap drafter weights {}", weights.display()))?
         };
         let h = config.hidden_size;
@@ -745,7 +745,7 @@ impl DsparkDrafter {
             self.markov_w1.dtype(),
         );
         anyhow::ensure!(
-            r <= candle_metal_kernels::MARKOV_TPG && r % 32 == 0,
+            r <= candle_metal_kernels::MARKOV_TPG && r.is_multiple_of(32),
             "fused markov chain requires rank %32==0 and <= {} (got {r})",
             candle_metal_kernels::MARKOV_TPG,
         );

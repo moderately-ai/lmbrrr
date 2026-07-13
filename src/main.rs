@@ -396,7 +396,7 @@ struct QuantSensitivityArgs {
     calibration: PathBuf,
 
     #[arg(long = "candidate-quant", value_enum)]
-    candidate_quants: Vec<QuantFormatArg>,
+    candidate_quants: Vec<SymmetricQuantArg>,
 
     #[arg(long)]
     max_cases: Option<usize>,
@@ -757,11 +757,16 @@ enum DTypeArg {
     Bf16,
 }
 
+/// Symmetric candidate formats for the sensitivity sweep. The explicit value
+/// names preserve the original CLI strings.
 #[derive(Copy, Clone, Debug, ValueEnum)]
-enum QuantFormatArg {
-    Q4Symmetric,
-    Q5Symmetric,
-    Q8Symmetric,
+enum SymmetricQuantArg {
+    #[value(name = "q4-symmetric")]
+    Q4,
+    #[value(name = "q5-symmetric")]
+    Q5,
+    #[value(name = "q8-symmetric")]
+    Q8,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -785,12 +790,12 @@ impl MixedPrecisionPolicyArg {
     }
 }
 
-impl QuantFormatArg {
+impl SymmetricQuantArg {
     fn resolve(self) -> QuantFormat {
         match self {
-            Self::Q4Symmetric => QuantFormat::SymmetricInt4,
-            Self::Q5Symmetric => QuantFormat::SymmetricInt5,
-            Self::Q8Symmetric => QuantFormat::SymmetricInt8,
+            Self::Q4 => QuantFormat::SymmetricInt4,
+            Self::Q5 => QuantFormat::SymmetricInt5,
+            Self::Q8 => QuantFormat::SymmetricInt8,
         }
     }
 }
@@ -901,7 +906,7 @@ fn load_model_with_optional_quantization(
     Duration,
     Option<QuantizedLoadStats>,
 )> {
-    let (mut model, load_elapsed, _) = load_model(bundle, dtype, device)?;
+    let (mut model, load_elapsed) = load_model(bundle, dtype, device)?;
     if let Some(tier) = quantize_lm_head {
         model.quantize_lm_head(tier.ggml())?;
     }
@@ -946,7 +951,7 @@ fn maybe_restrict_head(model: &mut MiniCpmForConditionalGeneration, m: &ModelArg
     let Some(n) = m.target_head_vocab_size else {
         return Ok(());
     };
-    #[derive(serde::Deserialize)]
+    #[derive(Deserialize)]
     struct Ranking {
         ids: Vec<u32>,
     }
@@ -964,12 +969,12 @@ fn maybe_restrict_head(model: &mut MiniCpmForConditionalGeneration, m: &ModelArg
             ranking.ids.len()
         );
     }
+    const FULL_VOCAB: usize = 248094;
     let ids = &ranking.ids[..n];
     model.restrict_lm_head_vocab(ids, m.quantize_lm_head.map(|t| t.ggml()))?;
     eprintln!(
-        "target head restricted to {n} tokens ({:.1}% of {} vocab; ~{:.0} MB head at q4k)",
-        100.0 * n as f64 / 248094.0,
-        248094,
+        "target head restricted to {n} tokens ({:.1}% of {FULL_VOCAB} vocab; ~{:.0} MB head at q4k)",
+        100.0 * n as f64 / FULL_VOCAB as f64,
         n as f64 * 1024.0 * 4.5 / 8.0 / 1e6
     );
     Ok(())
@@ -1139,7 +1144,7 @@ fn median(values: &mut [f64]) -> f64 {
     }
     values.sort_by(|left, right| left.total_cmp(right));
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
@@ -1179,16 +1184,12 @@ fn load_model(
     bundle: &ArtifactBundle,
     dtype: DType,
     device: &Device,
-) -> Result<(
-    MiniCpmForConditionalGeneration,
-    Duration,
-    Option<QuantizedLoadStats>,
-)> {
+) -> Result<(MiniCpmForConditionalGeneration, Duration)> {
     let load_start = Instant::now();
     let vb =
         unsafe { VarBuilder::from_mmaped_safetensors(&bundle.artifacts.weights, dtype, device)? };
     let model = MiniCpmForConditionalGeneration::new(&bundle.config, vb)?;
-    Ok((model, load_start.elapsed(), None))
+    Ok((model, load_start.elapsed()))
 }
 
 fn select_device(cpu: bool) -> Result<Device> {

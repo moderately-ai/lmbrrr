@@ -69,18 +69,34 @@ fn top_k_values(logits: &Tensor) -> Result<Vec<Vec<f32>>> {
 /// Reports carry the observed maxima so this stays calibrated by evidence.
 const LOGIT_NOISE_BOUND: f32 = 0.75;
 
-fn dspark_stub_run(
-    model: &mut MiniCpmForConditionalGeneration,
-    device: &Device,
-    prompt_tokens: &[u32],
-    stub_tokens: &[u32],
+/// One stub-oracle run's inputs: the shared prompt/reference streams plus
+/// the per-run corruption pattern.
+struct StubRunSpec<'a> {
+    prompt_tokens: &'a [u32],
+    stub_tokens: &'a [u32],
     gamma: usize,
     max_new_tokens: usize,
     corrupt_every: usize,
     vocab_size: usize,
-    downsample_mode: &str,
-    eos_ids: &[u32],
+    downsample_mode: &'a str,
+    eos_ids: &'a [u32],
+}
+
+fn dspark_stub_run(
+    model: &mut MiniCpmForConditionalGeneration,
+    device: &Device,
+    spec: StubRunSpec,
 ) -> Result<SpecStubRun> {
+    let StubRunSpec {
+        prompt_tokens,
+        stub_tokens,
+        gamma,
+        max_new_tokens,
+        corrupt_every,
+        vocab_size,
+        downsample_mode,
+        eos_ids,
+    } = spec;
     let wall_start = Instant::now();
     model.clear_cache();
     let prompt_input = Tensor::from_slice(prompt_tokens, (1, prompt_tokens.len()), device)?;
@@ -673,7 +689,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 })
                 && draft_confidences
                     .first()
-                    .map(|logit| sts.position_probability(0, *logit) as f32)
+                    .map(|logit| sts.position_probability(0, *logit))
                     .is_some_and(|p0| p0 >= args.tree_band[0] && p0 <= args.tree_band[1]);
             if tree_round {
                 let w = tree_width;
@@ -1219,14 +1235,16 @@ pub(crate) fn dspark_run(args: DsparkRunArgs) -> Result<()> {
         runs.push(dspark_stub_run(
             &mut model,
             &device,
-            &prompt_tokens,
-            &stub_tokens,
-            args.gamma,
-            args.max_new_tokens,
-            corrupt_every,
-            vocab_size,
-            &args.model.downsample_mode,
-            &eos_ids,
+            StubRunSpec {
+                prompt_tokens: &prompt_tokens,
+                stub_tokens: &stub_tokens,
+                gamma: args.gamma,
+                max_new_tokens: args.max_new_tokens,
+                corrupt_every,
+                vocab_size,
+                downsample_mode: &args.model.downsample_mode,
+                eos_ids: &eos_ids,
+            },
         )?);
     }
 
@@ -1269,7 +1287,7 @@ pub(crate) fn dspark_run(args: DsparkRunArgs) -> Result<()> {
                 .map(|(x, y)| (x - y).abs())
                 .fold(0.0f32, f32::max);
             max_trajectory_deviation = max_trajectory_deviation.max(dev);
-            if dev > LOGIT_NOISE_BOUND && worst.map_or(true, |(_, w)| dev > w) {
+            if dev > LOGIT_NOISE_BOUND && worst.is_none_or(|(_, w)| dev > w) {
                 worst = Some((i, dev));
             }
         }

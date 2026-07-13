@@ -29,7 +29,7 @@ const MAX_N: usize = 4;
 
 impl NgramDraftIndex {
     pub fn new(min_n: usize, max_n: usize) -> Self {
-        let max_n = max_n.min(MAX_N).max(1);
+        let max_n = max_n.clamp(1, MAX_N);
         let min_n = min_n.clamp(1, max_n);
         Self {
             tokens: Vec::new(),
@@ -90,7 +90,7 @@ impl NgramDraftIndex {
                 // Find an earlier occurrence by scanning backward; the map
                 // only keeps the latest. Cheap fallback: scan.
                 if let Some(prior_end) = self.scan_prior(gram, len - n) {
-                    let take = span.min(len - 0).min(self.tokens.len() - prior_end);
+                    let take = span.min(len).min(self.tokens.len() - prior_end);
                     if take == 0 {
                         continue;
                     }

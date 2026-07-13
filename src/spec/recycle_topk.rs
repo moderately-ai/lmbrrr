@@ -16,10 +16,10 @@ use candle::{DType, Device, Tensor, D};
 /// Tie semantics match candle argmax (lowest index wins at both stages).
 const RECYCLE_CHUNK: usize = 256;
 
-pub fn logits_argmax_and_topk(
-    logits: &Tensor,
-    k: usize,
-) -> Result<Vec<(u32, Vec<(u32, f32)>)>> {
+/// Per verify row: the argmax token id plus its top-k (id, logit) candidates.
+pub type RowArgmaxTopk = (u32, Vec<(u32, f32)>);
+
+pub fn logits_argmax_and_topk(logits: &Tensor, k: usize) -> Result<Vec<RowArgmaxTopk>> {
     let (_, l, vocab) = logits.dims3()?;
     let chunks = vocab.div_ceil(RECYCLE_CHUNK);
     let padded = chunks * RECYCLE_CHUNK;

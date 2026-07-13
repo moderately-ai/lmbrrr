@@ -42,8 +42,8 @@ impl StsCalibration {
         }
         let file = std::fs::File::open(&path)
             .with_context(|| format!("open sts calibration {}", path.display()))?;
-        Ok(serde_json::from_reader(file)
-            .with_context(|| format!("parse sts calibration {}", path.display()))?)
+        serde_json::from_reader(file)
+            .with_context(|| format!("parse sts calibration {}", path.display()))
     }
 
     pub fn probability(&self, logit: f32) -> f32 {

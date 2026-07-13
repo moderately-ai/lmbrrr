@@ -150,10 +150,9 @@ pub(crate) fn multi_bench(args: MultiBenchArgs) -> Result<()> {
 
     let mut streams: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut finished = vec![false; n];
-    let mut position = len;
     let decode_start = Instant::now();
     let mut steps = 0usize;
-    for _ in 0..args.max_new_tokens {
+    for step in 0..args.max_new_tokens {
         // logits [n, vocab]
         let next = logits
             .to_dtype(DType::F32)?
@@ -183,8 +182,7 @@ pub(crate) fn multi_bench(args: MultiBenchArgs) -> Result<()> {
             .map(|(i, t)| if finished[i] { eos_ids[0] } else { *t })
             .collect();
         let step_input = Tensor::from_slice(&feed, (n, 1), &device)?;
-        logits = model.forward(&step_input, None::<&ProcessedImages>, &args.model.downsample_mode, position)?;
-        position += 1;
+        logits = model.forward(&step_input, None::<&ProcessedImages>, &args.model.downsample_mode, len + step)?;
     }
     let decode_elapsed = decode_start.elapsed();
     let total_tokens: usize = streams.iter().map(|s| s.len()).sum();
