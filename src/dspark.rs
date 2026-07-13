@@ -495,6 +495,13 @@ impl DsparkDrafter {
         branch: bool,
         force_ops: bool,
     ) -> Result<ProposalTensors> {
+        // Drain in-flight work (async-readback verify chunks overlap propose)
+        // before arming the first timer, or its fence absorbs the previous
+        // round's tail and inflates the backbone bucket — the 6.7-vs-10.1ms
+        // bimodality of the 2026-07-13 cpb-ladder was exactly this.
+        if propose_timing() {
+            self.device.synchronize()?;
+        }
         let ladder_start = propose_timing().then(std::time::Instant::now);
         let backbone = self.propose_backbone(anchor_token, anchor_pos, gamma)?;
         let backbone_ms = ladder_start
