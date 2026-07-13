@@ -1,7 +1,7 @@
 ---
 id: drafter-block-megakernel
 title: "Drafter block megakernel: fused per-layer prep+attention+MLP dispatch (backbone depth ~30 -> ~8)"
-status: todo
+status: closed
 priority: p2
 dependencies: [drafter-rope-in-place, drafter-chain-persistent-kernel]
 related: []

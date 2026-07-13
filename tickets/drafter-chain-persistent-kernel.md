@@ -1,7 +1,7 @@
 ---
 id: drafter-chain-persistent-kernel
 title: Markov chain as one persistent 1-TG kernel (12 serialized dispatches -> 1)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: []
