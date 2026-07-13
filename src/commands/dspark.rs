@@ -365,6 +365,17 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let mut alt_tokens_gained = 0usize;
     let skip_draft_after = args.skip_draft_after;
     let probe_every = args.probe_every.max(1);
+    // Probe backoff: --probe-every is tuned for economies where a failed
+    // probe costs ~2x a greedy step (M4-class). Down-tier the draft alone is
+    // >2 greedy steps, and fixed-interval probing taxes weak classes ~+40%
+    // over their greedy floor (M3 refit, 2026-07-13: summarization 9.4 vs
+    // 6.35 ms/token). Each failed probe doubles the interval up to the cap;
+    // one successful probe restores dense drafting (the full-reset absolution
+    // that two falsified variants proved load-bearing is untouched — backoff
+    // only changes how OFTEN skip mode probes, not what counts as evidence).
+    let probe_backoff_cap = args.probe_backoff_cap.max(probe_every);
+    let mut probe_interval = probe_every;
+    let mut next_probe_round = 0usize;
 
     // Prompt-lookup index over prompt + committed tokens; synced at the top
     // of every round so all round types (drafter/tree/lookup) feed it.
@@ -543,9 +554,22 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 }
             }
 
-            let skip_draft = args.schedule
-                && consecutive_zero_widths >= skip_draft_after
-                && (rounds % probe_every) != 0;
+            let in_skip_mode =
+                args.schedule && consecutive_zero_widths >= skip_draft_after;
+            if !in_skip_mode {
+                probe_interval = probe_every;
+                next_probe_round = 0;
+            } else if next_probe_round == 0 {
+                // Entering skip mode: schedule the first probe one base
+                // interval out.
+                next_probe_round = rounds + probe_interval;
+            }
+            let probe_round = in_skip_mode && rounds >= next_probe_round;
+            let skip_draft = in_skip_mode && !probe_round;
+            if probe_round {
+                probe_interval = (probe_interval * 2).min(probe_backoff_cap);
+                next_probe_round = rounds + probe_interval;
+            }
             // One-round-lag rounds keep the proposal on device: width comes
             // from the PREVIOUS drafted round's confidences, the verify
             // chunk is assembled device-side, and the proposal readback

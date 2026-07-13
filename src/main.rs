@@ -731,6 +731,17 @@ struct DsparkRunArgs {
     #[arg(long, default_value_t = 8)]
     probe_every: usize,
 
+    /// Failed probes double the probe interval up to this cap (successful
+    /// probes restore dense drafting and the base interval); equal to
+    /// --probe-every = backoff disabled. Default OFF: the 2026-07-13 M3 A/B
+    /// showed backoff recovering weak classes +5-17% but regressing
+    /// borderline-strong ones (math -7%, tau 2.67->1.41) because at a
+    /// 14.25ms draft cost even good width-3 rounds strike unless FULLY
+    /// accepted, and backoff then locks drafting out. Re-tune after the
+    /// propose-cost and chain-handoff levers change the strike economics.
+    #[arg(long, default_value_t = 8)]
+    probe_backoff_cap: usize,
+
     #[arg(long)]
     enable_thinking: bool,
 
