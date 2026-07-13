@@ -109,6 +109,24 @@ impl RmsNorm {
         };
         candle_nn::ops::rms_norm(&xs, &self.weight, self.eps as f32)
     }
+
+    /// Fused `(a + b, rms_norm(a + b))` — one dispatch instead of add + norm
+    /// (bit-identical; the target model's residual tails use the same
+    /// kernel). The drafter has no supported off-Metal/non-BF16 deployment:
+    /// anything else is a misconfiguration and fails loudly rather than
+    /// silently unfusing.
+    fn forward_add(&self, a: &Tensor, b: &Tensor) -> Result<(Tensor, Tensor)> {
+        anyhow::ensure!(
+            matches!(a.device(), Device::Metal(_))
+                && a.dtype() == DType::BF16
+                && b.dtype() == DType::BF16,
+            "drafter forward_add requires Metal BF16 (got {:?} {:?}/{:?})",
+            a.device(),
+            a.dtype(),
+            b.dtype(),
+        );
+        crate::fused_norm::fused_rms_norm_add(a, b, &self.weight, self.eps as f32)
+    }
 }
 
 /// Full-head-dim rotary at the checkpoint's theta. Training's Qwen3 rope path
@@ -164,14 +182,15 @@ impl Rotary {
 
 #[derive(Clone, Debug)]
 struct DraftLayer {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
+    /// Width-fused [q; k; v] projection: one gemv per layer instead of three
+    /// skinny ones — the backbone is dispatch-execution-bound (propose-ladder
+    /// 2026-07-14: ~45 tiny dispatches x ~0.15 ms M3 floor).
+    qkv_proj: Linear,
     o_proj: Linear,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
-    gate_proj: Linear,
-    up_proj: Linear,
+    /// Width-fused [gate; up]; the forward applies the fused swiglu kernel.
+    gate_up_proj: Linear,
     down_proj: Linear,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
@@ -313,15 +332,29 @@ impl DsparkDrafter {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
             let p = format!("layers.{i}");
+            // Width-fuse [q;k;v] and [gate;up] at load: row-concatenation of
+            // [out, in] weights is exact (no quantization here — dense bf16).
+            let qkv = Tensor::cat(
+                &[
+                    &vb.get((heads * head_dim, h), &format!("{p}.self_attn.q_proj.weight"))?,
+                    &vb.get((kv_heads * head_dim, h), &format!("{p}.self_attn.k_proj.weight"))?,
+                    &vb.get((kv_heads * head_dim, h), &format!("{p}.self_attn.v_proj.weight"))?,
+                ],
+                0,
+            )?;
+            let gate_up = Tensor::cat(
+                &[
+                    &vb.get((config.intermediate_size, h), &format!("{p}.mlp.gate_proj.weight"))?,
+                    &vb.get((config.intermediate_size, h), &format!("{p}.mlp.up_proj.weight"))?,
+                ],
+                0,
+            )?;
             layers.push(DraftLayer {
-                q_proj: Linear::new(vb.get((heads * head_dim, h), &format!("{p}.self_attn.q_proj.weight"))?, None),
-                k_proj: Linear::new(vb.get((kv_heads * head_dim, h), &format!("{p}.self_attn.k_proj.weight"))?, None),
-                v_proj: Linear::new(vb.get((kv_heads * head_dim, h), &format!("{p}.self_attn.v_proj.weight"))?, None),
+                qkv_proj: Linear::new(qkv, None),
                 o_proj: Linear::new(vb.get((h, heads * head_dim), &format!("{p}.self_attn.o_proj.weight"))?, None),
                 q_norm: RmsNorm::load(&vb, &format!("{p}.self_attn.q_norm.weight"), head_dim, eps)?,
                 k_norm: RmsNorm::load(&vb, &format!("{p}.self_attn.k_norm.weight"), head_dim, eps)?,
-                gate_proj: Linear::new(vb.get((config.intermediate_size, h), &format!("{p}.mlp.gate_proj.weight"))?, None),
-                up_proj: Linear::new(vb.get((config.intermediate_size, h), &format!("{p}.mlp.up_proj.weight"))?, None),
+                gate_up_proj: Linear::new(gate_up, None),
                 down_proj: Linear::new(vb.get((h, config.intermediate_size), &format!("{p}.mlp.down_proj.weight"))?, None),
                 input_layernorm: RmsNorm::load(&vb, &format!("{p}.input_layernorm.weight"), h, eps)?,
                 post_attention_layernorm: RmsNorm::load(&vb, &format!("{p}.post_attention_layernorm.weight"), h, eps)?,
@@ -387,19 +420,24 @@ impl DsparkDrafter {
         let raw_ctx = raw_ctx.to_dtype(self.dtype)?;
         let fused = self.hidden_norm.forward(&self.fc.forward(&raw_ctx)?)?;
         let (b, m, _) = fused.dims3()?;
+        let heads = self.config.num_attention_heads;
         let kv_heads = self.config.num_key_value_heads;
         let head_dim = self.config.head_dim;
         for layer in &mut self.layers {
+            // Context rows only need K/V, but the projection is width-fused:
+            // one qkv gemv with the Q head group discarded is still one
+            // dispatch fewer than two split gemvs, and per-row gemv results
+            // are independent, so the K/V bits are unchanged.
+            let qkv = layer
+                .qkv_proj
+                .forward(&fused)?
+                .reshape((b, m, heads + 2 * kv_heads, head_dim))?;
             let k = layer
                 .k_norm
-                .forward(&layer.k_proj.forward(&fused)?.reshape((b, m, kv_heads, head_dim))?)?
-                .transpose(1, 2)?
-                .contiguous()?;
+                .forward(&qkv.narrow(2, heads, kv_heads)?.transpose(1, 2)?.contiguous()?)?;
             let k = self.rotary.apply(&k, start_pos)?;
-            let v_new = layer
-                .v_proj
-                .forward(&fused)?
-                .reshape((b, m, kv_heads, head_dim))?
+            let v_new = qkv
+                .narrow(2, heads + kv_heads, kv_heads)?
                 .transpose(1, 2)?
                 .contiguous()?;
             if layer.ctx.len() != start_pos {
@@ -467,13 +505,11 @@ impl DsparkDrafter {
             .transpose()?;
         // Branch (tree) rounds and diagnostics consume the corrected step
         // logits, which only the ops chain materializes; everything else
-        // takes the fused kernel when the device/dtype/w2 layout supports it.
+        // takes the fused kernel — an unsupported device/dtype/w2 layout is a
+        // misconfiguration and errors inside it rather than degrading.
         let chain_start = propose_timing().then(std::time::Instant::now);
         let out = if !branch && !force_ops {
-            match self.markov_chain_fused(anchor_token, gamma, &backbone)? {
-                Some(fused) => fused,
-                None => self.markov_chain_ops(anchor_token, gamma, branch, backbone)?,
-            }
+            self.markov_chain_fused(anchor_token, gamma, &backbone)?
         } else {
             self.markov_chain_ops(anchor_token, gamma, branch, backbone)?
         };
@@ -506,25 +542,37 @@ impl DsparkDrafter {
         let head_dim = self.config.head_dim;
         let scale = 1.0 / (head_dim as f64).sqrt();
 
-        for layer in &mut self.layers {
-            let residual = hidden.clone();
-            let normed = layer.input_layernorm.forward(&hidden)?;
+        // Cross-layer fused add+norm needs the NEXT layer's input norm while
+        // the current layer is mutably borrowed; norm handles are Arc-cheap.
+        let input_norms: Vec<RmsNorm> = self
+            .layers
+            .iter()
+            .map(|l| l.input_layernorm.clone())
+            .collect();
+        let n_layers = self.layers.len();
+        let mut normed = input_norms[0].forward(&hidden)?;
+        for i in 0..n_layers {
+            let layer = &mut self.layers[i];
+            // One fused [q;k;v] gemv; the contiguous reshape to head groups
+            // is free, and each head-group slice pays exactly the same
+            // transpose+contiguous copy the split projections paid. QK-norm
+            // runs after the transpose (it reduces over head_dim, which
+            // transpose does not touch — bit-identical, and it saves the
+            // strided-input copy the norm would otherwise make).
+            let qkv = layer
+                .qkv_proj
+                .forward(&normed)?
+                .reshape((b, q_len, heads + 2 * kv_heads, head_dim))?;
             let q = layer
                 .q_norm
-                .forward(&layer.q_proj.forward(&normed)?.reshape((b, q_len, heads, head_dim))?)?
-                .transpose(1, 2)?
-                .contiguous()?;
+                .forward(&qkv.narrow(2, 0, heads)?.transpose(1, 2)?.contiguous()?)?;
             let q = self.rotary.apply(&q, anchor_pos)?;
             let k_new = layer
                 .k_norm
-                .forward(&layer.k_proj.forward(&normed)?.reshape((b, q_len, kv_heads, head_dim))?)?
-                .transpose(1, 2)?
-                .contiguous()?;
+                .forward(&qkv.narrow(2, heads, kv_heads)?.transpose(1, 2)?.contiguous()?)?;
             let k_new = self.rotary.apply(&k_new, anchor_pos)?;
-            let v_new = layer
-                .v_proj
-                .forward(&normed)?
-                .reshape((b, q_len, kv_heads, head_dim))?
+            let v_new = qkv
+                .narrow(2, heads + kv_heads, kv_heads)?
                 .transpose(1, 2)?
                 .contiguous()?;
             // Block rows are appended into the context buffer for the
@@ -548,16 +596,29 @@ impl DsparkDrafter {
             let out = out
                 .transpose(1, 2)?
                 .reshape((b, q_len, heads * head_dim))?;
-            hidden = (residual + layer.o_proj.forward(&out)?)?;
-
-            let residual = hidden.clone();
-            let normed = layer.post_attention_layernorm.forward(&hidden)?;
-            let gated = (layer.gate_proj.forward(&normed)?.silu()? * layer.up_proj.forward(&normed)?)?;
-            hidden = (residual + layer.down_proj.forward(&gated)?)?;
+            let attn = layer.o_proj.forward(&out)?;
+            // Fused residual + post-attention norm (2 dispatches -> 1).
+            let (h_attn, post_normed) =
+                layer.post_attention_layernorm.forward_add(&hidden, &attn)?;
+            // Fused [gate;up] gemv + the fused swiglu kernel (5 -> 3).
+            let gate_up = layer.gate_up_proj.forward(&post_normed)?;
+            let gated = candle_nn::ops::swiglu(&gate_up)?;
+            let down = layer.down_proj.forward(&gated)?;
+            // Fused MLP residual + the NEXT norm — the following layer's
+            // input norm, or the model's final norm on the last layer.
+            let next_norm = if i + 1 < n_layers {
+                &input_norms[i + 1]
+            } else {
+                &self.norm
+            };
+            let (h_next, n_next) = next_norm.forward_add(&h_attn, &down)?;
+            hidden = h_next;
+            normed = n_next;
         }
-        // Heads read only the proposal prefix; narrowing before lm_head skips
-        // the vocab projection for the unused trailing block positions.
-        let block_hidden = self.norm.forward(&hidden)?.narrow(1, 0, gamma)?;
+        // `normed` is final_norm(hidden) via the last fused tail. Heads read
+        // only the proposal prefix; narrowing before lm_head skips the vocab
+        // projection for the unused trailing block positions.
+        let block_hidden = normed.narrow(1, 0, gamma)?;
         let base_logits = self.lm_head.forward(&block_hidden.contiguous()?)?;
         Ok((block_hidden, base_logits))
     }
@@ -661,42 +722,55 @@ impl DsparkDrafter {
 
     /// Fused Metal chain: two dispatches per step (fork dspark.metal)
     /// replacing the ~5-6 tiny serialized ops per step — 78us/step vs
-    /// ~1170us/step measured on the M3. Returns None when the device, dtype
-    /// or w2 layout is outside kernel support; the ops chain covers those.
+    /// ~1170us/step measured on the M3. The drafter's only supported
+    /// deployment is Metal BF16 with a q8_0 or dense-bf16 Markov head;
+    /// anything else fails loudly here.
     fn markov_chain_fused(
         &self,
         anchor_token: u32,
         gamma: usize,
         (block_hidden, base_logits): &(Tensor, Tensor),
-    ) -> Result<Option<ProposalTensors>> {
+    ) -> Result<ProposalTensors> {
         let Device::Metal(metal_dev) = &self.device else {
-            return Ok(None);
+            anyhow::bail!("fused markov chain requires a Metal device");
         };
         let r = self.config.markov_rank;
-        if self.dtype != DType::BF16
-            || base_logits.dtype() != DType::BF16
-            || self.markov_w1.dtype() != DType::BF16
-            || r > candle_metal_kernels::MARKOV_TPG
-            || r % 32 != 0
-        {
-            return Ok(None);
-        }
+        anyhow::ensure!(
+            self.dtype == DType::BF16
+                && base_logits.dtype() == DType::BF16
+                && self.markov_w1.dtype() == DType::BF16,
+            "fused markov chain requires BF16 (dtype {:?}, base {:?}, w1 {:?})",
+            self.dtype,
+            base_logits.dtype(),
+            self.markov_w1.dtype(),
+        );
+        anyhow::ensure!(
+            r <= candle_metal_kernels::MARKOV_TPG && r % 32 == 0,
+            "fused markov chain requires rank %32==0 and <= {} (got {r})",
+            candle_metal_kernels::MARKOV_TPG,
+        );
         // w2: q8_0 ggml blocks or a dense bf16 row matrix.
         let (w2_buf, w2_off, w2_q8, vd) = if let Some(q) = self.markov_w2.qtensor() {
-            if q.dtype() != GgmlDType::Q8_0 {
-                return Ok(None);
-            }
+            anyhow::ensure!(
+                q.dtype() == GgmlDType::Q8_0,
+                "fused markov chain supports q8_0 or dense bf16 markov_w2; got {:?} \
+                 (use --drafter-quantize q8-0 or run unquantized)",
+                q.dtype(),
+            );
             let QStorage::Metal(ms) = q.storage() else {
-                return Ok(None);
+                anyhow::bail!("markov_w2 qtensor is not Metal-resident");
             };
             (ms.buffer().clone(), 0usize, true, q.shape().dims()[0])
         } else if let Some(w) = self.markov_w2.dense_weight() {
-            if w.dtype() != DType::BF16 || w.dims().len() != 2 {
-                return Ok(None);
-            }
+            anyhow::ensure!(
+                w.dtype() == DType::BF16 && w.dims().len() == 2,
+                "dense markov_w2 must be BF16 [vd, rank]; got {:?} {:?}",
+                w.dtype(),
+                w.dims(),
+            );
             let (st, ly) = w.storage_and_layout();
             let Storage::Metal(ms) = &*st else {
-                return Ok(None);
+                anyhow::bail!("dense markov_w2 is not Metal-resident");
             };
             (
                 ms.buffer().clone(),
@@ -705,7 +779,7 @@ impl DsparkDrafter {
                 w.dims()[0],
             )
         } else {
-            return Ok(None);
+            anyhow::bail!("markov_w2 has neither a qtensor nor a dense weight");
         };
         anyhow::ensure!(
             base_logits.dims() == [1, gamma, vd],
@@ -715,12 +789,14 @@ impl DsparkDrafter {
         // Draft->global remap table when FR-Spec restricts the head.
         let (ids_buf, ids_off, remap) = match &self.draft_vocab_ids {
             Some(ids) => {
-                if ids.dtype() != DType::U32 {
-                    return Ok(None);
-                }
+                anyhow::ensure!(
+                    ids.dtype() == DType::U32,
+                    "draft_vocab_ids must be U32; got {:?}",
+                    ids.dtype(),
+                );
                 let (st, ly) = ids.storage_and_layout();
                 let Storage::Metal(ms) = &*st else {
-                    return Ok(None);
+                    anyhow::bail!("draft_vocab_ids is not Metal-resident");
                 };
                 (
                     Some(ms.buffer().clone()),
@@ -738,14 +814,14 @@ impl DsparkDrafter {
         let (base_buf, base_off) = {
             let (st, ly) = base_contig.storage_and_layout();
             let Storage::Metal(ms) = &*st else {
-                return Ok(None);
+                anyhow::bail!("base_logits is not Metal-resident");
             };
             (ms.buffer().clone(), ly.start_offset() * 2)
         };
         let (w1_buf, w1_off) = {
             let (st, ly) = self.markov_w1.storage_and_layout();
             let Storage::Metal(ms) = &*st else {
-                return Ok(None);
+                anyhow::bail!("markov_w1 is not Metal-resident");
             };
             (ms.buffer().clone(), ly.start_offset() * 2)
         };
@@ -834,7 +910,7 @@ impl DsparkDrafter {
                 D::Minus1,
             )?);
         }
-        Ok(Some(ProposalTensors {
+        Ok(ProposalTensors {
             token_tensors,
             alt_token_tensors: Vec::new(),
             features,
@@ -842,7 +918,7 @@ impl DsparkDrafter {
             corrected: Vec::new(),
             block_hidden: block_hidden.clone(),
             base_logits: base_contig,
-        }))
+        })
     }
 
     /// Device-side [confidences (main then alt) | token ids as f32] pack —
