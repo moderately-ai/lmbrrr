@@ -1,0 +1,13 @@
+---
+id: spec-loop-economics-recovery
+title: "Spec-loop economics recovery: make DSpark beat chain-greedy again under honest decode-only accounting"
+status: todo
+priority: p1
+dependencies: []
+related: []
+scopes: [runtime/candle, evals]
+shared_scopes: []
+paths: []
+tags: [campaign-1000, dspark]
+---
+WHY (from the 2026-07-13 M3 refit, receipts on eval-target-tier-hardware): under the fixed decode-only metric, DSpark loses to the async greedy chain on EVERY class on the M3 (best: math 156 vs 182 tok/s) — even though the drafter beats the spec loop's own greedy floor (+24% on math). Two taxes: (1) per-round host sync gives the spec loop a 6.35ms/token floor vs the chain's 5.5ms; (2) drafter propose costs 14.25ms on M3 (2.2 greedy steps; ~1.4 on M4).\n\nWORK ITEMS, dependency-ordered:\n1. SCHEDULER RATIONALITY AUDIT (correctness, first): under the truthful refit model the suite STILL drafted summarization at tau 1.12 and landed at 9.4ms/token — worse than its own greedy floor. Either the Appendix-A admission is mispricing (check: does the loop pass the refit model's draft_ms into the admission objective; does skip-hysteresis probe too often; is verify[w+1] indexed correctly) or copy-round costs are attributed wrong. Read src/spec/scheduler.rs + the dspark loop's admission call path IN FULL, then one instrumented summarization run (LMBRRR_LOOP_TIMING=1) and reconcile per-round walls vs the model's predictions row by row. A scheduler that declines to draft when losing should collapse weak classes to ~greedy-floor throughput (~157), not 107.\n2. ROUND-SYNC KILL: apply the shipped SharedEvent+shared-ring machinery to the spec loop's round boundary — the verify targets readback is a true data dependency (host schedules next round from acceptance), but the DRAIN portion (encode-ramp after the wait) and the proposal materialization are not; dspark-ondevice-chunk-assembly holds the device-side pieces (device_proposal, on-device chunk cat). Target: spec-loop greedy floor == chain floor.\n3. PROPOSE-COST CENSUS on M3: decompose the 14.25ms (drafter forwards? confidence head? host packing? dispatch overhead?) — LMBRRR_LOOP_TIMING gives synchronized draft/verify walls; the drafter is 2 layers, its GPU work should be ~1ms-class, so most of 14ms is host/loop tax with a specific address.\n4. M4 RE-ARBITRATION (parked until user reopens M4 runs): decode-only spec-vs-chain-greedy standings on the deploy machine.\nDONE-WHEN: scheduler provably rational under the refit model; spec >= chain-greedy on at least math/coding on the M3; standings table updated with honest per-class verdicts.

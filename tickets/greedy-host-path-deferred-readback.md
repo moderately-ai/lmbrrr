@@ -1,7 +1,7 @@
 ---
 id: greedy-host-path-deferred-readback
 title: "Greedy host path: deferred readback, READBACK_EVERY tuning, id ring buffer"
-status: todo
+status: closed
 priority: p1
 dependencies: []
 related: []
