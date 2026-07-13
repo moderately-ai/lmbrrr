@@ -488,11 +488,21 @@ impl Mlp {
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let gate_up = self.gate_up_proj.forward(xs)?;
-        let lhs = gate_up
-            .narrow(D::Minus1, 0, self.intermediate_size)?
-            .apply(&self.act)?;
-        let rhs = gate_up.narrow(D::Minus1, self.intermediate_size, self.intermediate_size)?;
-        self.down_proj.forward(&(lhs * rhs)?)
+        // Fused SwiGLU: silu(gate) * up in one dispatch over the packed
+        // [.., 2*inter] projection (collapses the silu unary + the gate*up
+        // bmul + their barrier). Only for Silu; other activations keep the
+        // explicit narrow/apply/mul path.
+        let gated = if matches!(self.act, Activation::Silu) {
+            candle_nn::ops::swiglu(&gate_up)?
+        } else {
+            let lhs = gate_up
+                .narrow(D::Minus1, 0, self.intermediate_size)?
+                .apply(&self.act)?;
+            let rhs =
+                gate_up.narrow(D::Minus1, self.intermediate_size, self.intermediate_size)?;
+            (lhs * rhs)?
+        };
+        self.down_proj.forward(&gated)
     }
 
     fn apply_quantized_text_artifact(
