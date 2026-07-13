@@ -1,7 +1,7 @@
 ---
 id: eval-apples-to-apples-qmv
 title: "EVAL: apples-to-apples 4-bit matvec — candle vs llama.cpp vs MLX, same machine/session/shapes"
-status: todo
+status: closed
 priority: p1
 dependencies: []
 related: []

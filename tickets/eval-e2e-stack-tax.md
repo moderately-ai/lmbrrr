@@ -1,7 +1,7 @@
 ---
 id: eval-e2e-stack-tax
 title: "EVAL: end-to-end stack tax — same-machine effective-bandwidth vs llama.cpp and MLX full decode"
-status: todo
+status: closed
 priority: p1
 dependencies: []
 related: []
