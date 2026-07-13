@@ -5,6 +5,7 @@
 
 pub(crate) mod diag;
 pub(crate) mod dspark;
+pub(crate) mod ppl;
 pub(crate) mod quant;
 pub(crate) mod run_bench;
 pub(crate) mod verify;

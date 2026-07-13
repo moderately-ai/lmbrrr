@@ -75,6 +75,39 @@ enum Command {
     TreeCheck(TreeCheckArgs),
     VisionCheck(VisionCheckArgs),
     FakequantExport(FakequantExportArgs),
+    Ppl(PplArgs),
+}
+
+/// Quality reference battery: corpus perplexity for the deployed
+/// configuration, plus mean/max per-position KL divergence and greedy top-1
+/// agreement against the dense BF16 reference arm. The standing quality gate
+/// for quantization policy changes. Peak transient memory scales with
+/// chunk-tokens x vocab in F32 per live tensor (~500 MB at 512).
+#[derive(Parser, Debug)]
+struct PplArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    /// Plain-text evaluation corpus, tokenized once and split into fixed
+    /// non-overlapping chunks (identical chunking on both arms).
+    #[arg(long)]
+    text_file: PathBuf,
+
+    /// Tokens per independent evaluation chunk; state is cleared between
+    /// chunks, so each is a fresh-context window.
+    #[arg(long, default_value_t = 512)]
+    chunk_tokens: usize,
+
+    /// Cap on evaluated chunks (whole corpus when unset).
+    #[arg(long)]
+    max_chunks: Option<usize>,
+
+    /// Deployed-arm perplexity only; skip the BF16 reference and KLD.
+    #[arg(long)]
+    no_reference: bool,
+
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 /// Deployment-config trace-generator prep: rewrite the HF checkpoint with
@@ -892,6 +925,7 @@ fn main() -> Result<()> {
         Command::TreeCheck(args) => commands::verify::tree_check(args),
         Command::VisionCheck(args) => commands::diag::vision_check(args),
         Command::FakequantExport(args) => commands::diag::fakequant_export(args),
+        Command::Ppl(args) => commands::ppl::ppl(args),
     }
 }
 
