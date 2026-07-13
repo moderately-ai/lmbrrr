@@ -320,6 +320,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     // logit, calibrated p, accepted). Round grouping preserves the prefix
     // structure the cumulative-survival calibration fits on.
     let mut confidence_records: Vec<Vec<(usize, f32, f32, bool)>> = Vec::new();
+    // Full gamma-length confidence vector + chosen width per DRAFTED round,
+    // in round order. confidence_records truncates at accepted+1 (the
+    // calibration population), so offline scheduling studies (e.g. the
+    // one-round-lag EV probe for on-device chunk assembly) need the raw
+    // vectors the scheduler actually saw.
+    let mut proposal_confidence_log: Vec<(Vec<f32>, usize)> = Vec::new();
     let mut proposed_width_histogram = vec![0usize; gamma + 1];
     let mut draft_seconds = 0.0f64;
     let mut verify_seconds = 0.0f64;
@@ -561,6 +567,9 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             // every reset buys >=skip_draft_after more probes.)
             if args.schedule && !skip_draft && width == 0 {
                 consecutive_zero_widths += 1;
+            }
+            if let Some(p) = &proposal {
+                proposal_confidence_log.push((p.confidence_logits.clone(), width));
             }
             proposed_width_histogram[width] += 1;
             let draft_tokens: &[u32] = proposal.as_ref().map_or(&[], |p| &p.tokens);
@@ -975,6 +984,11 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             .map(|round| round.iter()
                 .map(|(pos, logit, p, acc)| serde_json::json!([pos, logit, p, acc]))
                 .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        // Full per-drafted-round confidence vectors + chosen widths, in
+        // round order (offline scheduling studies; see the declaration).
+        "proposal_confidences": proposal_confidence_log.iter()
+            .map(|(logits, width)| serde_json::json!({"logits": logits, "width": width}))
             .collect::<Vec<_>>(),
         "prefill_seconds": prefill_seconds,
         "draft_seconds": draft_seconds,
