@@ -1,7 +1,7 @@
 ---
 id: metal-wave3-commit-pacing
 title: "Wave 3: command-buffer commit pacing (eager enqueue/flush vs the CPB cap)"
-status: todo
+status: done
 priority: p2
 dependencies: [metal-wave2-host-encode-rlist]
 related: []
