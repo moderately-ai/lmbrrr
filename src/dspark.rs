@@ -15,12 +15,15 @@ use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use candle::{DType, Device, IndexOp, Module, Tensor, D};
+use candle::op::BackpropOp;
+use candle::quantized::{GgmlDType, QStorage};
+use candle::{DType, Device, IndexOp, MetalStorage, Module, Storage, Tensor, D};
 use candle_nn::{Linear, VarBuilder};
 use serde::Deserialize;
 
 use crate::quantized_linear::MixedLinear;
 use crate::qwen35::TruncatableKvCache;
+
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct DsparkRopeParameters {
@@ -442,7 +445,28 @@ impl DsparkDrafter {
         anchor_pos: usize,
         gamma: usize,
         branch: bool,
+        force_ops: bool,
     ) -> Result<ProposalTensors> {
+        let backbone = self.propose_backbone(anchor_token, anchor_pos, gamma)?;
+        // Branch (tree) rounds and diagnostics consume the corrected step
+        // logits, which only the ops chain materializes; everything else
+        // takes the fused kernel when the device/dtype/w2 layout supports it.
+        if !branch && !force_ops {
+            if let Some(fused) = self.markov_chain_fused(anchor_token, gamma, &backbone)? {
+                return Ok(fused);
+            }
+        }
+        self.markov_chain_ops(anchor_token, gamma, branch, backbone)
+    }
+
+    /// Backbone forward + heads: (block_hidden [1, gamma, h], base_logits
+    /// [1, gamma, draft_vocab]).
+    fn propose_backbone(
+        &mut self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        gamma: usize,
+    ) -> Result<(Tensor, Tensor)> {
         let block = self.config.block_size;
         if gamma == 0 || gamma > block {
             anyhow::bail!("gamma {gamma} outside 1..={block}");
@@ -509,7 +533,20 @@ impl DsparkDrafter {
         // the vocab projection for the unused trailing block positions.
         let block_hidden = self.norm.forward(&hidden)?.narrow(1, 0, gamma)?;
         let base_logits = self.lm_head.forward(&block_hidden.contiguous()?)?;
+        Ok((block_hidden, base_logits))
+    }
 
+    /// Per-step tensor-ops chain: the only implementation that materializes
+    /// the corrected step logits (branch/tree and diagnostics consume them)
+    /// and the only one that runs off-Metal. The hot path uses the fused
+    /// kernel instead (markov_chain_fused).
+    fn markov_chain_ops(
+        &self,
+        anchor_token: u32,
+        gamma: usize,
+        branch: bool,
+        (block_hidden, base_logits): (Tensor, Tensor),
+    ) -> Result<ProposalTensors> {
         // Left-to-right greedy Markov sampling; corrected logits define p_d.
         // The token chain stays on device (argmax feeds the next index_select
         // directly) so the loop enqueues without host syncs; tokens and
@@ -596,6 +633,192 @@ impl DsparkDrafter {
         })
     }
 
+    /// Fused Metal chain: two dispatches per step (fork dspark.metal)
+    /// replacing the ~5-6 tiny serialized ops per step — 78us/step vs
+    /// ~1170us/step measured on the M3. Returns None when the device, dtype
+    /// or w2 layout is outside kernel support; the ops chain covers those.
+    fn markov_chain_fused(
+        &self,
+        anchor_token: u32,
+        gamma: usize,
+        (block_hidden, base_logits): &(Tensor, Tensor),
+    ) -> Result<Option<ProposalTensors>> {
+        let Device::Metal(metal_dev) = &self.device else {
+            return Ok(None);
+        };
+        let r = self.config.markov_rank;
+        if self.dtype != DType::BF16
+            || base_logits.dtype() != DType::BF16
+            || self.markov_w1.dtype() != DType::BF16
+            || r > candle_metal_kernels::MARKOV_TPG
+            || r % 32 != 0
+        {
+            return Ok(None);
+        }
+        // w2: q8_0 ggml blocks or a dense bf16 row matrix.
+        let (w2_buf, w2_off, w2_q8, vd) = if let Some(q) = self.markov_w2.qtensor() {
+            if q.dtype() != GgmlDType::Q8_0 {
+                return Ok(None);
+            }
+            let QStorage::Metal(ms) = q.storage() else {
+                return Ok(None);
+            };
+            (ms.buffer().clone(), 0usize, true, q.shape().dims()[0])
+        } else if let Some(w) = self.markov_w2.dense_weight() {
+            if w.dtype() != DType::BF16 || w.dims().len() != 2 {
+                return Ok(None);
+            }
+            let (st, ly) = w.storage_and_layout();
+            let Storage::Metal(ms) = &*st else {
+                return Ok(None);
+            };
+            (
+                ms.buffer().clone(),
+                ly.start_offset() * 2,
+                false,
+                w.dims()[0],
+            )
+        } else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            base_logits.dims() == [1, gamma, vd],
+            "markov base_logits {:?} does not match draft vocab {vd}",
+            base_logits.dims()
+        );
+        // Draft->global remap table when FR-Spec restricts the head.
+        let (ids_buf, ids_off, remap) = match &self.draft_vocab_ids {
+            Some(ids) => {
+                if ids.dtype() != DType::U32 {
+                    return Ok(None);
+                }
+                let (st, ly) = ids.storage_and_layout();
+                let Storage::Metal(ms) = &*st else {
+                    return Ok(None);
+                };
+                (
+                    Some(ms.buffer().clone()),
+                    ly.start_offset() * 4,
+                    true,
+                )
+            }
+            None => (None, 0usize, false),
+        };
+
+        let base_contig = base_logits.contiguous()?;
+        // Clone the Arc-backed buffer handles inside scopes so the storage
+        // read guards drop before dispatch (and before base_contig moves
+        // into the returned ProposalTensors).
+        let (base_buf, base_off) = {
+            let (st, ly) = base_contig.storage_and_layout();
+            let Storage::Metal(ms) = &*st else {
+                return Ok(None);
+            };
+            (ms.buffer().clone(), ly.start_offset() * 2)
+        };
+        let (w1_buf, w1_off) = {
+            let (st, ly) = self.markov_w1.storage_and_layout();
+            let Storage::Metal(ms) = &*st else {
+                return Ok(None);
+            };
+            (ms.buffer().clone(), ly.start_offset() * 2)
+        };
+
+        let mut chain_init = vec![0u32; gamma + 1];
+        chain_init[0] = anchor_token;
+        let chain = metal_dev
+            .new_buffer_builder()
+            .with_data(&chain_init)
+            .with_label("markov_chain")
+            .build()?;
+        let partials = metal_dev
+            .new_buffer_builder()
+            .with_size(candle_metal_kernels::MARKOV_NTG * 8)
+            .with_label("markov_partials")
+            .build()?;
+        let tokens_buf = metal_dev
+            .new_buffer_builder()
+            .with_size(gamma * 4)
+            .with_label("markov_tokens")
+            .build()?;
+        let prev_embs_buf = metal_dev
+            .new_buffer_builder()
+            .with_size(gamma * r * 2)
+            .with_label("markov_prev_embs")
+            .build()?;
+
+        {
+            let encoder = metal_dev.command_encoder()?;
+            candle_metal_kernels::call_markov_chain(
+                metal_dev.metal_device(),
+                &encoder,
+                metal_dev.kernels(),
+                candle_metal_kernels::MarkovChainArgs {
+                    gamma,
+                    draft_vocab: vd,
+                    rank: r,
+                    w2_q8,
+                    w1: (&w1_buf, w1_off),
+                    w2: (&w2_buf, w2_off),
+                    base: (&base_buf, base_off),
+                    chain: &chain,
+                    partials: &partials,
+                    ids: (
+                        ids_buf.as_ref().unwrap_or(&*tokens_buf),
+                        ids_off,
+                    ),
+                    remap,
+                    tokens: &tokens_buf,
+                    prev_embs: &prev_embs_buf,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("markov chain dispatch: {e}"))?;
+        }
+
+        let tokens_t = Tensor::from_storage(
+            Storage::Metal(MetalStorage::new(
+                tokens_buf,
+                metal_dev.clone(),
+                gamma,
+                DType::U32,
+            )),
+            (gamma,),
+            BackpropOp::none(),
+            false,
+        );
+        let prev_embs_t = Tensor::from_storage(
+            Storage::Metal(MetalStorage::new(
+                prev_embs_buf,
+                metal_dev.clone(),
+                gamma * r,
+                DType::BF16,
+            )),
+            (gamma, r),
+            BackpropOp::none(),
+            false,
+        );
+
+        let mut token_tensors = Vec::with_capacity(gamma);
+        let mut features = Vec::with_capacity(gamma);
+        for k in 0..gamma {
+            token_tensors.push(tokens_t.narrow(0, k, 1)?);
+            let h_k = block_hidden.i((0, k))?.unsqueeze(0)?;
+            features.push(Tensor::cat(
+                &[&h_k, &prev_embs_t.narrow(0, k, 1)?],
+                D::Minus1,
+            )?);
+        }
+        Ok(Some(ProposalTensors {
+            token_tensors,
+            alt_token_tensors: Vec::new(),
+            features,
+            alt_features: Vec::new(),
+            corrected: Vec::new(),
+            block_hidden: block_hidden.clone(),
+            base_logits: base_contig,
+        }))
+    }
+
     /// Device-side [confidences (main then alt) | token ids as f32] pack —
     /// the single buffer a proposal readback drains (u32 < 2^24 is exact in
     /// f32, so ids ride the confidence buffer).
@@ -627,7 +850,7 @@ impl DsparkDrafter {
         diagnostics: bool,
         branch: bool,
     ) -> Result<DraftProposal> {
-        let t = self.propose_tensors(anchor_token, anchor_pos, gamma, branch)?;
+        let t = self.propose_tensors(anchor_token, anchor_pos, gamma, branch, diagnostics)?;
         // Single host readback: confidences and token ids ride one buffer.
         let packed = self
             .pack_proposal(&t)?
@@ -670,7 +893,7 @@ impl DsparkDrafter {
         anchor_pos: usize,
         gamma: usize,
     ) -> Result<DeviceProposal> {
-        let t = self.propose_tensors(anchor_token, anchor_pos, gamma, false)?;
+        let t = self.propose_tensors(anchor_token, anchor_pos, gamma, false, false)?;
         let token_refs = t.token_tensors.iter().collect::<Vec<_>>();
         let tokens_dev = Tensor::cat(&token_refs, 0)?;
         let packed = self.pack_proposal(&t)?;

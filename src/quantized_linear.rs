@@ -53,6 +53,29 @@ impl MixedLinear {
         })
     }
 
+    /// The underlying quantized weight, when this linear wraps a QTensor —
+    /// fused kernels (the Metal Markov chain) read its ggml blocks directly.
+    pub fn qtensor(&self) -> Option<&QTensor> {
+        match self {
+            Self::QMatMul { matmul, .. } => match matmul.as_ref() {
+                QMatMul::QTensor(q) => Some(q),
+                _ => None,
+            },
+            Self::Dense(_) => None,
+        }
+    }
+
+    /// The dense weight tensor, when unquantized (or dequantized-at-load).
+    pub fn dense_weight(&self) -> Option<&Tensor> {
+        match self {
+            Self::Dense(linear) => Some(linear.weight()),
+            Self::QMatMul { matmul, .. } => match matmul.as_ref() {
+                QMatMul::Tensor(t) => Some(t),
+                _ => None,
+            },
+        }
+    }
+
     pub fn forward(&self, xs: &Tensor) -> candle::Result<Tensor> {
         match self {
             Self::Dense(linear) => linear.forward(xs),
