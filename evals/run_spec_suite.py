@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SUITE = ROOT / "evals/prompts/spec-suite.json"
 QUESTIONS = ROOT / "evals/prompts/spec_bench_question.jsonl"
 QMAN = "target/minicpm-v46-q4k-full-text/manifest.json"
-COST = "target/spec-round-cost-model-r4q4f.json"
+COST = "target/spec-round-cost-model-wave1.json"
 
 
 def load_questions():
