@@ -445,6 +445,10 @@ pub struct MiniCpmForConditionalGeneration {
     lm_head: crate::quantized_linear::MixedLinear,
     image_token_id: u32,
     device: Device,
+    // EXPERIMENT: when the target head is restricted to a token subset, the
+    // sliced head's argmax is an index into this table of global ids; None =
+    // full 248k head (argmax is already a global id). See restrict_lm_head_vocab.
+    head_vocab_ids: Option<Tensor>,
 }
 
 impl MiniCpmForConditionalGeneration {
@@ -464,6 +468,7 @@ impl MiniCpmForConditionalGeneration {
             lm_head: crate::quantized_linear::MixedLinear::dense(lm_head),
             image_token_id: cfg.image_token_id,
             device: vb.device().clone(),
+            head_vocab_ids: None,
         })
     }
 
@@ -490,6 +495,62 @@ impl MiniCpmForConditionalGeneration {
         let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
         self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q)?;
         Ok(())
+    }
+
+    /// EXPERIMENT (quality trade): restrict the target head to `ids` (global
+    /// token ids, most-frequent first with control tokens pinned). The head
+    /// weight is sliced to those rows and optionally quantized, so it reads
+    /// ~len(ids)/vocab of the bytes; the forward then emits logits over
+    /// len(ids) columns and argmax gives a sliced index, remapped back to a
+    /// global id by [`Self::remap_head_id`]. Out-of-set argmaxes become a
+    /// different in-set token — this changes committed outputs.
+    pub fn restrict_lm_head_vocab(
+        &mut self,
+        ids: &[u32],
+        ggml: Option<candle::quantized::GgmlDType>,
+    ) -> Result<()> {
+        let idx = Tensor::from_slice(ids, ids.len(), &self.device)?;
+        let weight = self.model.language_model.embeddings().clone();
+        let sliced = weight.index_select(&idx, 0)?.contiguous()?;
+        self.lm_head = match ggml {
+            Some(ggml) => {
+                let cpu_f32 = sliced.to_dtype(candle::DType::F32)?.to_device(&Device::Cpu)?;
+                let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
+                crate::quantized_linear::MixedLinear::from_qtensor(q)?
+            }
+            None => crate::quantized_linear::MixedLinear::dense(Linear::new(sliced, None)),
+        };
+        self.head_vocab_ids = Some(idx);
+        Ok(())
+    }
+
+    /// Map a restricted-head argmax (index into the vocab subset) back to a
+    /// global token id via a device-side gather. Identity (clone) when the
+    /// head is unrestricted. `sliced` and the result are rank-1 (the greedy
+    /// device chain's argmax shape).
+    pub fn remap_head_id(&self, sliced: &Tensor) -> Result<Tensor> {
+        match &self.head_vocab_ids {
+            Some(table) => Ok(table.index_select(sliced, 0)?),
+            None => Ok(sliced.clone()),
+        }
+    }
+
+    /// Host-side single-id remap for the non-device-chain sampling path.
+    pub fn remap_head_id_host(&self, sliced: u32) -> Result<u32> {
+        match &self.head_vocab_ids {
+            Some(table) => {
+                let g = table
+                    .to_dtype(DType::U32)?
+                    .to_device(&Device::Cpu)?
+                    .to_vec1::<u32>()?;
+                Ok(*g.get(sliced as usize).unwrap_or(&sliced))
+            }
+            None => Ok(sliced),
+        }
+    }
+
+    pub fn head_vocab_size(&self) -> Option<usize> {
+        self.head_vocab_ids.as_ref().map(|t| t.elem_count())
     }
 
     pub fn clear_cache(&mut self) {

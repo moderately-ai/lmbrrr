@@ -204,7 +204,10 @@ pub fn generate_tokens(
         'outer: loop {
             let sampling_start = Instant::now();
             // argmax over [1, vocab] keeps the id rank-1 (cat/reshape need it).
-            let next_id = logits.argmax(D::Minus1)?;
+            // remap_head_id is identity for the full head; for a restricted
+            // head it gathers the sliced argmax back to a global token id
+            // (so the embed gather + collected output stay in global space).
+            let next_id = model.remap_head_id(&logits.argmax(D::Minus1)?)?;
             pending.push(next_id.clone());
             sampling_elapsed += sampling_start.elapsed();
 
@@ -270,7 +273,8 @@ pub fn generate_tokens(
             let start_at = tokens.len().saturating_sub(generation.repeat_last_n);
             apply_repeat_penalty(&logits_1d, generation.repeat_penalty, &tokens[start_at..])?
         };
-        let next_token = sample_next_token(&mut logits_processor, generation, &logits_1d)?;
+        let next_token = model
+            .remap_head_id_host(sample_next_token(&mut logits_processor, generation, &logits_1d)?)?;
         sampling_elapsed += sampling_start.elapsed();
 
         if eos_ids.contains(&next_token) {

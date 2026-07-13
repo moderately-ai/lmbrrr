@@ -217,6 +217,20 @@ struct ModelArgs {
     /// q4k. Quality advisory per campaign policy.
     #[arg(long, value_enum)]
     quantize_lm_head: Option<DrafterQuantArg>,
+
+    /// EXPERIMENT (quality trade, changes outputs): restrict the TARGET
+    /// lm_head to the top-N frequency-ranked tokens (+ pinned control tokens
+    /// at the front of the ranking). The head reads ~N/248094 of the bytes;
+    /// any argmax outside the set becomes a different in-set token. Argmax is
+    /// remapped back to global ids. Composes with --quantize-lm-head (slice
+    /// then quantize). Ranking from --target-head-vocab-ranking.
+    #[arg(long)]
+    target_head_vocab_size: Option<usize>,
+
+    /// Frequency ranking artifact for --target-head-vocab-size (JSON with an
+    /// "ids" array, most-frequent first, control tokens pinned at the front).
+    #[arg(long, default_value = "target/frspec-assistant-ranked.json")]
+    target_head_vocab_ranking: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -901,6 +915,53 @@ fn load_model_with_optional_quantization(
             dense_equivalent_bytes,
         }),
     ))
+}
+
+/// The lm_head quant tier to pass to the loader: `None` when the target head
+/// is being restricted (the restriction slices THEN quantizes, so the loader
+/// must not pre-quantize the full head).
+fn head_loader_quant(m: &ModelArgs) -> Option<DrafterQuantArg> {
+    if m.target_head_vocab_size.is_some() {
+        None
+    } else {
+        m.quantize_lm_head
+    }
+}
+
+/// Post-load target-head restriction (EXPERIMENT): if `--target-head-vocab-size`
+/// is set, slice the head to the top-N ranked ids (control tokens pinned at
+/// the ranking front) and quantize at the `--quantize-lm-head` tier.
+fn maybe_restrict_head(model: &mut MiniCpmForConditionalGeneration, m: &ModelArgs) -> Result<()> {
+    let Some(n) = m.target_head_vocab_size else {
+        return Ok(());
+    };
+    #[derive(serde::Deserialize)]
+    struct Ranking {
+        ids: Vec<u32>,
+    }
+    let file = std::fs::File::open(&m.target_head_vocab_ranking).with_context(|| {
+        format!(
+            "open head vocab ranking {}",
+            m.target_head_vocab_ranking.display()
+        )
+    })?;
+    let ranking: Ranking = serde_json::from_reader(file)
+        .with_context(|| format!("parse {}", m.target_head_vocab_ranking.display()))?;
+    if n > ranking.ids.len() {
+        anyhow::bail!(
+            "target-head-vocab-size {n} exceeds ranking length {}",
+            ranking.ids.len()
+        );
+    }
+    let ids = &ranking.ids[..n];
+    model.restrict_lm_head_vocab(ids, m.quantize_lm_head.map(|t| t.ggml()))?;
+    eprintln!(
+        "target head restricted to {n} tokens ({:.1}% of {} vocab; ~{:.0} MB head at q4k)",
+        100.0 * n as f64 / 248094.0,
+        248094,
+        n as f64 * 1024.0 * 4.5 / 8.0 / 1e6
+    );
+    Ok(())
 }
 
 fn load_tokenizer(artifacts: &Artifacts) -> Result<Tokenizer> {

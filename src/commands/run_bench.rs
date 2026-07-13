@@ -83,7 +83,7 @@ pub(crate) fn multi_bench(args: MultiBenchArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
-        args.model.quantize_lm_head,
+        head_loader_quant(&args.model),
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let len = prompt_tokens.len();
@@ -224,8 +224,9 @@ pub(crate) fn bench(args: BenchArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
-        args.model.quantize_lm_head,
+        head_loader_quant(&args.model),
     )?;
+    maybe_restrict_head(&mut model, &args.model)?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let mut writer = benchmark_writer(args.output.as_ref(), args.append)?;
 
@@ -382,8 +383,9 @@ pub(crate) fn run(args: RunArgs) -> Result<()> {
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
-        args.model.quantize_lm_head,
+        head_loader_quant(&args.model),
     )?;
+    maybe_restrict_head(&mut model, &args.model)?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let mut stream = TokenOutputStream::new(tokenizer);
     let use_tui = !args.no_progress && std::io::stdout().is_terminal();
@@ -506,6 +508,8 @@ mod tests {
                 weights: Vec::new(),
                 quantized_manifest: None,
                 quantize_lm_head: None,
+                target_head_vocab_size: None,
+                target_head_vocab_ranking: std::path::PathBuf::new(),
             },
             generation: GenerationArgs {
                 max_new_tokens: 128,
