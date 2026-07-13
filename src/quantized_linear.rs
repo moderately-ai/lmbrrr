@@ -63,8 +63,10 @@ impl MixedLinear {
             } => {
                 if *force_f32_input && xs.dtype() != DType::F32 {
                     if *bf16_direct && xs.dtype() == DType::BF16 && xs.device().is_metal() {
-                        // Kernel accumulates and writes F32; only the output
-                        // hop back to BF16 remains.
+                        // mv/mc routes write BF16 directly (fork bf16-dst
+                        // kernels; bit-identical to F32 + cast), making the
+                        // to_dtype a no-op; the m>=8 tile-mm route still
+                        // returns F32 and pays the cast here.
                         matmul.forward(xs)?.to_dtype(xs.dtype())
                     } else {
                         matmul
