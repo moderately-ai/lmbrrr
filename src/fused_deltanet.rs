@@ -334,13 +334,17 @@ pub fn gated_delta_decode(
 }
 
 /// Runs the v2 fused path (unified decode/chunk, 1 <= l <= 12; three
-/// dispatches: prep, delta core, epilogue). The recurrent state is TRANSPOSED
-/// relative to v1: f32 (b, heads, dv, dk) — same shape at dk == dv == 128,
-/// different semantic layout; callers track which layout a tensor holds.
+/// dispatches: prep, delta core, epilogue). `proj` is the raw qkvz GEMV
+/// output [.., l, qkv | z] and `ba` the fused decay-gate GEMV output
+/// [.., l, b | a] — consumed directly, no host-side cat. The recurrent state
+/// is TRANSPOSED relative to v1: f32 (b, heads, dv, dk) — same shape at
+/// dk == dv == 128, different semantic layout; callers track which layout a
+/// tensor holds.
 /// Returns (out [b, l, value_dim], conv_out, state_out (transposed), capture).
 #[allow(clippy::too_many_arguments)]
 pub fn gated_delta_v2(
     proj: &Tensor,
+    ba: &Tensor,
     seq_len: usize,
     batch: usize,
     conv_state: &Tensor,
@@ -359,6 +363,7 @@ pub fn gated_delta_v2(
     };
     let sanitized = [
         offset0(proj)?,
+        offset0(ba)?,
         offset0(conv_state)?,
         offset0(recurrent_state_t)?,
         offset0(conv_weight)?,
@@ -367,6 +372,7 @@ pub fn gated_delta_v2(
         offset0(norm_weight_f32)?,
     ];
     let dtypes = [
+        DType::BF16,
         DType::BF16,
         DType::BF16,
         DType::F32,
@@ -438,6 +444,7 @@ pub fn gated_delta_v2(
         &bufs[4],
         &bufs[5],
         &bufs[6],
+        &bufs[7],
         &out_buf,
         &conv_out_buf,
         &state_out_buf,
@@ -495,6 +502,7 @@ pub fn gated_delta_v2(
 #[allow(clippy::too_many_arguments)]
 pub fn gated_delta_v2_decode(
     proj: &Tensor,
+    ba: &Tensor,
     batch: usize,
     conv_state: &Tensor,
     recurrent_state_t: &Tensor,
@@ -512,6 +520,7 @@ pub fn gated_delta_v2_decode(
     };
     let sanitized = [
         offset0(proj)?,
+        offset0(ba)?,
         offset0(conv_state)?,
         offset0(recurrent_state_t)?,
         offset0(conv_weight)?,
@@ -520,6 +529,7 @@ pub fn gated_delta_v2_decode(
         offset0(norm_weight_f32)?,
     ];
     let dtypes = [
+        DType::BF16,
         DType::BF16,
         DType::BF16,
         DType::F32,
@@ -582,6 +592,7 @@ pub fn gated_delta_v2_decode(
         &bufs[4],
         &bufs[5],
         &bufs[6],
+        &bufs[7],
         &out_buf,
         &conv_out_buf,
         &state_out_buf,
@@ -624,6 +635,7 @@ pub fn gated_delta_v2_decode(
 #[allow(clippy::too_many_arguments)]
 pub fn gated_delta_v2_tree(
     proj: &Tensor,
+    ba: &Tensor,
     seg1: usize,
     alt_len: usize,
     branch_after: usize,
@@ -643,6 +655,7 @@ pub fn gated_delta_v2_tree(
     };
     let sanitized = [
         offset0(proj)?,
+        offset0(ba)?,
         offset0(conv_state)?,
         offset0(recurrent_state_t)?,
         offset0(conv_weight)?,
@@ -651,6 +664,7 @@ pub fn gated_delta_v2_tree(
         offset0(norm_weight_f32)?,
     ];
     let dtypes = [
+        DType::BF16,
         DType::BF16,
         DType::BF16,
         DType::F32,
@@ -723,6 +737,7 @@ pub fn gated_delta_v2_tree(
         &bufs[4],
         &bufs[5],
         &bufs[6],
+        &bufs[7],
         &out_buf,
         &conv_out_buf,
         &state_out_buf,

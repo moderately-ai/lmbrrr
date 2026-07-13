@@ -806,11 +806,12 @@ struct DeltaVerifyCapture {
 #[derive(Clone, Debug)]
 struct GatedDeltaNet {
     // qkv (conv_dim rows) + z (value_dim rows) fused into one wide weight
-    // (K2 width fusion); b/a stay separate — tiny protected-dense decay
-    // gates. The fused output IS the kernel's [qkv | z] prefix layout.
+    // (K2 width fusion); b + a fused into one 2*heads-row projection whose
+    // output IS the v2 kernels' [b | a] ba-buffer layout. The decay gates
+    // stay dense-protected — never row-concat them into the QUANTIZED qkvz
+    // weight; fusing the two dense gates with each other is layout-only.
     in_proj_qkvz: MixedLinear,
-    in_proj_b: MixedLinear,
-    in_proj_a: MixedLinear,
+    in_proj_ba: MixedLinear,
     out_proj: MixedLinear,
     // Per-tap broadcast tensors (1, conv_dim, 1), precomputed at load: the
     // narrow+reshape of the raw (conv_dim, 1, ksz) weight is non-contiguous
@@ -873,18 +874,18 @@ impl GatedDeltaNet {
         let qkv_w = vb.get((conv_dim, cfg.hidden_size), "in_proj_qkv.weight")?;
         let z_w = vb.get((value_dim, cfg.hidden_size), "in_proj_z.weight")?;
         let qkvz_w = Tensor::cat(&[&qkv_w, &z_w], 0)?;
+        let b_w = vb.get(
+            (cfg.linear_num_value_heads, cfg.hidden_size),
+            "in_proj_b.weight",
+        )?;
+        let a_w = vb.get(
+            (cfg.linear_num_value_heads, cfg.hidden_size),
+            "in_proj_a.weight",
+        )?;
+        let ba_w = Tensor::cat(&[&b_w, &a_w], 0)?;
         Ok(Self {
             in_proj_qkvz: MixedLinear::dense(candle_nn::Linear::new(qkvz_w, None)),
-            in_proj_b: MixedLinear::dense(linear_no_bias(
-                cfg.hidden_size,
-                cfg.linear_num_value_heads,
-                vb.pp("in_proj_b"),
-            )?),
-            in_proj_a: MixedLinear::dense(linear_no_bias(
-                cfg.hidden_size,
-                cfg.linear_num_value_heads,
-                vb.pp("in_proj_a"),
-            )?),
+            in_proj_ba: MixedLinear::dense(candle_nn::Linear::new(ba_w, None)),
             out_proj: MixedLinear::dense(linear_no_bias(
                 value_dim,
                 cfg.hidden_size,
@@ -1031,16 +1032,35 @@ impl GatedDeltaNet {
             self.in_proj_qkvz = fused;
             replaced += 2;
         }
-        replaced += replace_quantized_linear(
-            &mut self.in_proj_b,
-            &format!("{prefix}.in_proj_b.weight"),
-            artifact,
-        )?;
-        replaced += replace_quantized_linear(
-            &mut self.in_proj_a,
-            &format!("{prefix}.in_proj_a.weight"),
-            artifact,
-        )?;
+        // Deployed quant policy dense-protects the decay gates, so this is
+        // normally a no-op; a manifest that does carry them must carry BOTH
+        // (the fused ba weight cannot be half-replaced).
+        match artifact
+            .load_linear_fused(&[
+                &format!("{prefix}.in_proj_b.weight"),
+                &format!("{prefix}.in_proj_a.weight"),
+            ])
+            .map_err(|err| candle::Error::Msg(format!("load fused deltanet ba {err}")))?
+        {
+            Some(fused) => {
+                self.in_proj_ba = fused;
+                replaced += 2;
+            }
+            None => {
+                for name in ["in_proj_b", "in_proj_a"] {
+                    if artifact
+                        .load_linear(&format!("{prefix}.{name}.weight"))
+                        .map_err(|err| candle::Error::Msg(format!("probe {name} {err}")))?
+                        .is_some()
+                    {
+                        candle::bail!(
+                            "quantized manifest carries {prefix}.{name}.weight without its \
+                             fused partner; the decay gates quantize together or not at all"
+                        );
+                    }
+                }
+            }
+        }
         replaced += replace_quantized_linear(
             &mut self.out_proj,
             &format!("{prefix}.out_proj.weight"),
@@ -1061,11 +1081,7 @@ impl GatedDeltaNet {
             self.ensure_v1_state_layout()?;
         }
         let qkvz = self.in_proj_qkvz.forward(xs)?;
-        let b_in = self.in_proj_b.forward(xs)?;
-        let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?
-            .flatten_all()?
-            .contiguous()?;
+        let ba = self.in_proj_ba.forward(xs)?;
         let conv_state = self
             .conv_state
             .as_ref()
@@ -1083,7 +1099,8 @@ impl GatedDeltaNet {
         if use_v2 {
             let state_t = self.take_state_for_v2(b_sz, xs.device())?;
             let (out, conv_new, state_new) = crate::fused_deltanet::gated_delta_v2_decode(
-                &proj,
+                &qkvz.flatten_all()?.contiguous()?,
+                &ba.flatten_all()?.contiguous()?,
                 b_sz,
                 &conv_state,
                 &state_t.contiguous()?,
@@ -1109,6 +1126,11 @@ impl GatedDeltaNet {
                 xs.device(),
             )?,
         };
+        // v1 kernel keeps the packed [qkv | z | b | a] layout; ba's row
+        // layout is exactly the packed tail, so a 2-tensor cat suffices.
+        let proj = Tensor::cat(&[&qkvz, &ba], D::Minus1)?
+            .flatten_all()?
+            .contiguous()?;
         let (out, conv_new, state_new) = crate::fused_deltanet::gated_delta_decode(
             &proj,
             b_sz,
@@ -1158,9 +1180,8 @@ impl GatedDeltaNet {
     fn forward_fused_chunk(&mut self, xs: &Tensor, l: usize) -> Result<Tensor> {
         self.ensure_v1_state_layout()?;
         let qkvz = self.in_proj_qkvz.forward(xs)?;
-        let b_in = self.in_proj_b.forward(xs)?;
-        let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
+        let ba = self.in_proj_ba.forward(xs)?;
+        let proj = Tensor::cat(&[&qkvz, &ba], D::Minus1)?; // [1, l, 8224] packed for v1
         let conv_state = self
             .conv_state
             .as_ref()
@@ -1283,9 +1304,7 @@ impl GatedDeltaNet {
     /// (l >= 2: capture assembly) semantics.
     fn forward_fused_v2(&mut self, xs: &Tensor, b: usize, l: usize) -> Result<Tensor> {
         let qkvz = self.in_proj_qkvz.forward(xs)?;
-        let b_in = self.in_proj_b.forward(xs)?;
-        let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?;
+        let ba = self.in_proj_ba.forward(xs)?;
         let conv_state = self
             .conv_state
             .as_ref()
@@ -1302,7 +1321,8 @@ impl GatedDeltaNet {
             ksz: self.conv_kernel_size,
         };
         let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_v2(
-            &proj.flatten_all()?.contiguous()?,
+            &qkvz.flatten_all()?.contiguous()?,
+            &ba.flatten_all()?.contiguous()?,
             l,
             b,
             &conv_state,
@@ -1319,7 +1339,7 @@ impl GatedDeltaNet {
 
         if l >= 2 {
             if self.verify_capture {
-                let mixed_t = proj
+                let mixed_t = qkvz
                     .narrow(D::Minus1, 0, self.conv_dim)?
                     .transpose(1, 2)?
                     .contiguous()?;
@@ -1367,9 +1387,7 @@ impl GatedDeltaNet {
         // kernels (transposed state) when active, else v1.
         let use_v2 = deltanet_v2();
         let qkvz = self.in_proj_qkvz.forward(xs)?;
-        let b_in = self.in_proj_b.forward(xs)?;
-        let a_in = self.in_proj_a.forward(xs)?;
-        let proj = Tensor::cat(&[&qkvz, &b_in, &a_in], D::Minus1)?; // [1, l, 8224]
+        let ba = self.in_proj_ba.forward(xs)?;
         let conv_state = self
             .conv_state
             .as_ref()
@@ -1403,10 +1421,10 @@ impl GatedDeltaNet {
             // the core kernel from the post-anchor state, which comes back
             // as state_mid — the alternate capture's S0. No host-composed
             // branch seed, no second per-layer kernel call.
-            let flat = proj.flatten_all()?.contiguous()?;
             let (out, conv_main, state_main, state_mid, cap) =
                 crate::fused_deltanet::gated_delta_v2_tree(
-                    &flat,
+                    &qkvz.flatten_all()?.contiguous()?,
+                    &ba.flatten_all()?.contiguous()?,
                     seg1,
                     w,
                     1,
@@ -1421,7 +1439,7 @@ impl GatedDeltaNet {
                     self.norm.eps as f32,
                 )
                 .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
-            let mixed_t = proj
+            let mixed_t = qkvz
                 .narrow(D::Minus1, 0, self.conv_dim)?
                 .transpose(1, 2)?
                 .contiguous()?; // [1, conv_dim, l]
@@ -1461,7 +1479,9 @@ impl GatedDeltaNet {
             self.recurrent_state = Some(state_main);
             return self.out_proj.forward(&out);
         }
-        // v1 fallback: two dispatches with the host-composed branch seed.
+        // v1 fallback: two dispatches with the host-composed branch seed on
+        // the packed [qkv | z | b | a] layout.
+        let proj = Tensor::cat(&[&qkvz, &ba], D::Minus1)?; // [1, l, 8224]
         let run_segment = |proj_seg: &Tensor,
                            seg_len: usize,
                            conv: &Tensor,
@@ -1617,8 +1637,14 @@ impl GatedDeltaNet {
             l,
             offset,
             || {
-                let beta = candle_nn::ops::sigmoid(&self.in_proj_b.forward(xs)?)?;
-                let a = self.in_proj_a.forward(xs)?.to_dtype(DType::F32)?;
+                let ba = self.in_proj_ba.forward(xs)?;
+                let beta = candle_nn::ops::sigmoid(
+                    &ba.narrow(D::Minus1, 0, self.num_v_heads)?.contiguous()?,
+                )?;
+                let a = ba
+                    .narrow(D::Minus1, self.num_v_heads, self.num_v_heads)?
+                    .contiguous()?
+                    .to_dtype(DType::F32)?;
                 let g = (a.broadcast_add(&self.dt_bias_f32)?.exp()? + 1.0)?
                     .log()?
                     .broadcast_mul(&self.a_log_exp_f32)?
