@@ -1,7 +1,7 @@
 ---
 id: eval-gate-battery-script
 title: "EVAL INFRA: one-command gate battery (evals/run_gate_battery.sh) + blessed golden texts"
-status: todo
+status: closed
 priority: p1
 dependencies: []
 related: []
