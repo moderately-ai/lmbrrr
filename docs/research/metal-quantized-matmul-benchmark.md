@@ -13,7 +13,7 @@ cargo run --release --features metal -- quant-matmul-bench \
   --chunk-tokens 128 \
   --warmup 2 \
   --iterations 5 \
-  --output target/minicpm-v46-metal-quant-matmul-bench-chunk128.json
+  --output artifacts/minicpm-v46-metal-quant-matmul-bench-chunk128.json
 ```
 
 The command generates deterministic MiniCPM/Qwen3.5-shaped weights and

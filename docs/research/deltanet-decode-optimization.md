@@ -40,7 +40,7 @@ Strict text-logit parity still passes against the Transformers oracle:
 Command:
 
 ```sh
-cargo run --features metal -- logits --top-k 10 --fail-on-mismatch --output target/minicpm-v46-candle-logits-parity-after-deltanet-no-conv-shortcut.json
+cargo run --features metal -- logits --top-k 10 --fail-on-mismatch --output artifacts/minicpm-v46-candle-logits-parity-after-deltanet-no-conv-shortcut.json
 ```
 
 Result:
@@ -56,16 +56,16 @@ The retained variant also preserves the benchmark sample answer prefix from the 
 
 Baseline artifact:
 
-- `target/minicpm-v46-metal-long-bench.jsonl`
+- `artifacts/minicpm-v46-metal-long-bench.jsonl`
 
 Final artifact:
 
-- `target/minicpm-v46-metal-long-bench-after-deltanet-no-conv-shortcut-64x5.jsonl`
+- `artifacts/minicpm-v46-metal-long-bench-after-deltanet-no-conv-shortcut-64x5.jsonl`
 
 Command:
 
 ```sh
-cargo run --release --features metal -- bench --profile long --max-new-tokens 64 --warmup 2 --iterations 5 --output target/minicpm-v46-metal-long-bench-after-deltanet-no-conv-shortcut-64x5.jsonl
+cargo run --release --features metal -- bench --profile long --max-new-tokens 64 --warmup 2 --iterations 5 --output artifacts/minicpm-v46-metal-long-bench-after-deltanet-no-conv-shortcut-64x5.jsonl
 ```
 
 Median benchmark comparison:
@@ -83,16 +83,16 @@ Synchronized profile comparison:
 
 Baseline artifact:
 
-- `target/minicpm-v46-metal-decode-profile-32.json`
+- `artifacts/minicpm-v46-metal-decode-profile-32.json`
 
 Final artifact:
 
-- `target/minicpm-v46-metal-decode-profile-after-deltanet-no-conv-shortcut.json`
+- `artifacts/minicpm-v46-metal-decode-profile-after-deltanet-no-conv-shortcut.json`
 
 Command:
 
 ```sh
-cargo run --release --features metal -- profile --profile long --max-new-tokens 32 --output target/minicpm-v46-metal-decode-profile-after-deltanet-no-conv-shortcut.json
+cargo run --release --features metal -- profile --profile long --max-new-tokens 32 --output artifacts/minicpm-v46-metal-decode-profile-after-deltanet-no-conv-shortcut.json
 ```
 
 Profile deltas:

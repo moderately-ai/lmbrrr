@@ -19,7 +19,7 @@ cargo run --release --features metal -- spec-verify \
   --baseline-draft-tokens 8 \
   --draft-confidence 0.98,0.96,0.93,0.88,0.72,0.65,0.60,0.55 \
   --schedule-confidence-threshold 0.70 \
-  --output target/dspark-confidence-scheduler-smoke.json
+  --output artifacts/dspark-confidence-scheduler-smoke.json
 ```
 
 The scheduler multiplies confidences left to right and keeps the longest prefix

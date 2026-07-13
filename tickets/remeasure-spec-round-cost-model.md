@@ -12,7 +12,7 @@ tags: [speculative, measurement, campaign-1000]
 ---
 ## Outcome (2026-07-11, closing)
 
-Artifact shipped: target/spec-round-cost-model.json (verify_ms by chunk length from vt-gdc2 short+medium averages, draft costs per config); dspark-run --cost-model loads it (built-in measured defaults otherwise) and reproduces the operating point (115.6 tok/s, 0.79x). Old table doc marked SUPERSEDED. The propose breakdown and the l=1->2 attribution (chunk-kernel phases + m=2 gemm) are recorded in the sections below; the m=2 gemm remains the open ~4ms and lives on the bf16-activation ticket as the weight-shared small-m quantized/dense matmul package.
+Artifact shipped: artifacts/spec-round-cost-model.json (verify_ms by chunk length from vt-gdc2 short+medium averages, draft costs per config); dspark-run --cost-model loads it (built-in measured defaults otherwise) and reproduces the operating point (115.6 tok/s, 0.79x). Old table doc marked SUPERSEDED. The propose breakdown and the l=1->2 attribution (chunk-kernel phases + m=2 gemm) are recorded in the sections below; the m=2 gemm remains the open ~4ms and lives on the bf16-activation ticket as the weight-shared small-m quantized/dense matmul package.
 
 ## RESOLVED: l=1 -> l=2 doubling fully attributed (610a46e)
 

@@ -11,7 +11,7 @@ Run the first MiniCPM-V-4.6 quantization sensitivity pass with:
 ```sh
 cargo run --release --features metal -- quant-sensitivity \
   --calibration evals/calibration/minicpm_v46_quant_calibration.jsonl \
-  --output target/minicpm-v46-quant-sensitivity.json
+  --output artifacts/minicpm-v46-quant-sensitivity.json
 ```
 
 For fast smoke checks:
@@ -20,7 +20,7 @@ For fast smoke checks:
 cargo run --release --features metal -- quant-sensitivity \
   --max-cases 1 \
   --max-modules 4 \
-  --output target/minicpm-v46-quant-sensitivity-smoke.json
+  --output artifacts/minicpm-v46-quant-sensitivity-smoke.json
 ```
 
 By default the command scores `q4_symmetric`, `q5_symmetric`, and

@@ -1,4 +1,4 @@
-> **SUPERSEDED (2026-07-10):** pre-fusion measurements, ~5x off current kernels. The live artifact is `target/spec-round-cost-model.json` (see ticket remeasure-spec-round-cost-model).
+> **SUPERSEDED (2026-07-10):** pre-fusion measurements, ~5x off current kernels. The live artifact is `artifacts/spec-round-cost-model.json` (see ticket remeasure-spec-round-cost-model).
 
 # DSpark Verification Throughput Table
 

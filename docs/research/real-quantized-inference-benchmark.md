@@ -19,26 +19,26 @@ cargo run --release --features metal -- bench \
   --max-new-tokens 32 \
   --warmup 1 \
   --iterations 2 \
-  --output target/minicpm-v46-real-quant-<policy>-bench.jsonl
+  --output artifacts/minicpm-v46-real-quant-<policy>-bench.jsonl
 ```
 
 Artifacts:
 
 ```sh
 cargo run --release --features metal -- quant-convert \
-  --sensitivity target/minicpm-v46-quant-sensitivity.json \
+  --sensitivity artifacts/minicpm-v46-quant-sensitivity.json \
   --policy q8-text-linears \
-  --output-dir target/minicpm-v46-q8-full
+  --output-dir artifacts/minicpm-v46-q8-full
 
 cargo run --release --features metal -- quant-convert \
-  --sensitivity target/minicpm-v46-quant-sensitivity.json \
+  --sensitivity artifacts/minicpm-v46-quant-sensitivity.json \
   --policy q4k-mlp-only \
-  --output-dir target/minicpm-v46-q4k-mlp-full
+  --output-dir artifacts/minicpm-v46-q4k-mlp-full
 
 cargo run --release --features metal -- quant-convert \
-  --sensitivity target/minicpm-v46-quant-sensitivity.json \
+  --sensitivity artifacts/minicpm-v46-quant-sensitivity.json \
   --policy q4k-text-safe \
-  --output-dir target/minicpm-v46-q4k-text-safe-full
+  --output-dir artifacts/minicpm-v46-q4k-text-safe-full
 ```
 
 ## Decode Rates

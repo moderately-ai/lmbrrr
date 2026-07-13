@@ -49,7 +49,7 @@ A drafter deploys as one directory: `model.safetensors + config.json + sts.json 
 
 ## Open levers, quantified (updated 2026-07-12 evening — post K3/K6 falsifications)
 
-1. ~~Round-4 drafter~~ SHIPPED (tau 4.41 gsm8k final; `target/dspark-drafter-round4/` is the default bundle).
+1. ~~Round-4 drafter~~ SHIPPED (tau 4.41 gsm8k final; `artifacts/dspark-drafter-round4/` is the default bundle).
 2. ~~q4_K SoA repack~~ FALSIFIED (+3.7% vs the ≥1.5-2× gate; issue-rate-bound). GEMV-speed work on 4-bit formats is closed.
 3. ~~Certified sub-vocab target head~~ **FALSIFIED — both bound families** (offline sim on 844 real decode hiddens, harness validated at 0.96 argmax agreement vs the production trace): cluster Cauchy-Schwarz f=0.996 scored; SVD-W128 + per-row tail norms f=0.994. Structural: decode queries sit 91% outside the table's top-128 subspace, the 248k tied table's spectrum is nearly flat (row tail-norm 0.77), the head runs at cosine ~1e-3 — every norm-product bound is 50-100× the logit gaps. Bit-exact head reduction on this model is dead, not tuning-limited.
 4. ~~Eager skip-hysteresis~~ FALSIFIED (A/B wash; the drafted-vs-parked pace gap was selection bias — the scheduler's economics were already right). Constants now CLI-ablatable.

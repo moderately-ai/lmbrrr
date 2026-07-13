@@ -2,7 +2,7 @@
 """Fit per-position Platt STS calibration from suite confidence records.
 
 Usage:
-  python3 evals/fit_sts.py --records 'target/suite-<tag>-<arm>-*.json' \
+  python3 evals/fit_sts.py --records 'artifacts/suite-<tag>-<arm>-*.json' \
       --out <drafter-dir>/sts.json
 
 Records come from fixed-gamma (unscheduled) dspark-run reports on the

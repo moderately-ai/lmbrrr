@@ -7,9 +7,9 @@ Usage:
       [--classes math_reasoning,summarization,...] [--per-class 1] [--tag out-tag]
 
 Arms run interleaved per rep (measurement protocol: rotate arms). Reports
-land in target/suite-<tag>-<arm>-<qid>-<rep>.json and a summary table prints
+land in artifacts/suite-<tag>-<arm>-<qid>-<rep>.json and a summary table prints
 at the end. Extra per-arm flags (after ':') are split on whitespace, e.g.
-  --arm b=target/dspark-drafter-round2-fresh:--schedule
+  --arm b=artifacts/dspark-drafter-round2-fresh:--schedule
 """
 import argparse
 import json
@@ -21,8 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SUITE = ROOT / "evals/prompts/spec-suite.json"
 QUESTIONS = ROOT / "evals/prompts/spec_bench_question.jsonl"
-QMAN = "target/minicpm-v46-q4k-full-text/manifest.json"
-COST = "target/spec-round-cost-model-fusion.json"
+QMAN = "artifacts/minicpm-v46-q4k-full-text/manifest.json"
+COST = "artifacts/spec-round-cost-model-fusion.json"
 
 
 def load_questions():
@@ -66,7 +66,7 @@ def main() -> int:
             # systematic thermal/ramp advantage across every (rep, question).
             offset = (rep - 1) % len(arms)
             for name, drafter, extra in arms[offset:] + arms[:offset]:
-                out = ROOT / f"target/suite-{args.tag}-{name}-{qid}-{rep}.json"
+                out = ROOT / f"artifacts/suite-{args.tag}-{name}-{qid}-{rep}.json"
                 cmd = [str(ROOT / "target/release/lmbrrr"), "dspark-run",
                        "--drafter", drafter, "--prompt", prompt,
                        "--max-new-tokens", str(args.max_new_tokens)]
@@ -95,7 +95,7 @@ def main() -> int:
         for name, _, _ in arms:
             reports = []
             for rep in range(1, args.reps + 1):
-                p = ROOT / f"target/suite-{args.tag}-{name}-{qid}-{rep}.json"
+                p = ROOT / f"artifacts/suite-{args.tag}-{name}-{qid}-{rep}.json"
                 if p.exists():
                     reports.append(json.loads(p.read_text()))
             if not reports:

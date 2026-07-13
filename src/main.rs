@@ -88,7 +88,7 @@ struct FakequantExportArgs {
     #[command(flatten)]
     model: ModelArgs,
 
-    #[arg(long, default_value = "target/minicpm-v46-fakequant-q4kft")]
+    #[arg(long, default_value = "artifacts/minicpm-v46-fakequant-q4kft")]
     output_dir: PathBuf,
 }
 
@@ -164,10 +164,10 @@ struct MultiBenchArgs {
 
 #[derive(Parser, Debug)]
 struct DsparkDrafterParityArgs {
-    #[arg(long, default_value = "target/dspark-drafter-smoke/step_24")]
+    #[arg(long, default_value = "artifacts/dspark-drafter-smoke/step_24")]
     checkpoint: PathBuf,
 
-    #[arg(long, default_value = "target/dspark-fixtures/drafter-parity.safetensors")]
+    #[arg(long, default_value = "artifacts/dspark-fixtures/drafter-parity.safetensors")]
     fixture: PathBuf,
 
     #[arg(long)]
@@ -229,7 +229,7 @@ struct ModelArgs {
 
     /// Frequency ranking artifact for --target-head-vocab-size (JSON with an
     /// "ids" array, most-frequent first, control tokens pinned at the front).
-    #[arg(long, default_value = "target/frspec-assistant-ranked.json")]
+    #[arg(long, default_value = "artifacts/frspec-assistant-ranked.json")]
     target_head_vocab_ranking: PathBuf,
 }
 
@@ -419,13 +419,13 @@ struct QuantConvertArgs {
     #[command(flatten)]
     model: ModelArgs,
 
-    #[arg(long, default_value = "target/minicpm-v46-quant-sensitivity.json")]
+    #[arg(long, default_value = "artifacts/minicpm-v46-quant-sensitivity.json")]
     sensitivity: PathBuf,
 
     #[arg(long, value_enum, default_value_t = MixedPrecisionPolicyArg::Q8TextLinears)]
     policy: MixedPrecisionPolicyArg,
 
-    #[arg(long, default_value = "target/minicpm-v46-mixed-precision")]
+    #[arg(long, default_value = "artifacts/minicpm-v46-mixed-precision")]
     output_dir: PathBuf,
 
     #[arg(long)]
@@ -482,21 +482,21 @@ struct QuantQualityArgs {
     #[arg(long)]
     max_cases: Option<usize>,
 
-    #[arg(long, default_value = "target/minicpm-v46-q8-full/manifest.json")]
+    #[arg(long, default_value = "artifacts/minicpm-v46-q8-full/manifest.json")]
     q8_manifest: PathBuf,
 
-    #[arg(long, default_value = "target/minicpm-v46-q4k-mlp-full/manifest.json")]
+    #[arg(long, default_value = "artifacts/minicpm-v46-q4k-mlp-full/manifest.json")]
     q4_mlp_manifest: PathBuf,
 
     #[arg(
         long,
-        default_value = "target/minicpm-v46-q4k-text-safe-full/manifest.json"
+        default_value = "artifacts/minicpm-v46-q4k-text-safe-full/manifest.json"
     )]
     q4_text_safe_manifest: PathBuf,
 
     #[arg(
         long,
-        default_value = "target/minicpm-v46-q4k-mlp-q8-text-full/manifest.json"
+        default_value = "artifacts/minicpm-v46-q4k-mlp-q8-text-full/manifest.json"
     )]
     mixed_manifest: PathBuf,
 
@@ -504,7 +504,7 @@ struct QuantQualityArgs {
     /// ladder when the file exists.
     #[arg(
         long,
-        default_value = "target/minicpm-v46-q4k-full-text/manifest.json"
+        default_value = "artifacts/minicpm-v46-q4k-full-text/manifest.json"
     )]
     full_text_manifest: PathBuf,
 
@@ -639,7 +639,7 @@ struct DsparkRunArgs {
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     schedule: bool,
 
-    /// Round-cost artifact for the scheduler (target/spec-round-cost-model
+    /// Round-cost artifact for the scheduler (artifacts/spec-round-cost-model
     /// .json shape). Falls back to the built-in measured defaults.
     #[arg(long)]
     cost_model: Option<PathBuf>,

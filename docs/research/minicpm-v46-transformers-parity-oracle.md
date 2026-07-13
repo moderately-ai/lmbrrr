@@ -103,7 +103,7 @@ is now implemented by `lmbrrr logits`:
 cargo run --features metal -- logits \
   --top-k 10 \
   --fail-on-mismatch \
-  --output target/minicpm-v46-candle-logits-parity-strict.json
+  --output artifacts/minicpm-v46-candle-logits-parity-strict.json
 ```
 
 On July 7, 2026 this passed on Metal with top-1 agreement for all three

@@ -10,19 +10,19 @@ The first converter writes a custom lmbrrr artifact:
 
 ```sh
 cargo run --release --features metal -- quant-convert \
-  --sensitivity target/minicpm-v46-quant-sensitivity.json \
+  --sensitivity artifacts/minicpm-v46-quant-sensitivity.json \
   --policy q8-text-linears \
-  --output-dir target/minicpm-v46-q8-text-linears
+  --output-dir artifacts/minicpm-v46-q8-text-linears
 ```
 
 Fast smoke conversion:
 
 ```sh
 cargo run --release --features metal -- quant-convert \
-  --sensitivity target/minicpm-v46-quant-sensitivity.json \
+  --sensitivity artifacts/minicpm-v46-quant-sensitivity.json \
   --policy q8-text-linears \
   --max-tensors 2 \
-  --output-dir target/minicpm-v46-q8-smoke
+  --output-dir artifacts/minicpm-v46-q8-smoke
 ```
 
 The converter currently supports:

@@ -23,21 +23,21 @@ Generate the artifact:
 ```sh
 cargo run --release --features metal -- quant-convert \
   --policy q4k-mlp-q8-text \
-  --output-dir target/minicpm-v46-q4k-mlp-q8-text-full
+  --output-dir artifacts/minicpm-v46-q4k-mlp-q8-text-full
 ```
 
 Benchmark with the same shape as the prior dense/q8/q4 runs:
 
 ```sh
 cargo run --release --features metal -- bench \
-  --quantized-manifest target/minicpm-v46-q4k-mlp-q8-text-full/manifest.json \
+  --quantized-manifest artifacts/minicpm-v46-q4k-mlp-q8-text-full/manifest.json \
   --profile short \
   --profile medium \
   --profile long \
   --max-new-tokens 32 \
   --warmup 1 \
   --iterations 2 \
-  --output target/minicpm-v46-real-quant-q4k-mlp-q8-text-bench.jsonl
+  --output artifacts/minicpm-v46-real-quant-q4k-mlp-q8-text-bench.jsonl
 ```
 
 Run generation quality gates with the mixed policy included:
@@ -45,7 +45,7 @@ Run generation quality gates with the mixed policy included:
 ```sh
 cargo run --release --features metal -- quant-quality \
   --max-new-tokens 64 \
-  --output target/minicpm-v46-q4-quality-with-mixed.json
+  --output artifacts/minicpm-v46-q4-quality-with-mixed.json
 ```
 
 ## Artifact

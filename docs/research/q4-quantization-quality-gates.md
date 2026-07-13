@@ -50,7 +50,7 @@ One-case smoke:
 cargo run --release --features metal -- quant-quality \
   --max-cases 1 \
   --max-new-tokens 32 \
-  --output target/minicpm-v46-q4-quality-smoke.json
+  --output artifacts/minicpm-v46-q4-quality-smoke.json
 ```
 
 Full text calibration matrix with a 64-token cap:
@@ -58,15 +58,15 @@ Full text calibration matrix with a 64-token cap:
 ```sh
 cargo run --release --features metal -- quant-quality \
   --max-new-tokens 64 \
-  --output target/minicpm-v46-q4-quality-full.json
+  --output artifacts/minicpm-v46-q4-quality-full.json
 ```
 
 The default manifest paths are:
 
-- `target/minicpm-v46-q8-full/manifest.json`
-- `target/minicpm-v46-q4k-mlp-full/manifest.json`
-- `target/minicpm-v46-q4k-text-safe-full/manifest.json`
-- `target/minicpm-v46-q4k-mlp-q8-text-full/manifest.json`
+- `artifacts/minicpm-v46-q8-full/manifest.json`
+- `artifacts/minicpm-v46-q4k-mlp-full/manifest.json`
+- `artifacts/minicpm-v46-q4k-text-safe-full/manifest.json`
+- `artifacts/minicpm-v46-q4k-mlp-q8-text-full/manifest.json`
 
 ## Local Result
 

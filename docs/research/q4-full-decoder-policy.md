@@ -31,7 +31,7 @@ No collapse (empty/looping output) on any case or class; spot checks on math/exp
 ## Reproduce
 
 ```
-lmbrrr quant-convert --policy q4k-full-text --output-dir target/minicpm-v46-q4k-full-text
-lmbrrr run --quantized-manifest target/minicpm-v46-q4k-full-text/manifest.json --quantize-lm-head q4k ...
+lmbrrr quant-convert --policy q4k-full-text --output-dir artifacts/minicpm-v46-q4k-full-text
+lmbrrr run --quantized-manifest artifacts/minicpm-v46-q4k-full-text/manifest.json --quantize-lm-head q4k ...
 lmbrrr quant-quality --quantize-lm-head q4k   # ladder picks up the manifest automatically
 ```

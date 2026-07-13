@@ -11,7 +11,7 @@ the text-only MiniCPM-V-4.6 path.
 cargo run --features metal -- logits \
   --top-k 10 \
   --fail-on-mismatch \
-  --output target/minicpm-v46-candle-logits-parity-strict.json
+  --output artifacts/minicpm-v46-candle-logits-parity-strict.json
 ```
 
 The command compares Candle output against

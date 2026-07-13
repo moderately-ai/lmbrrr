@@ -33,7 +33,7 @@ markov_w1 stays BF16 (index_select gather, 512 B/row — same rule as the target
 - Batch the per-step Markov lm_head applications where the chain allows.
 - Remaining draft-side dispatch cleanup after the KV-cache/SDPA/packed-readback pass (commit 5218684).
 
-## L1 specifics (spec-loop analysis, measured round math from target/dspark-dopt-math.json)
+## L1 specifics (spec-loop analysis, measured round math from artifacts/dspark-dopt-math.json)
 
 markov_w2 dominates: 127 MB PER Markov step = ~1.02 GB/round at gamma=8 (~3.4-4.4 ms) — bigger than the 508 MB lm_head gemm. q8_0 tier recommended (quant bench: Q8_0 decode-MV 1.78x; near-lossless for an additive low-rank bias and an argmax-only head). Combine with gamma default 4 in the runner (backbone still runs the full block of 8 — training distribution — but Markov/argmax/confidence run per-gamma; accepted>=4 in only 5/77 rounds, tau cost ~0.04): draft 8.75 -> ~4.3-4.7 ms. Stretch: exact Markov pruning via |bias_i| <= ||w2_i||*||w1[prev]|| row-norm bound -> gathered gemv over a provably-safe candidate set (~3.5 ms draft). Also take the L3 policy knobs here (one-liners, measured together): --confidence-threshold 0.3 (EV positive down to p~0.12 with rollback this cheap) and width = max(1, ...) (22/77 rounds pay full draft for 1 token at width 0).
 

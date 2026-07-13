@@ -32,7 +32,7 @@ cargo run --release --features metal -- eagle-live-probe \
   --prompt "Answer in one sentence: what is 17 * 23?" \
   --max-new-tokens 8 \
   --draft-width 4 \
-  --output target/dspark-live-fixed-width.json
+  --output artifacts/dspark-live-fixed-width.json
 ```
 
 Adaptive schedule:
@@ -44,7 +44,7 @@ cargo run --release --features metal -- eagle-live-probe \
   --max-new-tokens 8 \
   --draft-width 4 \
   --schedule-confidence-threshold 0.9999999999 \
-  --output target/dspark-live-adaptive.json
+  --output artifacts/dspark-live-adaptive.json
 ```
 
 The threshold is intentionally high because the overfit smoke head is extremely

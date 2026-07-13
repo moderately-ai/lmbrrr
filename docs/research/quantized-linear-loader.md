@@ -11,20 +11,20 @@ Any model-loading command can now take a mixed-precision manifest:
 
 ```sh
 cargo run --release --features metal -- logits \
-  --quantized-manifest target/minicpm-v46-q8-smoke/manifest.json \
-  --output target/minicpm-v46-q8-smoke-logits.json
+  --quantized-manifest artifacts/minicpm-v46-q8-smoke/manifest.json \
+  --output artifacts/minicpm-v46-q8-smoke-logits.json
 ```
 
 Benchmark smoke:
 
 ```sh
 cargo run --release --features metal -- bench \
-  --quantized-manifest target/minicpm-v46-q8-smoke/manifest.json \
+  --quantized-manifest artifacts/minicpm-v46-q8-smoke/manifest.json \
   --profile short \
   --max-new-tokens 8 \
   --warmup 0 \
   --iterations 1 \
-  --output target/minicpm-v46-q8-smoke-bench.jsonl
+  --output artifacts/minicpm-v46-q8-smoke-bench.jsonl
 ```
 
 ## Loader Behavior
@@ -84,7 +84,7 @@ JSON reports include:
 
 Q8 smoke artifact:
 
-- `logits` with `target/minicpm-v46-q8-smoke/manifest.json` replaced 2 text
+- `logits` with `artifacts/minicpm-v46-q8-smoke/manifest.json` replaced 2 text
   linears with `candle_qtensor_requantized` and passed the existing text logits
   parity fixture.
 - `bench --profile short --max-new-tokens 8` ran generation with the same

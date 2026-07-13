@@ -36,16 +36,16 @@ The first generated token is sampled from prefill logits, so
 Command:
 
 ```sh
-cargo run --release --features metal -- bench --profile long --max-new-tokens 64 --warmup 2 --iterations 5 --output target/minicpm-v46-metal-long-bench-generation-loop-timing-64x5.jsonl
+cargo run --release --features metal -- bench --profile long --max-new-tokens 64 --warmup 2 --iterations 5 --output artifacts/minicpm-v46-metal-long-bench-generation-loop-timing-64x5.jsonl
 ```
 
 Comparison artifact from the prior DeltaNet run:
 
-- `target/minicpm-v46-metal-long-bench-after-deltanet-no-conv-shortcut-64x5.jsonl`
+- `artifacts/minicpm-v46-metal-long-bench-after-deltanet-no-conv-shortcut-64x5.jsonl`
 
 New artifact:
 
-- `target/minicpm-v46-metal-long-bench-generation-loop-timing-64x5.jsonl`
+- `artifacts/minicpm-v46-metal-long-bench-generation-loop-timing-64x5.jsonl`
 
 Median comparison:
 

@@ -15,7 +15,7 @@ cargo run --release --features metal -- bench \
   --max-new-tokens 64 \
   --warmup 1 \
   --iterations 3 \
-  --output target/minicpm-v46-metal-long-bench.jsonl
+  --output artifacts/minicpm-v46-metal-long-bench.jsonl
 ```
 
 Synchronized component profile:
@@ -24,7 +24,7 @@ Synchronized component profile:
 cargo run --release --features metal -- profile \
   --profile long \
   --max-new-tokens 32 \
-  --output target/minicpm-v46-metal-decode-profile-32.json
+  --output artifacts/minicpm-v46-metal-decode-profile-32.json
 ```
 
 The profile command runs the same long benchmark prompt, performs prefill, then

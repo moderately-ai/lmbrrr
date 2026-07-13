@@ -134,7 +134,7 @@ Use `profile` when deciding which model path to optimize:
 cargo run --release --features metal -- profile \
   --profile long \
   --max-new-tokens 32 \
-  --output target/minicpm-v46-metal-decode-profile.json
+  --output artifacts/minicpm-v46-metal-decode-profile.json
 ```
 
 This command runs the same benchmark profile prompts as `bench`, then profiles
