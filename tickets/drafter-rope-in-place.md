@@ -1,7 +1,7 @@
 ---
 id: drafter-rope-in-place
 title: "Drafter rope-in-place: port the target's wave-1 in-place rotary kernel to the drafter backbone"
-status: todo
+status: blocked
 priority: p1
 dependencies: [spec-loop-economics-recovery]
 related: []
