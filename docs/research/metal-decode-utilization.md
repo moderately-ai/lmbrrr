@@ -79,9 +79,9 @@ Attributed sites (per step): DeltaNet `cat([qkvz|b|a])` — 3 cats × 18 layers,
 
 | # | change | layer | expected | status |
 | --- | --- | --- | --- | --- |
-| 1 | Spec-lane manifest swap to `q4k-full-text` (attention+DeltaNet q8→q4_K; drafter rounds 2–4 are fakequant-matched to exactly this policy — the q8-mix objection died with round-1) | config | ~−0.4ms/step + possible τ gain; first A/B: math 259.5±6.3 (record, τ 3.58) vs 228.2 shipped; coding wash | 6-class validation A/B RUNNING |
-| 2 | Command-buffer cadence: raise `CANDLE_METAL_COMPUTE_PER_BUFFER` (50 → step-sized) | env | kills the 0.6ms boundary hole | queued behind (1) |
-| 3 | DeltaNet cat elimination + KV pack + rope-in-place (fewer copies ⇒ fewer barriers ⇒ fewer drains) | lmbrrr | ~−0.3ms + comb teeth removed | after wave-2 census |
+| 1 | Spec-lane manifest swap to `q4k-full-text` (attention+DeltaNet q8→q4_K; drafter rounds 2–4 are fakequant-matched to exactly this policy — the q8-mix objection died with round-1) | config | ~−0.4ms/step + possible τ gain; first A/B: math 259.5±6.3 (record, τ 3.58) vs 228.2 shipped; coding wash | **SHIPPED** (6-class mean +11.4%) |
+| 2 | Command-buffer cadence: `CANDLE_METAL_COMPUTE_PER_BUFFER` | env | kills the 0.6ms boundary hole | **MEASURED quiet: knee at CPB=100, +3–4% vs 50; ≥150 declines** — default flip = first wave-3 slice |
+| 3 | DeltaNet cat elimination + rope-in-place + bf16-dst GEMV (wave 1; the census's cast fix folded in) | fork+lmbrrr | ~−0.3ms + comb teeth removed | **SHIPPED (fork 8ebbebd8, bit-preserving): package +12.5–15.2% steady greedy; in-loop greedy 4.03→3.65ms** |
 | 4 | Resource-scoped barriers (`memoryBarrierWithResources`) in candle's auto_barrier | fork | unknown — hinges on Apple's scoped-barrier semantics | decision experiment: two independent GEMV chains interleaved, global vs scoped vs none (bench task to build) |
 | 5 | On-device dspark chunk assembly (kill 1 of 2 per-round drains) | lmbrrr | ~−1–2ms per drafted round of OS wait latency | design after 1–3 land |
 | 6 | Encoder-start per-buffer fence waits (upstream tidiness per #3532's own design) | fork | small | opportunistic, PR-worthy |

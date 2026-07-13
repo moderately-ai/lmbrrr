@@ -1,7 +1,7 @@
 ---
 id: metal-wave1-gpu-stream-slimming
 title: "Wave 1: GPU-stream slimming — bf16-dst quantized GEMV, DeltaNet cat elimination, rope-in-place"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [q4k-soa-plane-repack]

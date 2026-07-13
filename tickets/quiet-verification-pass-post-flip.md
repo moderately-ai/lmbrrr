@@ -1,7 +1,7 @@
 ---
 id: quiet-verification-pass-post-flip
 title: "Quiet-machine verification pass: 305-bench confirm, pacing A/B, campaign standings refresh"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [tree-speculation-over-dspark]
