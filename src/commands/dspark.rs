@@ -1240,6 +1240,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let prefill_seconds = secs(prefill_start.elapsed());
     let last_logits = prompt_logits.narrow(1, n - 1, 1)?;
     let (anchor0, _) = argmax_token(&last_logits.squeeze(1)?, &device)?;
+    let mut committed_top_k = top_k_values(&last_logits.squeeze(1)?)?;
 
     // Initial catch-up over the whole prompt: pairs (hidden_i, token_{i+1})
     // for i in 0..n-1 with the anchor as the final successor. The last row's
@@ -1314,6 +1315,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             offset += accepted + 1;
             committed.extend_from_slice(&drafts[..accepted]);
             committed.push(bonus);
+            committed_top_k.extend_from_slice(&top_k_values(&logits)?[..=accepted]);
             accepted_histogram[accepted] += 1;
             rounds += 1;
 
@@ -1347,6 +1349,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         }
     }
     committed.truncate(args.max_new_tokens);
+    committed_top_k.truncate(committed.len());
     model.set_verify_state_capture(false);
     let wall_seconds = secs(wall_start.elapsed());
 
@@ -1357,6 +1360,23 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         .zip(committed.iter())
         .take_while(|(a, b)| a == b)
         .count();
+    // A baseline divergence is benign only as a chunk-split tie-flip: the
+    // committing position's top-2 margin must sit inside the documented
+    // logit-noise bound (same class as the stub oracle's gate).
+    let divergence = (exact_prefix < committed.len().min(baseline.generated_token_ids.len()))
+        .then(|| {
+            let margin = committed_top_k
+                .get(exact_prefix)
+                .map(|top| top[0] - top[1]);
+            serde_json::json!({
+                "position": exact_prefix,
+                "mtp_token": committed[exact_prefix],
+                "baseline_token": baseline.generated_token_ids[exact_prefix],
+                "top2_margin": margin,
+                "noise_bound": LOGIT_NOISE_BOUND,
+                "tie_flip_class": margin.is_some_and(|m| m <= LOGIT_NOISE_BOUND),
+            })
+        });
     let drafted: usize = accepted_histogram
         .iter()
         .enumerate()
@@ -1391,6 +1411,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         "baseline_wall_seconds": baseline_wall,
         "baseline_generated_tokens": baseline.generated_token_ids.len(),
         "baseline_exact_prefix": exact_prefix,
+        "divergence": divergence,
         "load_seconds": secs(load_elapsed),
         "quantized_load": quantized_load_json(&quantized_load),
         "text": text,
