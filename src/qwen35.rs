@@ -226,11 +226,12 @@ impl Qwen35RmsNorm {
     }
 }
 
+// rotary_dim is not stored: rope_partial derives it from the table width
+// (cos/sin rows are rotary_dim/2 wide).
 #[derive(Clone, Debug)]
 struct RotaryEmbedding {
     cos: Tensor,
     sin: Tensor,
-    rotary_dim: usize,
 }
 
 impl RotaryEmbedding {
@@ -250,7 +251,6 @@ impl RotaryEmbedding {
         Ok(Self {
             cos: freqs.cos()?.to_dtype(dtype)?,
             sin: freqs.sin()?.to_dtype(dtype)?,
-            rotary_dim,
         })
     }
 
@@ -282,21 +282,14 @@ impl RotaryEmbedding {
         cos: &Tensor,
         sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        let (_, _, _, head_dim) = q.dims4()?;
-        let q_rot = q.narrow(D::Minus1, 0, self.rotary_dim)?;
-        let k_rot = k.narrow(D::Minus1, 0, self.rotary_dim)?;
-        let q_rot = candle_nn::rotary_emb::rope(&q_rot.contiguous()?, cos, sin)?;
-        let k_rot = candle_nn::rotary_emb::rope(&k_rot.contiguous()?, cos, sin)?;
-        if self.rotary_dim == head_dim {
-            Ok((q_rot, k_rot))
-        } else {
-            let q_pass = q.narrow(D::Minus1, self.rotary_dim, head_dim - self.rotary_dim)?;
-            let k_pass = k.narrow(D::Minus1, self.rotary_dim, head_dim - self.rotary_dim)?;
-            Ok((
-                Tensor::cat(&[&q_rot, &q_pass], D::Minus1)?,
-                Tensor::cat(&[&k_rot, &k_pass], D::Minus1)?,
-            ))
-        }
+        // rope_partial rotates the first rotary_dim lanes and passes the
+        // rest through in one kernel — bit-identical to the old
+        // narrow/rope/cat composition, minus 4 movement dispatches per
+        // layer (rd == head_dim degenerates to plain rope).
+        Ok((
+            candle_nn::rotary_emb::rope_partial(&q.contiguous()?, cos, sin)?,
+            candle_nn::rotary_emb::rope_partial(&k.contiguous()?, cos, sin)?,
+        ))
     }
 }
 
