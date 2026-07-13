@@ -67,3 +67,7 @@ Same machine, same session, controls valid (receipts: `eval-apples-to-apples-qmv
 ## 2026-07-13 (later): round-3 ships — nr2sg2 geometry default (fork ce8c3df3)
 
 Kernel: head 101.5 -> 131.5 GB/s on M3 (+30%, 88% of roof, within 6% of llama.cpp), bitwise-identical; mechanism = rows-per-simdgroup 4->2 (accumulator residency), not TG size, not activation dtype (vectorized bf16 y-loads shipped alongside; scalar bfloat loads were an issue-rate tax). e2e on M3: +2.2% medium / +2.0% long (182/181 tok/s new floors). M4 A/B + cost refit pending a quiet window. The rt/nsg variant lanes are superseded.
+
+## 2026-07-13 (evening): M3 refit exposes the spec-vs-greedy truth under the decode-only metric
+
+Calibrated M3 economics (746-sample STS, wall-fitted cost model): draft 14.25ms (2.2 greedy steps), spec-loop greedy floor 6.35ms/token vs the device-chain greedy at 5.5ms. Result: DSpark is net-negative vs chain greedy on every class ON THE M3 (best: math 156 vs 182), even though it beats the spec loop's own floor (+24% on math — the drafter itself works). The old prefill-inclusive suite metric hid this. Consequences: the M4 speculation standings need decode-only re-arbitration; the async round-boundary work (on-device chunk assembly + SharedEvent) is now the gating unlock for spec on down-tier hardware; the scheduler now runs on truthful costs and will skip drafting where it loses.
