@@ -75,3 +75,7 @@ Calibrated M3 economics (746-sample STS, wall-fitted cost model): draft 14.25ms 
 ## 2026-07-13 (night): async readback ships — SharedEvent polling chain (fork 35159db1)
 
 Greedy decode drops the every-8 blocking flush for per-token GPU signals + shared-ring id reads: +2.1/+2.4% e2e on M3 (182.6/182.3 new floors) and streaming jitter p95 44.7 -> 5.9ms (8x). Two bugs found+fixed en route, both now documented contracts: (1) blocking shared-event waits must flush the tail command buffer (deadlock otherwise — medium profile masked it by an exact CPB-multiple coincidence); (2) op-output buffers are PRIVATE-pool and their CPU mapping is allocation-size luck — committed ids must route through a caller-owned shared-storage ring. Day total on M3: 179 -> 182.6 tok/s greedy with 8x smoother streaming, head kernel +30%, and the same machinery now unblocks the spec-loop sync kill.
+
+## 2026-07-14 (early): fused Markov-chain kernel lands in the fork — 15x on the propose bottleneck
+
+The drafter's serial token-selection chain (gamma data-dependent rounds of ~5-6 tiny kernels, measured 1.17ms/step on M3) is now two fused dispatches per step: 78us/step at gamma 6, verified BITWISE against a same-order CPU reference across all four variants (q8_0/bf16 x remap). Projected propose cost 14.25 -> ~7.7ms once integrated — the threshold that puts speculative math decoding back above the async-greedy floor on down-tier hardware. Integration (parity mode + suite re-measure) is the next block.
