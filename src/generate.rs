@@ -237,10 +237,12 @@ pub fn generate_tokens(
     // reads committed ids straight from shared memory — no cat, no flush, no
     // queue drain. The event signal is the visibility guarantee (fires only
     // after all prior commands complete), so no synchronize is needed.
-    // Env-gated for the production A/B against the flush path below.
+    // Default on Metal (+2.6-3.4% e2e, jitter p95 44ms -> 5.5ms on M3);
+    // LMBRRR_ASYNC_READBACK=0 restores the batched-flush path below, which
+    // also remains the path for non-Metal devices.
     let async_readback = device_chain
         && matches!(device, Device::Metal(_))
-        && std::env::var("LMBRRR_ASYNC_READBACK").map_or(false, |v| v == "1");
+        && std::env::var("LMBRRR_ASYNC_READBACK").map_or(true, |v| v != "0");
     if async_readback {
         // Encoder run-ahead cap: bounds EOS overshoot (wasted forwards past
         // the stop token) and pending-tensor memory.
