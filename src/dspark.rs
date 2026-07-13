@@ -24,6 +24,16 @@ use serde::Deserialize;
 use crate::quantized_linear::MixedLinear;
 use crate::qwen35::TruncatableKvCache;
 
+/// LMBRRR_PROPOSE_TIMING=1: fence after each propose segment and print the
+/// per-segment walls (backbone+heads / markov chain / pack / readback). The
+/// fences serialize the pipeline, so these are attribution numbers, not
+/// production walls — the instrument that decomposes the draft-cost bucket
+/// the round-level refit can't split.
+fn propose_timing() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("LMBRRR_PROPOSE_TIMING").is_ok_and(|v| v == "1"))
+}
+
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct DsparkRopeParameters {
@@ -447,16 +457,32 @@ impl DsparkDrafter {
         branch: bool,
         force_ops: bool,
     ) -> Result<ProposalTensors> {
+        let ladder_start = propose_timing().then(std::time::Instant::now);
         let backbone = self.propose_backbone(anchor_token, anchor_pos, gamma)?;
+        let backbone_ms = ladder_start
+            .map(|t0| -> Result<f64> {
+                self.device.synchronize()?;
+                Ok(t0.elapsed().as_secs_f64() * 1e3)
+            })
+            .transpose()?;
         // Branch (tree) rounds and diagnostics consume the corrected step
         // logits, which only the ops chain materializes; everything else
         // takes the fused kernel when the device/dtype/w2 layout supports it.
-        if !branch && !force_ops {
-            if let Some(fused) = self.markov_chain_fused(anchor_token, gamma, &backbone)? {
-                return Ok(fused);
+        let chain_start = propose_timing().then(std::time::Instant::now);
+        let out = if !branch && !force_ops {
+            match self.markov_chain_fused(anchor_token, gamma, &backbone)? {
+                Some(fused) => fused,
+                None => self.markov_chain_ops(anchor_token, gamma, branch, backbone)?,
             }
+        } else {
+            self.markov_chain_ops(anchor_token, gamma, branch, backbone)?
+        };
+        if let (Some(t0), Some(bb)) = (chain_start, backbone_ms) {
+            self.device.synchronize()?;
+            let chain_ms = t0.elapsed().as_secs_f64() * 1e3;
+            eprintln!("propose-ladder gamma={gamma}: backbone+heads {bb:.3} ms, chain {chain_ms:.3} ms");
         }
-        self.markov_chain_ops(anchor_token, gamma, branch, backbone)
+        Ok(out)
     }
 
     /// Backbone forward + heads: (block_hidden [1, gamma, h], base_logits
@@ -852,10 +878,22 @@ impl DsparkDrafter {
     ) -> Result<DraftProposal> {
         let t = self.propose_tensors(anchor_token, anchor_pos, gamma, branch, diagnostics)?;
         // Single host readback: confidences and token ids ride one buffer.
-        let packed = self
-            .pack_proposal(&t)?
-            .to_device(&Device::Cpu)?
-            .to_vec1::<f32>()?;
+        let pack_start = propose_timing().then(std::time::Instant::now);
+        let packed_dev = self.pack_proposal(&t)?;
+        let pack_ms = pack_start
+            .map(|t0| -> Result<f64> {
+                self.device.synchronize()?;
+                Ok(t0.elapsed().as_secs_f64() * 1e3)
+            })
+            .transpose()?;
+        let read_start = propose_timing().then(std::time::Instant::now);
+        let packed = packed_dev.to_device(&Device::Cpu)?.to_vec1::<f32>()?;
+        if let (Some(t0), Some(pack)) = (read_start, pack_ms) {
+            eprintln!(
+                "propose-ladder gamma={gamma}: pack {pack:.3} ms, readback {:.3} ms",
+                t0.elapsed().as_secs_f64() * 1e3
+            );
+        }
         let n_alt = t.alt_token_tensors.len();
         let (conf_all, token_vals) =
             packed.split_at(gamma + if branch && gamma > 0 { gamma } else { 0 });
