@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod config;
 pub mod dspark;
 pub mod fused_deltanet;
+pub mod fused_norm;
 pub mod generate;
 pub mod image_processor;
 pub mod minicpm;

@@ -215,6 +215,30 @@ impl Qwen35RmsNorm {
         Ok(candle_nn::ops::rms_norm(&xs, weight, self.eps as f32)?)
     }
 
+    /// Fused `(a + b, rms_norm(a + b))`: one dispatch for the residual add +
+    /// the norm that consumes it, emitting both the new residual (a+b) and
+    /// the normed output. Falls back to the two-op form off the Metal/BF16
+    /// hot path or under `LMBRRR_UNFUSED_RMSNORM=1`. Not bit-preserving (see
+    /// fused_norm) — gated by the model oracle, not bitwise.
+    fn forward_add(&self, a: &Tensor, b: &Tensor) -> Result<(Tensor, Tensor)> {
+        if !unfused_rmsnorm()
+            && matches!(a.device(), Device::Metal(_))
+            && a.dtype() == DType::BF16
+            && b.dtype() == DType::BF16
+        {
+            return crate::fused_norm::fused_rms_norm_add(
+                a,
+                b,
+                &self.weight_native,
+                self.eps as f32,
+            )
+            .map_err(|e| candle::Error::Msg(format!("fused rms_norm_add: {e:#}")));
+        }
+        let sum = (a + b)?;
+        let normed = self.forward(&sum)?;
+        Ok((sum, normed))
+    }
+
     /// Reference path (`LMBRRR_UNFUSED_RMSNORM=1`) for drift attribution.
     fn forward_unfused(&self, xs: &Tensor) -> Result<Tensor> {
         let dtype = xs.dtype();
@@ -2171,9 +2195,10 @@ impl DecoderLayer {
                 attn.forward_tree(&hidden, tree.branch_width)?
             }
         };
-        let xs = (residual + hidden)?;
-        let residual = &xs;
-        let hidden = profiled(
+        // Fused residual-add + post-attention norm: one dispatch emits both
+        // the new residual (residual + mixer_out) and its norm (fed to MLP),
+        // collapsing a badd + the following rmsnorm + their barrier.
+        let (xs, hidden) = profiled(
             profiler,
             &device,
             Some(layer_index),
@@ -2181,8 +2206,9 @@ impl DecoderLayer {
             "post_attention_layernorm",
             seq_len,
             offset,
-            || self.post_attention_layernorm.forward(&xs),
+            || self.post_attention_layernorm.forward_add(residual, &hidden),
         )?;
+        let residual = &xs;
         let hidden = profiled(
             profiler,
             &device,
