@@ -21,6 +21,39 @@ fn benchmark_writer(path: Option<&PathBuf>, append: bool) -> Result<Box<dyn Writ
     }
 }
 
+/// Build provenance + machine state stamped into every report row: without
+/// it, cross-day comparisons rely on filename discipline alone.
+fn report_provenance_json() -> serde_json::Value {
+    let loadavg = std::process::Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    serde_json::json!({
+        "lmbrrr_git_rev": env!("LMBRRR_GIT_REV"),
+        "candle_pin": env!("LMBRRR_CANDLE_PIN"),
+        "loadavg_at_start": loadavg,
+    })
+}
+
+/// User-visible streaming cadence percentiles from the per-token emission
+/// stamps. Chain-path tokens surface in flush bursts, so the tail (p95/p99/
+/// max) is the honest "how chunky does streaming feel" number.
+fn jitter_json(stats: &GenerationStats) -> serde_json::Value {
+    let gaps = stats.inter_token_gaps_sorted();
+    if gaps.is_empty() {
+        return serde_json::json!(null);
+    }
+    let at = |q: f64| secs(gaps[((gaps.len() - 1) as f64 * q).round() as usize]);
+    serde_json::json!({
+        "inter_token_gap_p50_seconds": at(0.50),
+        "inter_token_gap_p95_seconds": at(0.95),
+        "inter_token_gap_p99_seconds": at(0.99),
+        "inter_token_gap_max_seconds": secs(*gaps.last().expect("non-empty gaps")),
+    })
+}
+
 fn bench_prompts(args: &BenchArgs) -> Vec<BenchPrompt> {
     let profiles = if args.profiles.is_empty() && args.prompts.is_empty() {
         BenchProfile::all().to_vec()
@@ -294,6 +327,11 @@ pub(crate) fn bench(args: BenchArgs) -> Result<()> {
                     "output_tokens_per_second": stats.decode_tokens_per_second(),
                     "decode_tokens_per_second": stats.decode_tokens_per_second(),
                     "steady_state_tokens_per_second": stats.steady_state_tokens_per_second(),
+                    "steady_window_tokens": stats.steady_window_tokens,
+                    "steady_window_seconds": secs(stats.steady_window_elapsed),
+                    "eos_overshoot_forwards": stats.eos_overshoot_forwards,
+                    "jitter": jitter_json(&stats),
+                    "provenance": report_provenance_json(),
                     "artifact_seconds": secs(bundle.elapsed),
                     "load_seconds": secs(load_elapsed),
                     "tensor_count": bundle.weight_report.tensor_count,
@@ -482,6 +520,11 @@ pub(crate) fn run(args: RunArgs) -> Result<()> {
             "output_tokens_per_second": stats.decode_tokens_per_second(),
             "decode_tokens_per_second": stats.decode_tokens_per_second(),
             "steady_state_tokens_per_second": stats.steady_state_tokens_per_second(),
+            "steady_window_tokens": stats.steady_window_tokens,
+            "steady_window_seconds": secs(stats.steady_window_elapsed),
+            "eos_overshoot_forwards": stats.eos_overshoot_forwards,
+            "jitter": jitter_json(&stats),
+            "provenance": report_provenance_json(),
             "device": format!("{device:?}"),
             "dtype": format!("{dtype:?}"),
             "enable_thinking": args.generation.enable_thinking,

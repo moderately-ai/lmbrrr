@@ -264,6 +264,35 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let gamma = args.gamma.min(drafter.config.block_size);
     let capture_layers = drafter.config.target_layer_ids.clone();
 
+    // Config artifacts load before any timed window opens.
+    let sts = StsCalibration::load(drafter_dir)?;
+    let cost_model_path = args.cost_model.clone().or_else(|| {
+        let bundled = drafter_dir.join("cost_model.json");
+        bundled.exists().then_some(bundled)
+    });
+    let mut cost_model = match &cost_model_path {
+        Some(path) => RoundCostModel::load(path)?,
+        None => RoundCostModel::measured_default(),
+    };
+    if let Some(fixed_ms) = args.cost_model_fixed_ms {
+        cost_model.fixed_ms = fixed_ms;
+    }
+
+    // Untimed warmup: the first forwards of the process pay pipeline-state
+    // creation and Metal heap growth; without this the greedy baseline runs
+    // cold while the spec loop runs warm (behind the baseline), biasing the
+    // in-report speedup comparison pro-spec.
+    generate_tokens(
+        &mut model,
+        &device,
+        &greedy_generation_args(8, args.enable_thinking),
+        &prompt_tokens,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        &eos_ids,
+        |_, _, _, _| Ok(()),
+    )?;
+
     // Greedy baseline for speed comparison and advisory text check.
     let baseline_start = Instant::now();
     let baseline = generate_tokens(
@@ -296,18 +325,6 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let (first_token, _) = argmax_token(&prompt_logits, &device)?;
     model.set_verify_state_capture(!readvance_rollback());
 
-    let sts = StsCalibration::load(drafter_dir)?;
-    let cost_model_path = args.cost_model.clone().or_else(|| {
-        let bundled = drafter_dir.join("cost_model.json");
-        bundled.exists().then_some(bundled)
-    });
-    let mut cost_model = match &cost_model_path {
-        Some(path) => RoundCostModel::load(path)?,
-        None => RoundCostModel::measured_default(),
-    };
-    if let Some(fixed_ms) = args.cost_model_fixed_ms {
-        cost_model.fixed_ms = fixed_ms;
-    }
     let mut committed = vec![first_token];
     let mut anchor = first_token;
     let mut start = prompt_tokens.len();
@@ -368,11 +385,17 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     // the measurement. The median over drafter rounds is the fixed_round_ms
     // the scheduler contract needs; tree rounds are excluded (two segment
     // dispatches per layer — not represented by the chunk table).
-    // (scheduled width, draft ran, residual ms); width is the verify chunk
-    // len minus 1 for copy rounds.
-    let mut drafter_round_residuals_ms: Vec<(usize, bool, f64)> = Vec::new();
-    let mut copy_round_residuals_ms: Vec<(usize, bool, f64)> = Vec::new();
+    // (scheduled width, draft ran, residual ms, raw round wall ms); width is
+    // the verify chunk len minus 1 for copy rounds. Raw walls make residual
+    // reanalysis under a different cost model free — residuals alone are
+    // relative to the model that happened to be loaded for this run.
+    let mut drafter_round_residuals_ms: Vec<(usize, bool, f64, f64)> = Vec::new();
+    let mut copy_round_residuals_ms: Vec<(usize, bool, f64, f64)> = Vec::new();
 
+    // Spec-decode span: everything after prefill + drafter-context setup.
+    // committed[0] came from the prefill logits, so the decode-rate
+    // denominator pairs with committed.len() - 1 tokens.
+    let decode_wall_start = Instant::now();
     if !eos_ids.contains(&first_token) {
         while committed.len() < args.max_new_tokens {
             let round_start = Instant::now();
@@ -482,11 +505,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                         start += accepted + 1;
                     }
 
+                    let round_wall_ms = secs(round_start.elapsed()) * 1000.0;
                     copy_round_residuals_ms.push((
                         w,
                         false,
-                        secs(round_start.elapsed()) * 1000.0
-                            - cost_model.verify_kernel_ms(w + 1),
+                        round_wall_ms - cost_model.verify_kernel_ms(w + 1),
+                        round_wall_ms,
                     ));
                     committed.extend_from_slice(&pld_draft[..accepted]);
                     committed.push(bonus);
@@ -934,10 +958,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             } else {
                 cost_model.kernel_ms(width)
             };
+            let round_wall_ms = secs(round_start.elapsed()) * 1000.0;
             drafter_round_residuals_ms.push((
                 width,
                 !skip_draft,
-                secs(round_start.elapsed()) * 1000.0 - kernel_est_ms,
+                round_wall_ms - kernel_est_ms,
+                round_wall_ms,
             ));
             if let Some(p) = &proposal {
                 prev_draft_confidences = Some(p.confidence_logits.clone());
@@ -961,6 +987,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     }
     committed.truncate(args.max_new_tokens);
     let wall_seconds = secs(wall_start.elapsed());
+    let decode_wall_seconds = secs(decode_wall_start.elapsed());
     model.set_device_capture(None);
     model.set_verify_state_capture(false);
 
@@ -991,11 +1018,11 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         .take_while(|(a, b)| a == b)
         .count();
 
-    let summarize_residuals = |values: &[(usize, bool, f64)]| -> serde_json::Value {
+    let summarize_residuals = |values: &[(usize, bool, f64, f64)]| -> serde_json::Value {
         if values.is_empty() {
             return serde_json::Value::Null;
         }
-        let mut sorted = values.iter().map(|(_, _, r)| *r).collect::<Vec<_>>();
+        let mut sorted = values.iter().map(|(_, _, r, _)| *r).collect::<Vec<_>>();
         sorted.sort_by(|a, b| a.total_cmp(b));
         let pick = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
         serde_json::json!({
@@ -1005,7 +1032,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             "p90_ms": pick(0.9),
             "mean_ms": sorted.iter().sum::<f64>() / sorted.len() as f64,
             "samples": values.iter()
-                .map(|(w, drafted, r)| serde_json::json!([w, drafted, r]))
+                .map(|(w, drafted, r, wall)| serde_json::json!([w, drafted, r, wall]))
                 .collect::<Vec<_>>(),
         })
     };
@@ -1086,11 +1113,26 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         "verify_seconds": verify_seconds,
         "readvance_seconds": readvance_seconds,
         "wall_seconds": wall_seconds,
-        "tokens_per_second": committed.len() as f64 / wall_seconds.max(f64::EPSILON),
+        "decode_wall_seconds": decode_wall_seconds,
+        // Decode-only rate: the spec-round span and the tokens it produced.
+        // committed[0] is the prefill token — different classes have very
+        // different prompt lengths, so folding prefill in here confounded
+        // cross-class comparisons and moved with quantization via a channel
+        // unrelated to speculative-round economics.
+        "tokens_per_second": committed.len().saturating_sub(1) as f64
+            / decode_wall_seconds.max(f64::EPSILON),
+        // End-to-end rate a caller experiences for this request (prefill +
+        // drafter setup + decode), the honest single-shot number.
+        "effective_tokens_per_second": committed.len() as f64 / wall_seconds.max(f64::EPSILON),
+        "provenance": {
+            "lmbrrr_git_rev": env!("LMBRRR_GIT_REV"),
+            "candle_pin": env!("LMBRRR_CANDLE_PIN"),
+        },
         "baseline": {
             "generated_tokens": baseline.generated_token_ids.len(),
             "wall_seconds": baseline_wall,
             "decode_tokens_per_second": baseline.decode_tokens_per_second(),
+            "steady_state_tokens_per_second": baseline.steady_state_tokens_per_second(),
         },
         "advisory_baseline_prefix_match": advisory_prefix,
         "committed_text": decode_tokens(&tokenizer, &committed)?,

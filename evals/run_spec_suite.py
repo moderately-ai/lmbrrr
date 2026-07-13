@@ -62,7 +62,10 @@ def main() -> int:
     for rep in range(1, args.reps + 1):
         for cls, qid in qids:
             prompt = questions[qid]["turns"][0]
-            for name, drafter, extra in arms:
+            # Rotate arm order per rep: fixed order gives the first arm a
+            # systematic thermal/ramp advantage across every (rep, question).
+            offset = (rep - 1) % len(arms)
+            for name, drafter, extra in arms[offset:] + arms[:offset]:
                 out = ROOT / f"target/suite-{args.tag}-{name}-{qid}-{rep}.json"
                 cmd = [str(ROOT / "target/release/lmbrrr"), "dspark-run",
                        "--drafter", drafter, "--prompt", prompt,
@@ -86,7 +89,7 @@ def main() -> int:
                 else:
                     print(f"rep{rep} {cls} q{qid} {name}: done", flush=True)
 
-    print(f"\n{'class':>15} {'qid':>4} {'arm':>8} {'tok/s':>12} {'tau':>5}")
+    print(f"\n{'class':>15} {'qid':>4} {'arm':>8} {'tok/s':>14} {'tau':>5} {'reps':>4}")
     for cls, qid in qids:
         texts = {}
         for name, _, _ in arms:
@@ -98,16 +101,23 @@ def main() -> int:
             if not reports:
                 print(f"{cls:>15} {qid:>4} {name:>8}  (no reports)")
                 continue
-            texts[name] = reports[0].get("committed_text")
+            # All reps' texts, not just rep 1: kernel-noise tie-flips can
+            # diverge reps of the SAME arm, silently averaging different
+            # generations into one mean.
+            texts[name] = {r.get("committed_text") for r in reports}
             tps = [r["tokens_per_second"] for r in reports]
             tau = st.mean(r["mean_accepted_length"] for r in reports)
-            print(f"{cls:>15} {qid:>4} {name:>8} {st.mean(tps):7.1f}"
-                  f"±{st.pstdev(tps):3.1f} {tau:5.2f}")
+            spread = st.stdev(tps) if len(tps) > 1 else float("nan")
+            print(f"{cls:>15} {qid:>4} {name:>8} {st.mean(tps):8.1f}"
+                  f"±{spread:4.1f} {tau:5.2f} {len(reports):>3}/{args.reps}")
+            if len(texts[name]) > 1:
+                print(f"{'':>15} {qid:>4} {'!':>8}  DIVERGENT CONTENT across "
+                      f"reps of arm {name}: mean mixes different generations")
         # Different scheduling -> different chunk shapes -> kernel-noise
         # tie-flips can diverge the committed text between arms; tok/s is
         # then comparing different generations and must not be read as a
         # scheduling-economics delta on this question.
-        if len(set(texts.values())) > 1:
+        if len(set().union(*texts.values()) if texts else set()) > 1:
             print(f"{'':>15} {qid:>4} {'!':>8}  DIVERGENT CONTENT across arms "
                   f"(tie-flip): tok/s not comparable on this question")
     return 0

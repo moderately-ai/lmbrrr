@@ -68,6 +68,19 @@ pub struct GenerationStats {
     pub next_input_elapsed: Duration,
     pub callback_elapsed: Duration,
     pub first_token_after_prefill: Option<Duration>,
+    /// Tokens whose GPU work completed strictly inside the steady window
+    /// (after the first readback flush, excluding any EOS-truncated flush).
+    pub steady_window_tokens: usize,
+    /// Wall span of the steady window: first flush completion -> last
+    /// complete flush completion. Token count and span cover the same GPU work.
+    pub steady_window_elapsed: Duration,
+    /// Device-chain forwards issued past EOS whose GPU time is paid inside
+    /// decode_elapsed but whose tokens are never counted.
+    pub eos_overshoot_forwards: usize,
+    /// Emission timestamp (relative to decode start) of each counted token,
+    /// as observed by the host. Chain-path tokens in one flush share ~one
+    /// stamp — that burstiness is real user-visible jitter, not an artifact.
+    pub token_emit_at: Vec<Duration>,
 }
 
 impl GenerationStats {
@@ -123,15 +136,25 @@ impl GenerationStats {
         )
     }
 
+    /// Window-consistent steady-state rate: tokens and wall span cover the
+    /// same GPU work (flush-aligned, so the first flush's warm-up and any
+    /// EOS-truncated flush are excluded from both numerator and denominator).
     pub fn steady_state_tokens_per_second(&self) -> Option<f64> {
-        let first = self.first_token_after_prefill?;
-        let steady_elapsed = self.decode_elapsed.checked_sub(first)?;
-        let steady_tokens = self.generated_tokens.checked_sub(1)?;
-        if steady_tokens == 0 {
-            None
-        } else {
-            Some(tokens_per_second(steady_tokens, steady_elapsed))
-        }
+        (self.steady_window_tokens > 0 && !self.steady_window_elapsed.is_zero()).then(|| {
+            tokens_per_second(self.steady_window_tokens, self.steady_window_elapsed)
+        })
+    }
+
+    /// Inter-token emission gaps (host-observed), sorted ascending — the
+    /// user-visible streaming cadence. Empty when fewer than two tokens.
+    pub fn inter_token_gaps_sorted(&self) -> Vec<Duration> {
+        let mut gaps: Vec<Duration> = self
+            .token_emit_at
+            .windows(2)
+            .map(|w| w[1].saturating_sub(w[0]))
+            .collect();
+        gaps.sort_unstable();
+        gaps
     }
 }
 
@@ -198,9 +221,21 @@ pub fn generate_tokens(
     // EOS; the surplus is discarded and the next caller clears the cache.
     let device_chain =
         is_greedy_generation(generation) && (generation.repeat_penalty - 1.0).abs() < f32::EPSILON;
+    let mut steady_window_tokens = 0usize;
+    let mut steady_window_elapsed = Duration::ZERO;
+    let mut eos_overshoot_forwards = 0usize;
+    let mut token_emit_at: Vec<Duration> = Vec::with_capacity(generation.max_new_tokens);
+
     if device_chain {
         const READBACK_EVERY: usize = 8;
         let mut pending: Vec<Tensor> = Vec::with_capacity(READBACK_EVERY);
+        // Steady-state accounting is flush-aligned: a flush readback waits on
+        // the GPU work of every id in the batch, so the batch's completion
+        // stamp and its token count cover the same work. The first flush
+        // seeds the window start (its tokens carry prefill/ramp effects and
+        // are excluded); an EOS-truncated flush is excluded too, since its
+        // wall includes forwards whose tokens are never counted.
+        let mut first_flush_end: Option<Duration> = None;
         'outer: loop {
             let sampling_start = Instant::now();
             // argmax over [1, vocab] keeps the id rank-1 (cat/reshape need it).
@@ -221,22 +256,43 @@ pub fn generate_tokens(
                     .to_vec1::<u32>()?;
                 pending.clear();
                 sampling_elapsed += sampling_start.elapsed();
-                for id in ids {
-                    if eos_ids.contains(&id) {
+                let flush_end = decode_start.elapsed();
+                let mut accepted_in_flush = 0usize;
+                let mut eos_in_flush = false;
+                for (idx, id) in ids.iter().enumerate() {
+                    if eos_ids.contains(id) {
                         eos_reached = true;
-                        break 'outer;
+                        eos_in_flush = true;
+                        // Remaining ids in this batch were produced by
+                        // forwards whose GPU time is already inside
+                        // decode_elapsed but whose tokens are discarded.
+                        eos_overshoot_forwards = ids.len() - idx - 1;
+                        break;
                     }
                     if first_token_after_prefill.is_none() {
-                        first_token_after_prefill = Some(decode_start.elapsed());
+                        first_token_after_prefill = Some(flush_end);
                     }
-                    generated_token_ids.push(id);
+                    generated_token_ids.push(*id);
+                    token_emit_at.push(flush_end);
                     generated += 1;
+                    accepted_in_flush += 1;
                     let callback_start = Instant::now();
-                    on_token(id, generated, decode_start.elapsed(), prefill_elapsed)?;
+                    on_token(*id, generated, flush_end, prefill_elapsed)?;
                     callback_elapsed += callback_start.elapsed();
                     if generated == generation.max_new_tokens {
-                        break 'outer;
+                        break;
                     }
+                }
+                match first_flush_end {
+                    None => first_flush_end = Some(flush_end),
+                    Some(window_start) if !eos_in_flush => {
+                        steady_window_tokens += accepted_in_flush;
+                        steady_window_elapsed = flush_end.saturating_sub(window_start);
+                    }
+                    Some(_) => {}
+                }
+                if eos_reached || generated == generation.max_new_tokens {
+                    break 'outer;
                 }
             }
             if produced >= generation.max_new_tokens {
@@ -261,6 +317,10 @@ pub fn generate_tokens(
             next_input_elapsed,
             callback_elapsed,
             first_token_after_prefill,
+            steady_window_tokens,
+            steady_window_elapsed,
+            eos_overshoot_forwards,
+            token_emit_at,
         });
     }
 
@@ -282,19 +342,22 @@ pub fn generate_tokens(
             break;
         }
 
-        if first_token_after_prefill.is_none() {
-            first_token_after_prefill = Some(decode_start.elapsed());
+        let emit_at = decode_start.elapsed();
+        match first_token_after_prefill {
+            None => first_token_after_prefill = Some(emit_at),
+            // Each token is its own "flush" here: the argmax readback above
+            // waited for its forward, so emit stamps and token counts align.
+            Some(window_start) => {
+                steady_window_tokens += 1;
+                steady_window_elapsed = emit_at.saturating_sub(window_start);
+            }
         }
         tokens.push(next_token);
         generated_token_ids.push(next_token);
+        token_emit_at.push(emit_at);
         generated += 1;
         let callback_start = Instant::now();
-        on_token(
-            next_token,
-            generated,
-            decode_start.elapsed(),
-            prefill_elapsed,
-        )?;
+        on_token(next_token, generated, emit_at, prefill_elapsed)?;
         callback_elapsed += callback_start.elapsed();
 
         if generated == generation.max_new_tokens {
@@ -326,6 +389,10 @@ pub fn generate_tokens(
         next_input_elapsed,
         callback_elapsed,
         first_token_after_prefill,
+        steady_window_tokens,
+        steady_window_elapsed,
+        eos_overshoot_forwards,
+        token_emit_at,
     })
 }
 
@@ -404,6 +471,15 @@ mod tests {
             next_input_elapsed: Duration::from_millis(3),
             callback_elapsed: Duration::from_millis(5),
             first_token_after_prefill: Some(Duration::from_millis(10)),
+            steady_window_tokens: 3,
+            steady_window_elapsed: Duration::from_millis(90),
+            eos_overshoot_forwards: 0,
+            token_emit_at: vec![
+                Duration::from_millis(10),
+                Duration::from_millis(40),
+                Duration::from_millis(70),
+                Duration::from_millis(100),
+            ],
         };
 
         assert_eq!(stats.decode_model_tokens(), 3);
@@ -412,6 +488,67 @@ mod tests {
         assert_eq!(
             stats.decode_bookkeeping_elapsed(),
             Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn steady_state_uses_flush_aligned_window() {
+        let stats = GenerationStats {
+            prompt_tokens: 1,
+            generated_tokens: 24,
+            generated_token_ids: (0..24).collect(),
+            eos_reached: false,
+            prefill_elapsed: Duration::from_millis(20),
+            decode_elapsed: Duration::from_millis(120),
+            decode_model_elapsed: Duration::from_millis(90),
+            sampling_elapsed: Duration::from_millis(10),
+            next_input_elapsed: Duration::ZERO,
+            callback_elapsed: Duration::ZERO,
+            first_token_after_prefill: Some(Duration::from_millis(40)),
+            // 3 flushes of 8: first seeds the window, last two count.
+            steady_window_tokens: 16,
+            steady_window_elapsed: Duration::from_millis(80),
+            eos_overshoot_forwards: 0,
+            token_emit_at: vec![],
+        };
+        // 16 tokens over the 80ms spanned by exactly those tokens' flushes:
+        // window token count and wall cover the same GPU work.
+        assert_eq!(stats.steady_state_tokens_per_second(), Some(200.0));
+
+        let empty_window = GenerationStats {
+            steady_window_tokens: 0,
+            steady_window_elapsed: Duration::ZERO,
+            ..stats
+        };
+        assert_eq!(empty_window.steady_state_tokens_per_second(), None);
+    }
+
+    #[test]
+    fn inter_token_gaps_are_sorted_pairwise_deltas() {
+        let stats = GenerationStats {
+            prompt_tokens: 1,
+            generated_tokens: 3,
+            generated_token_ids: vec![1, 2, 3],
+            eos_reached: false,
+            prefill_elapsed: Duration::ZERO,
+            decode_elapsed: Duration::from_millis(30),
+            decode_model_elapsed: Duration::ZERO,
+            sampling_elapsed: Duration::ZERO,
+            next_input_elapsed: Duration::ZERO,
+            callback_elapsed: Duration::ZERO,
+            first_token_after_prefill: Some(Duration::from_millis(5)),
+            steady_window_tokens: 2,
+            steady_window_elapsed: Duration::from_millis(25),
+            eos_overshoot_forwards: 0,
+            token_emit_at: vec![
+                Duration::from_millis(5),
+                Duration::from_millis(25),
+                Duration::from_millis(30),
+            ],
+        };
+        assert_eq!(
+            stats.inter_token_gaps_sorted(),
+            vec![Duration::from_millis(5), Duration::from_millis(20)]
         );
     }
 }
