@@ -1,7 +1,7 @@
 ---
 id: metal-wave2-host-encode-rlist
 title: "Wave 2: host encode-path reductions (static kernel names, pipeline cache, encoder locks)"
-status: todo
+status: done
 priority: p1
 dependencies: [metal-wave1-gpu-stream-slimming]
 related: []
