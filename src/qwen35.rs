@@ -2327,6 +2327,10 @@ impl Qwen35TextModel {
         self.embed_tokens.embeddings()
     }
 
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
     pub fn apply_quantized_text_artifact(
         &mut self,
         artifact: &QuantizedTextArtifact,
@@ -2616,17 +2620,130 @@ impl Qwen35TextModel {
     }
 
     fn causal_mask(&self, b: usize, tgt: usize, offset: usize) -> Result<Tensor> {
-        // On-device construction: log(tril) is exactly 0 on visible entries and
-        // -inf on masked ones, replacing the O(tgt * total) CPU build + upload.
-        let causal = Tensor::tril2(tgt, DType::F32, &self.device)?.log()?;
-        let mask = if offset > 0 {
-            let visible = Tensor::zeros((tgt, offset), DType::F32, &self.device)?;
-            Tensor::cat(&[&visible, &causal], 1)?
+        causal_mask(b, tgt, offset, self.dtype, &self.device)
+    }
+}
+
+// On-device construction: log(tril) is exactly 0 on visible entries and
+// -inf on masked ones, replacing the O(tgt * total) CPU build + upload.
+fn causal_mask(b: usize, tgt: usize, offset: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+    let causal = Tensor::tril2(tgt, DType::F32, device)?.log()?;
+    let mask = if offset > 0 {
+        let visible = Tensor::zeros((tgt, offset), DType::F32, device)?;
+        Tensor::cat(&[&visible, &causal], 1)?
+    } else {
+        causal
+    };
+    mask.reshape((1, 1, tgt, tgt + offset))?
+        .broadcast_as((b, 1, tgt, tgt + offset))?
+        .to_dtype(dtype)
+}
+
+/// Qwen3.5 multi-token-prediction head, transplanted from the base
+/// checkpoint's 15 `mtp.*` tensors (the MiniCPM finetune ships none):
+/// `fc([norm(embed(t_{p+1})); norm(hidden_p)])` -> one standard
+/// full-attention decoder layer with its OWN plain KV cache -> norm. Logits
+/// come from the caller's lm_head over the returned post-norm hidden.
+///
+/// Reference semantics (vLLM qwen3_5_mtp.py + mlx-lm PR #1456, which agree
+/// exactly): the layer attends only within its own cache — never the
+/// trunk's; its rope position is the cache offset (uniformly absolute-1,
+/// which cancels in q.k inside a cache-internal attention); rollback is a
+/// plain truncate by the rejected count.
+#[derive(Clone, Debug)]
+pub struct MtpHead {
+    fc: candle_nn::Linear,
+    pre_fc_norm_embedding: Qwen35RmsNorm,
+    pre_fc_norm_hidden: Qwen35RmsNorm,
+    norm: Qwen35RmsNorm,
+    layer: DecoderLayer,
+    device: Device,
+    dtype: DType,
+}
+
+/// Profiler label slot for the MTP layer (out of the trunk's 0..24 range).
+const MTP_LAYER_INDEX: usize = 1000;
+
+impl MtpHead {
+    /// Loads from a VarBuilder rooted at the checkpoint (the head's tensors
+    /// live under `mtp.*`). `cfg` is the TARGET tower's text config — the
+    /// base checkpoint is architecturally identical (verified: hidden 1024,
+    /// 8 q / 2 kv heads x 256, mlp 3584) — and all norms load zero-centred
+    /// (raw Qwen checkpoints store `w - 1`; Qwen35RmsNorm shifts at load).
+    pub fn new(cfg: &crate::config::TextConfig, vb: VarBuilder) -> Result<Self> {
+        let vb = vb.pp("mtp");
+        // Fresh rope table from the same cfg/dtype/device as the trunk's —
+        // bit-identical construction, no need to thread the trunk's Arc.
+        let rotary = Arc::new(RotaryEmbedding::new(cfg, vb.dtype(), vb.device())?);
+        let fc_w = vb.get((cfg.hidden_size, 2 * cfg.hidden_size), "fc.weight")?;
+        Ok(Self {
+            fc: candle_nn::Linear::new(fc_w, None),
+            pre_fc_norm_embedding: Qwen35RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                true,
+                vb.pp("pre_fc_norm_embedding"),
+            )?,
+            pre_fc_norm_hidden: Qwen35RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                true,
+                vb.pp("pre_fc_norm_hidden"),
+            )?,
+            norm: Qwen35RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, true, vb.pp("norm"))?,
+            layer: DecoderLayer::new(
+                crate::config::LayerType::FullAttention,
+                cfg,
+                rotary,
+                vb.pp("layers").pp(0),
+            )?,
+            device: vb.device().clone(),
+            dtype: vb.dtype(),
+        })
+    }
+
+    /// One MTP forward over S (hidden, successor-token) pairs. `hidden` is
+    /// [1, S, H]: post-final-norm TRUNK hiddens at positions p..p+S-1 for
+    /// catch-up, or this head's own post-norm output when chaining draft
+    /// depth. `embeds` is [1, S, H]: embeddings of the tokens at positions
+    /// p+1..p+S (each hidden's committed or drafted successor). Appends S
+    /// entries to the head's cache and returns the post-norm hidden
+    /// [1, S, H] — row k predicts the token at position p+k+2 through the
+    /// caller's lm_head.
+    pub fn step(&mut self, hidden: &Tensor, embeds: &Tensor) -> Result<Tensor> {
+        let (b, s, _) = hidden.dims3()?;
+        let e = self.pre_fc_norm_embedding.forward(embeds)?;
+        let h = self.pre_fc_norm_hidden.forward(hidden)?;
+        let x = self.fc.forward(&Tensor::cat(&[&e, &h], D::Minus1)?)?;
+        let offset = self.kv_len();
+        let mask = if s > 1 {
+            Some(causal_mask(b, s, offset, self.dtype, &self.device)?)
         } else {
-            causal
+            None
         };
-        mask.reshape((1, 1, tgt, tgt + offset))?
-            .broadcast_as((b, 1, tgt, tgt + offset))?
-            .to_dtype(self.dtype)
+        let x = self
+            .layer
+            .forward(&x, mask.as_ref(), offset, MTP_LAYER_INDEX, None, None)?;
+        self.norm.forward(&x)
+    }
+
+    /// Pairs fed so far (the head's rope offset).
+    pub fn kv_len(&self) -> usize {
+        match &self.layer.mixer {
+            TokenMixer::Full(attn) => attn.kv_len(),
+            TokenMixer::Linear(_) => unreachable!("MTP layer is full attention"),
+        }
+    }
+
+    /// Rollback: keep the first `len` pairs (plain cache truncate).
+    pub fn truncate(&mut self, len: usize) -> Result<()> {
+        match &self.layer.mixer {
+            TokenMixer::Full(attn) => attn.truncate_kv(len),
+            TokenMixer::Linear(_) => unreachable!("MTP layer is full attention"),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.layer.clear_cache();
     }
 }

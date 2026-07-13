@@ -23,13 +23,6 @@ struct SpecStubRun {
     wall_seconds: f64,
 }
 
-/// One full multi-round speculative pass with a stub drafter. Chunks follow
-/// the DeepSpec convention: [anchor, d1..dw] is fed, the logits at position i
-/// verify draft i+1, and the token after the last accepted draft is the bonus
-/// (= next round's anchor). On partial acceptance the decode state is
-/// restored from the pre-verify snapshot and the accepted prefix re-advanced
-/// in one chunk; on full acceptance the advanced state is kept as-is.
-#[allow(clippy::too_many_arguments)]
 /// Top-K logit values per sequence position, descending. Logits may be [v],
 /// [l, v] or [b, l, v]; the batch dim, when present, must be 1. CPU
 /// reduction — oracle-mode only, never on the production path.
@@ -70,7 +63,11 @@ fn top_k_values(logits: &Tensor) -> Result<Vec<Vec<f32>>> {
 const LOGIT_NOISE_BOUND: f32 = 0.75;
 
 /// One stub-oracle run's inputs: the shared prompt/reference streams plus
-/// the per-run corruption pattern.
+/// the per-run corruption pattern. Chunks follow the DeepSpec convention:
+/// [anchor, d1..dw] is fed, the logits at position i verify draft i+1, and
+/// the token after the last accepted draft is the bonus (= next round's
+/// anchor). On partial acceptance the decode state is restored from the
+/// pre-verify snapshot; on full acceptance the advanced state is kept.
 struct StubRunSpec<'a> {
     prompt_tokens: &'a [u32],
     stub_tokens: &'a [u32],
@@ -1183,9 +1180,233 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     write_json_report(args.output.as_ref(), &report)
 }
 
+/// Multi-round speculative decoding drafted by the transplanted Qwen3.5 MTP
+/// head (phase 1: fixed depth, greedy verify, no scheduler). Per round: the
+/// previous round's catch-up already produced draft_1; depth-1 recursion
+/// steps chain the head's own post-norm hidden; the verify chunk's
+/// accepted-row hiddens are exactly the next catch-up's input, so the MTP
+/// cache only ever holds TRUE-hidden committed pairs between rounds
+/// (recursion pairs are scratch, truncated every round — lossless by
+/// construction).
+fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
+    let depth = args.mtp_depth;
+    if depth == 0 || depth > 8 {
+        anyhow::bail!("--mtp-depth must be in 1..=8");
+    }
+    let bundle = resolve_artifacts(&args.model)?;
+    let device = select_device(args.model.cpu)?;
+    let dtype = args.model.dtype.resolve(&device);
+    let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
+    let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
+        &bundle,
+        dtype,
+        &device,
+        args.model.quantized_manifest.as_ref(),
+        args.model.quantize_lm_head,
+    )?;
+    model.load_mtp_head(&bundle.config, mtp_weights)?;
+    let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
+
+    // Baseline greedy pass: the advisory text comparator and speed floor.
+    let baseline_start = Instant::now();
+    let baseline = generate_tokens(
+        &mut model,
+        &device,
+        &greedy_generation_args(args.max_new_tokens + depth + 8, args.enable_thinking),
+        &prompt_tokens,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        &eos_ids,
+        |_, _, _, _| Ok(()),
+    )?;
+    let baseline_wall = secs(baseline_start.elapsed());
+
+    model.clear_cache();
+    model.mtp_clear();
+    model.set_verify_state_capture(!readvance_rollback());
+    let wall_start = Instant::now();
+    let n = prompt_tokens.len();
+    let prompt_input = Tensor::from_slice(&prompt_tokens, (1, n), &device)?;
+    let prefill_start = Instant::now();
+    let (prompt_logits, prompt_hidden) = model.forward_all_logits_and_hidden(
+        &prompt_input,
+        None::<&ProcessedImages>,
+        &args.model.downsample_mode,
+        0,
+    )?;
+    device.synchronize()?;
+    let prefill_seconds = secs(prefill_start.elapsed());
+    let last_logits = prompt_logits.narrow(1, n - 1, 1)?;
+    let (anchor0, _) = argmax_token(&last_logits.squeeze(1)?, &device)?;
+
+    // Initial catch-up over the whole prompt: pairs (hidden_i, token_{i+1})
+    // for i in 0..n-1 with the anchor as the final successor. The last row's
+    // logits are draft_1 for round 1.
+    let mut catchup_tokens: Vec<u32> = prompt_tokens[1..].to_vec();
+    catchup_tokens.push(anchor0);
+    let catchup_input = Tensor::from_slice(&catchup_tokens, (1, n), &device)?;
+    let mut draft_seconds = 0.0f64;
+    let draft_start = Instant::now();
+    let (cu_logits, cu_post) = model.mtp_step(&prompt_hidden, &catchup_input)?;
+    let (mut next_first_draft, _) =
+        argmax_token(&cu_logits.narrow(1, n - 1, 1)?.squeeze(1)?, &device)?;
+    let mut post_last = cu_post.narrow(1, n - 1, 1)?;
+    device.synchronize()?;
+    draft_seconds += secs(draft_start.elapsed());
+
+    let mut committed = vec![anchor0];
+    let mut anchor = anchor0;
+    let mut anchor_pos = n;
+    let mut offset = n;
+    let mut rounds = 0usize;
+    let mut rollbacks = 0usize;
+    let mut accepted_histogram = vec![0usize; depth + 1];
+    let mut verify_seconds = 0.0f64;
+
+    if !eos_ids.contains(&anchor0) {
+        while committed.len() < args.max_new_tokens {
+            // Draft: draft_1 came from the previous catch-up; chain the rest
+            // on the head's own post-norm hidden.
+            let round_draft_start = Instant::now();
+            let mut drafts = vec![next_first_draft];
+            for _ in 1..depth {
+                let prev = *drafts.last().expect("drafts is non-empty");
+                let tok = Tensor::from_slice(&[prev], (1, 1), &device)?;
+                let (logits_j, post_j) = model.mtp_step(&post_last.contiguous()?, &tok)?;
+                let (draft_j, _) = argmax_token(&logits_j.squeeze(1)?, &device)?;
+                drafts.push(draft_j);
+                post_last = post_j;
+            }
+            device.synchronize()?;
+            draft_seconds += secs(round_draft_start.elapsed());
+            // Recursion pairs are approximations — drop them before verify;
+            // the cache goes back to true-hidden committed pairs only.
+            model.mtp_truncate(anchor_pos)?;
+
+            let snapshot = model.snapshot_decode_state();
+            let mut chunk = Vec::with_capacity(depth + 1);
+            chunk.push(anchor);
+            chunk.extend_from_slice(&drafts);
+            let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), &device)?;
+            let verify_start = Instant::now();
+            let (logits, hidden) = model.forward_all_logits_and_hidden(
+                &chunk_input,
+                None::<&ProcessedImages>,
+                &args.model.downsample_mode,
+                offset,
+            )?;
+            device.synchronize()?;
+            verify_seconds += secs(verify_start.elapsed());
+            let (targets, _) = argmax_tokens(&logits, &device)?;
+            let accepted = drafts
+                .iter()
+                .zip(targets.iter())
+                .take_while(|(draft, target)| draft == target)
+                .count();
+            let bonus = targets[accepted];
+
+            if accepted < drafts.len() {
+                rollbacks += 1;
+                model.rollback_to_prefix(&snapshot, accepted + 1)?;
+            }
+            offset += accepted + 1;
+            committed.extend_from_slice(&drafts[..accepted]);
+            committed.push(bonus);
+            accepted_histogram[accepted] += 1;
+            rounds += 1;
+
+            if committed[committed.len() - (accepted + 1)..]
+                .iter()
+                .any(|token| eos_ids.contains(token))
+            {
+                if let Some(eos_at) = committed.iter().position(|token| eos_ids.contains(token)) {
+                    committed.truncate(eos_at + 1);
+                }
+                break;
+            }
+
+            // Catch-up: rows 0..=accepted of the verify hiddens pair with
+            // their committed successors (accepted drafts + the bonus); the
+            // last row's logits are the next round's draft_1.
+            let cu_draft_start = Instant::now();
+            let mut successors: Vec<u32> = drafts[..accepted].to_vec();
+            successors.push(bonus);
+            let cu_hidden = hidden.narrow(1, 0, accepted + 1)?.contiguous()?;
+            let cu_tokens = Tensor::from_slice(&successors, (1, accepted + 1), &device)?;
+            let (cu_logits, cu_post) = model.mtp_step(&cu_hidden, &cu_tokens)?;
+            let (first_draft, _) =
+                argmax_token(&cu_logits.narrow(1, accepted, 1)?.squeeze(1)?, &device)?;
+            next_first_draft = first_draft;
+            post_last = cu_post.narrow(1, accepted, 1)?;
+            device.synchronize()?;
+            draft_seconds += secs(cu_draft_start.elapsed());
+            anchor = bonus;
+            anchor_pos += accepted + 1;
+        }
+    }
+    committed.truncate(args.max_new_tokens);
+    model.set_verify_state_capture(false);
+    let wall_seconds = secs(wall_start.elapsed());
+
+    let text = decode_tokens(&tokenizer, &committed)?;
+    let exact_prefix = baseline
+        .generated_token_ids
+        .iter()
+        .zip(committed.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let drafted: usize = accepted_histogram
+        .iter()
+        .enumerate()
+        .map(|(a, count)| a * count)
+        .sum();
+    let mean_accepted_length = if rounds > 0 {
+        committed.len().saturating_sub(1) as f64 / rounds as f64
+    } else {
+        0.0
+    };
+    let decode_seconds = wall_seconds - prefill_seconds;
+    let report = serde_json::json!({
+        "kind": "lmbrrr_mtp_draft_run",
+        "schema_version": 1,
+        "mtp_weights": mtp_weights,
+        "mtp_depth": depth,
+        "prompt_tokens": prompt_tokens.len(),
+        "generated_tokens": committed.len(),
+        "rounds": rounds,
+        "rollbacks": rollbacks,
+        "accepted_histogram": accepted_histogram,
+        "accepted_draft_tokens": drafted,
+        "mean_accepted_length": mean_accepted_length,
+        "acceptance_rate_position_1": if rounds > 0 {
+            accepted_histogram[1..].iter().sum::<usize>() as f64 / rounds as f64
+        } else { 0.0 },
+        "prefill_seconds": prefill_seconds,
+        "verify_seconds": verify_seconds,
+        "draft_seconds": draft_seconds,
+        "wall_seconds": wall_seconds,
+        "tokens_per_second": committed.len() as f64 / decode_seconds.max(1e-9),
+        "baseline_wall_seconds": baseline_wall,
+        "baseline_generated_tokens": baseline.generated_token_ids.len(),
+        "baseline_exact_prefix": exact_prefix,
+        "load_seconds": secs(load_elapsed),
+        "quantized_load": quantized_load_json(&quantized_load),
+        "text": text,
+    });
+    write_json_report(args.output.as_ref(), &report)
+}
+
 pub(crate) fn dspark_run(args: DsparkRunArgs) -> Result<()> {
     if args.gamma == 0 {
         anyhow::bail!("--gamma must be greater than zero");
+    }
+    if args.drafter.is_some() && args.drafter_mtp.is_some() {
+        anyhow::bail!("--drafter and --drafter-mtp are mutually exclusive");
+    }
+    if let Some(mtp_weights) = args.drafter_mtp.clone() {
+        return mtp_drafter_run(&args, &mtp_weights);
     }
     if let Some(drafter_dir) = args.drafter.clone() {
         return dspark_drafter_run(&args, &drafter_dir);

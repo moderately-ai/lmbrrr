@@ -449,6 +449,10 @@ pub struct MiniCpmForConditionalGeneration {
     // sliced head's argmax is an index into this table of global ids; None =
     // full 248k head (argmax is already a global id). See restrict_lm_head_vocab.
     head_vocab_ids: Option<Tensor>,
+    // Transplanted Qwen3.5 MTP head (self-speculative drafting from
+    // verify-pass hiddens); loaded on demand from the base checkpoint's
+    // mtp.* tensors via load_mtp_head.
+    mtp: Option<crate::qwen35::MtpHead>,
 }
 
 impl MiniCpmForConditionalGeneration {
@@ -469,7 +473,60 @@ impl MiniCpmForConditionalGeneration {
             image_token_id: cfg.image_token_id,
             device: vb.device().clone(),
             head_vocab_ids: None,
+            mtp: None,
         })
+    }
+
+    /// Loads the transplanted MTP head from a base-checkpoint safetensors
+    /// file carrying `mtp.*` tensors (the MiniCPM finetune ships none; the
+    /// architecturally identical Qwen/Qwen3.5-0.8B does).
+    pub fn load_mtp_head(&mut self, cfg: &MiniCpmConfig, weights: &std::path::Path) -> Result<()> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                &[weights.to_path_buf()],
+                self.model.language_model.dtype(),
+                &self.device,
+            )?
+        };
+        self.mtp = Some(crate::qwen35::MtpHead::new(&cfg.text_config, vb)?);
+        Ok(())
+    }
+
+    pub fn has_mtp(&self) -> bool {
+        self.mtp.is_some()
+    }
+
+    /// One MTP step over S (hidden, successor-token) pairs; returns
+    /// (logits [1, S, V], post-norm hidden [1, S, H]). See MtpHead::step for
+    /// the pairing contract.
+    pub fn mtp_step(&mut self, hidden: &Tensor, tokens: &Tensor) -> Result<(Tensor, Tensor)> {
+        let embeds = self.model.language_model.embed(tokens)?;
+        let mtp = self
+            .mtp
+            .as_mut()
+            .ok_or_else(|| candle::Error::Msg("mtp head not loaded".to_string()))?;
+        let post = mtp.step(hidden, &embeds)?;
+        let logits = self.lm_head.forward(&post)?;
+        Ok((logits, post))
+    }
+
+    /// Pairs currently in the MTP cache (its rope offset).
+    pub fn mtp_kv_len(&self) -> usize {
+        self.mtp.as_ref().map_or(0, |m| m.kv_len())
+    }
+
+    /// MTP rollback: keep the first `len` pairs.
+    pub fn mtp_truncate(&mut self, len: usize) -> Result<()> {
+        match self.mtp.as_mut() {
+            Some(m) => m.truncate(len),
+            None => Ok(()),
+        }
+    }
+
+    pub fn mtp_clear(&mut self) {
+        if let Some(m) = self.mtp.as_mut() {
+            m.clear();
+        }
     }
 
     /// Merged per-image vision features (vision tower + merger), for parity
@@ -634,6 +691,20 @@ impl MiniCpmForConditionalGeneration {
     ) -> Result<Tensor> {
         let hidden = self.forward_hidden(input_ids, images, downsample_mode, offset)?;
         self.lm_head.forward(&hidden)
+    }
+
+    /// Dense logits plus the post-final-norm hidden states — the tensor MTP
+    /// drafting feeds on (each accepted position's hidden pairs with its
+    /// successor token in the head's cache).
+    pub fn forward_all_logits_and_hidden(
+        &mut self,
+        input_ids: &Tensor,
+        images: Option<&ProcessedImages>,
+        downsample_mode: &str,
+        offset: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let hidden = self.forward_hidden(input_ids, images, downsample_mode, offset)?;
+        Ok((self.lm_head.forward(&hidden)?, hidden))
     }
 
     /// Tree verify forward: `input_ids` is the flattened

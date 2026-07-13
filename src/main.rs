@@ -637,6 +637,19 @@ struct DsparkRunArgs {
     #[arg(long)]
     drafter: Option<PathBuf>,
 
+    /// Draft with the transplanted Qwen3.5 MTP head instead: path to a
+    /// safetensors file carrying the base checkpoint's mtp.* tensors
+    /// (e.g. artifacts/qwen35-0.8b/model.safetensors-00001-of-00001
+    /// .safetensors). Phase-1 harness: fixed --mtp-depth, greedy verify,
+    /// no scheduler. Mutually exclusive with --drafter.
+    #[arg(long)]
+    drafter_mtp: Option<PathBuf>,
+
+    /// Draft tokens per round for --drafter-mtp (the head is trained for
+    /// recursive multi-step prediction; vendor operating points are 2-4).
+    #[arg(long, default_value_t = 3)]
+    mtp_depth: usize,
+
     /// Truncate each proposal to the leading positions whose calibrated
     /// confidence stays at or above this probability (DeepSpec inference
     /// contract; 0-draft rounds allowed). Calibration comes from sts.json
