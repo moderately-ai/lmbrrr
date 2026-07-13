@@ -291,7 +291,8 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         &args.model.downsample_mode,
         &eos_ids,
         |_, _, _, _| Ok(()),
-    )?;
+    )
+    .context("dspark warmup generation")?;
 
     // Greedy baseline for speed comparison and advisory text check.
     let baseline_start = Instant::now();
@@ -304,7 +305,8 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         &args.model.downsample_mode,
         &eos_ids,
         |_, _, _, _| Ok(()),
-    )?;
+    )
+    .context("dspark baseline generation")?;
     let baseline_wall = secs(baseline_start.elapsed());
 
     let wall_start = Instant::now();

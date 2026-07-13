@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use candle::{Device, Tensor, D};
+use candle::{DType, Device, Tensor, D};
 use candle_transformers::{
     generation::{LogitsProcessor, Sampling},
     utils::apply_repeat_penalty,
@@ -254,9 +254,30 @@ pub fn generate_tokens(
         let event = metal_dev
             .new_shared_event()
             .map_err(|e| anyhow::anyhow!("shared event: {e}"))?;
-        // Held until consumed: keeps each id tensor's buffer out of the
-        // allocator pool so later ops can't recycle it before the host read.
-        let mut pending: std::collections::VecDeque<Tensor> = std::collections::VecDeque::new();
+        // Committed ids land in a caller-owned SHARED-storage ring: op
+        // outputs live in candle's private-storage pool whose CPU mapping is
+        // an allocation-size accident (small buffers happen to map, a 32KB
+        // pool bucket returns null contents), so each id is copied into the
+        // ring on-device (one tiny dispatch, ordered before the signal) and
+        // the host reads the ring — the only contractual CPU-visible path.
+        let ring_len = generation.max_new_tokens.max(1);
+        let ring_buf = metal_dev
+            .new_buffer_builder()
+            .with_size(ring_len * DType::U32.size_in_bytes())
+            .with_label("async_id_ring")
+            .build()?;
+        let ring_ptr = ring_buf.contents() as *const u32;
+        anyhow::ensure!(!ring_ptr.is_null(), "id ring must be CPU-mapped");
+        let ring = {
+            let storage =
+                candle::MetalStorage::new(ring_buf, metal_dev.clone(), ring_len, DType::U32);
+            Tensor::from_storage(
+                candle::Storage::Metal(storage),
+                (ring_len,),
+                candle::op::BackpropOp::none(),
+                false,
+            )
+        };
         let mut produced = 0u64;
         let mut consumed = 0u64;
         loop {
@@ -265,7 +286,7 @@ pub fn generate_tokens(
             if can_encode {
                 let sampling_start = Instant::now();
                 let next_id = model.remap_head_id(&logits.argmax(D::Minus1)?)?;
-                pending.push_back(next_id.clone());
+                ring.slice_set(&next_id, 0, produced as usize)?;
                 produced += 1;
                 metal_dev
                     .signal_event(&event, produced)
@@ -303,8 +324,9 @@ pub fn generate_tokens(
                 readback_wait_elapsed += readback_start.elapsed();
             }
             while consumed < event.signaled_value().min(produced) {
-                let id_tensor = pending.pop_front().expect("pending underflow");
-                let id = read_committed_id(&id_tensor)?;
+                // Visibility: the ring write for index `consumed` is ordered
+                // before signal value consumed+1, which we just observed.
+                let id = unsafe { *ring_ptr.add(consumed as usize) };
                 consumed += 1;
                 if eos_ids.contains(&id) {
                     eos_reached = true;
@@ -526,23 +548,6 @@ pub fn generate_tokens(
         eos_overshoot_forwards,
         token_emit_at,
     })
-}
-
-/// Read a committed u32 id straight from shared GPU memory WITHOUT any
-/// synchronize. Callers must hold a shared-event visibility guarantee for
-/// this tensor's producing work (signaled_value >= its signal value) — the
-/// event signal orders after all prior commands, and StorageModeShared is
-/// CPU-coherent on Apple silicon.
-fn read_committed_id(t: &Tensor) -> Result<u32> {
-    let (storage, layout) = t.storage_and_layout();
-    match &*storage {
-        candle::Storage::Metal(ms) => {
-            let ptr = ms.buffer().contents();
-            anyhow::ensure!(!ptr.is_null(), "null buffer contents");
-            Ok(unsafe { *(ptr as *const u32).add(layout.start_offset()) })
-        }
-        _ => anyhow::bail!("async readback requires metal storage"),
-    }
 }
 
 // No leading synchronize in either helper: to_scalar/to_vec1 already wait
