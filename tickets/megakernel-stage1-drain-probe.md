@@ -2,7 +2,7 @@
 id: megakernel-stage1-drain-probe
 title: "EVAL: Stage-1 dispatch-boundary drain probe (single-threadgroup chained loop vs N real dispatches)"
 status: todo
-priority: p2
+priority: p1
 dependencies: []
 related: []
 scopes: [candle-fork]
