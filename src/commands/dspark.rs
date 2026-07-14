@@ -1267,7 +1267,14 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let prefill_seconds = secs(prefill_start.elapsed());
     let last_logits = prompt_logits.narrow(1, n - 1, 1)?;
     let (anchor0, _) = argmax_token(&last_logits.squeeze(1)?, &device)?;
-    let mut committed_top_k = top_k_values(&last_logits.squeeze(1)?)?;
+    // Divergence-margin diagnostics read the full verify logits back every
+    // round — opt-in only (--mtp-margin-oracle), never on the measured path.
+    let margin_oracle = args.mtp_margin_oracle;
+    let mut committed_top_k = if margin_oracle {
+        top_k_values(&last_logits.squeeze(1)?)?
+    } else {
+        Vec::new()
+    };
 
     // Initial catch-up over the whole prompt: pairs (hidden_i, token_{i+1})
     // for i in 0..n-1 with the anchor as the final successor. The last row's
@@ -1368,7 +1375,9 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             offset += accepted + 1;
             committed.extend_from_slice(&drafts[..accepted]);
             committed.push(bonus);
-            committed_top_k.extend_from_slice(&top_k_values(&logits)?[..=accepted]);
+            if margin_oracle {
+                committed_top_k.extend_from_slice(&top_k_values(&logits)?[..=accepted]);
+            }
             accepted_histogram[accepted] += 1;
             rounds += 1;
 
@@ -1410,7 +1419,9 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         }
     }
     committed.truncate(args.max_new_tokens);
-    committed_top_k.truncate(committed.len());
+    if margin_oracle {
+        committed_top_k.truncate(committed.len());
+    }
     model.set_verify_state_capture(false);
     let wall_seconds = secs(wall_start.elapsed());
 

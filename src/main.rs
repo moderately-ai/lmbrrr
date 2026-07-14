@@ -672,6 +672,13 @@ struct DsparkRunArgs {
     #[arg(long)]
     mtp_draft_vocab: Option<usize>,
 
+    /// Collect per-position top-K logit values for the divergence margin
+    /// report. This reads the FULL verify logits back to the host every
+    /// round (multi-ms diagnostics tax) — off by default; re-run with this
+    /// flag to classify a reported divergence.
+    #[arg(long)]
+    mtp_margin_oracle: bool,
+
     /// Bounded Metal capture around exactly this MTP round (draft chain +
     /// verify + catch-up), written to dspark-round-<N>.gputrace. Needs
     /// METAL_CAPTURE_ENABLED=1; earlier rounds warm the shader caches.
