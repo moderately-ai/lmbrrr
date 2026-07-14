@@ -1,7 +1,7 @@
 ---
 id: spec-phase-2-one-structural-sync-per-round-port-greedy-s-deferred-readback-into-the-spec-runner
 title: "Spec phase 2: one structural sync per round (port greedy's deferred-readback into the spec runner)"
-status: todo
+status: blocked
 priority: p2
 dependencies: []
 related: []
