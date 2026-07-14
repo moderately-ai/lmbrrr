@@ -1,7 +1,7 @@
 ---
 id: cargo-deny-license-gate
 title: "cargo-deny: license/ban/advisory gate for the workspace (gpui prereq)"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: []
