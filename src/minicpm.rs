@@ -449,6 +449,11 @@ pub struct MiniCpmForConditionalGeneration {
     // sliced head's argmax is an index into this table of global ids; None =
     // full 248k head (argmax is already a global id). See restrict_lm_head_vocab.
     head_vocab_ids: Option<Tensor>,
+    /// FR-Spec draft head for the MTP path: (sliced+quantized head, global
+    /// id map). Drafting argmaxes over the slice only; the target verifies
+    /// full-vocab, so committed output is lossless — only draft cost and
+    /// acceptance move.
+    mtp_draft_head: Option<(crate::quantized_linear::MixedLinear, Tensor)>,
     // Transplanted Qwen3.5 MTP head (self-speculative drafting from
     // verify-pass hiddens); loaded on demand from the base checkpoint's
     // mtp.* tensors via load_mtp_head.
@@ -474,6 +479,7 @@ impl MiniCpmForConditionalGeneration {
             device: vb.device().clone(),
             head_vocab_ids: None,
             mtp: None,
+            mtp_draft_head: None,
         })
     }
 
@@ -506,8 +512,44 @@ impl MiniCpmForConditionalGeneration {
             .as_mut()
             .ok_or_else(|| candle::Error::Msg("mtp head not loaded".to_string()))?;
         let post = mtp.step(hidden, &embeds)?;
-        let logits = self.lm_head.forward(&post)?;
+        // Draft logits come from the FR-Spec slice when configured; callers
+        // remap argmaxes via [`Self::remap_mtp_draft_id`].
+        let logits = match &self.mtp_draft_head {
+            Some((head, _)) => head.forward(&post)?,
+            None => self.lm_head.forward(&post)?,
+        };
         Ok((logits, post))
+    }
+
+    /// FR-Spec slice for MTP drafting (mirror of restrict_lm_head_vocab, but
+    /// as a separate head so verification stays full-vocab/lossless).
+    pub fn restrict_mtp_draft_vocab(
+        &mut self,
+        ids: &[u32],
+        ggml: Option<candle::quantized::GgmlDType>,
+    ) -> Result<()> {
+        let idx = Tensor::from_slice(ids, ids.len(), &self.device)?;
+        let weight = self.model.language_model.embeddings().clone();
+        let sliced = weight.index_select(&idx, 0)?.contiguous()?;
+        let head = match ggml {
+            Some(ggml) => {
+                let cpu_f32 = sliced.to_dtype(candle::DType::F32)?.to_device(&Device::Cpu)?;
+                let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
+                crate::quantized_linear::MixedLinear::from_qtensor(q)?
+            }
+            None => crate::quantized_linear::MixedLinear::dense(Linear::new(sliced, None)),
+        };
+        self.mtp_draft_head = Some((head, idx));
+        Ok(())
+    }
+
+    /// Map an MTP draft-head argmax (slice-local, rank-1) to global token
+    /// ids via a device gather; identity when no slice is configured.
+    pub fn remap_mtp_draft_id(&self, sliced: &Tensor) -> Result<Tensor> {
+        match &self.mtp_draft_head {
+            Some((_, table)) => Ok(table.index_select(sliced, 0)?),
+            None => Ok(sliced.clone()),
+        }
     }
 
     /// Pairs currently in the MTP cache (its rope offset).

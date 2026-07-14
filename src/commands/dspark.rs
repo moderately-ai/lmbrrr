@@ -1213,6 +1213,27 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         args.model.quantize_lm_head,
     )?;
     model.load_mtp_head(&bundle.config, mtp_weights)?;
+    if let Some(n) = args.mtp_draft_vocab {
+        #[derive(serde::Deserialize)]
+        struct Ranking {
+            ids: Vec<u32>,
+        }
+        let path = &args.model.target_head_vocab_ranking;
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("open draft vocab ranking {}", path.display()))?;
+        let ranking: Ranking = serde_json::from_reader(std::io::BufReader::new(file))
+            .with_context(|| format!("parse {}", path.display()))?;
+        anyhow::ensure!(
+            n <= ranking.ids.len(),
+            "--mtp-draft-vocab {n} exceeds ranking length {}",
+            ranking.ids.len()
+        );
+        model.restrict_mtp_draft_vocab(
+            &ranking.ids[..n],
+            args.model.quantize_lm_head.map(|t| t.ggml()),
+        )?;
+        eprintln!("mtp draft head sliced to {n} tokens");
+    }
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
     // Baseline greedy pass: the advisory text comparator and speed floor.
@@ -1259,10 +1280,8 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let (cu_logits, cu_post) = model.mtp_step(&prompt_hidden, &catchup_input)?;
     // draft_1 stays on device: the chain consumes it as the next step's
     // token tensor and the ids come back in ONE readback per round.
-    let mut next_first_draft_dev = cu_logits
-        .narrow(1, n - 1, 1)?
-        .squeeze(1)?
-        .argmax(D::Minus1)?
+    let mut next_first_draft_dev = model
+        .remap_mtp_draft_id(&cu_logits.narrow(1, n - 1, 1)?.squeeze(1)?.argmax(D::Minus1)?)?
         .reshape((1, 1))?;
     let mut post_last = cu_post.narrow(1, n - 1, 1)?;
     device.synchronize()?;
@@ -1305,7 +1324,11 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             for _ in 1..depth {
                 let tok = draft_ids_dev.last().expect("drafts is non-empty").clone();
                 let (logits_j, post_j) = model.mtp_step(&post_last.contiguous()?, &tok)?;
-                draft_ids_dev.push(logits_j.squeeze(1)?.argmax(D::Minus1)?.reshape((1, 1))?);
+                draft_ids_dev.push(
+                    model
+                        .remap_mtp_draft_id(&logits_j.squeeze(1)?.argmax(D::Minus1)?)?
+                        .reshape((1, 1))?,
+                );
                 post_last = post_j;
             }
             let drafts = Tensor::cat(&draft_ids_dev.iter().collect::<Vec<_>>(), 1)?
@@ -1368,10 +1391,10 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             let cu_hidden = hidden.narrow(1, 0, accepted + 1)?.contiguous()?;
             let cu_tokens = Tensor::from_slice(&successors, (1, accepted + 1), &device)?;
             let (cu_logits, cu_post) = model.mtp_step(&cu_hidden, &cu_tokens)?;
-            next_first_draft_dev = cu_logits
-                .narrow(1, accepted, 1)?
-                .squeeze(1)?
-                .argmax(D::Minus1)?
+            next_first_draft_dev = model
+                .remap_mtp_draft_id(
+                    &cu_logits.narrow(1, accepted, 1)?.squeeze(1)?.argmax(D::Minus1)?,
+                )?
                 .reshape((1, 1))?;
             post_last = cu_post.narrow(1, accepted, 1)?;
             device.synchronize()?;

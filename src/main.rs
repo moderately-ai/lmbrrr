@@ -664,6 +664,14 @@ struct DsparkRunArgs {
     #[arg(long, default_value_t = 3)]
     mtp_depth: usize,
 
+    /// FR-Spec slice for MTP drafting: the draft head argmaxes over the
+    /// top-N ranked tokens only (~N/248094 of the head bytes per chain
+    /// step). Lossless — the target verifies full-vocab; only draft cost
+    /// and acceptance move. Ranking from --target-head-vocab-ranking;
+    /// quantized at the --quantize-lm-head tier.
+    #[arg(long)]
+    mtp_draft_vocab: Option<usize>,
+
     /// Bounded Metal capture around exactly this MTP round (draft chain +
     /// verify + catch-up), written to dspark-round-<N>.gputrace. Needs
     /// METAL_CAPTURE_ENABLED=1; earlier rounds warm the shader caches.
