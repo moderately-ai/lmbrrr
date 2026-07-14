@@ -497,6 +497,14 @@ struct QuantMatmulBenchArgs {
     #[arg(long)]
     include_lm_head: bool,
 
+    /// Bounded Metal capture of one quantized bench cell, written as
+    /// qmb-<shape>-<weight>-<activation>-m<tokens>.gputrace in the CWD.
+    /// Format "shape:weight:activation:tokens", e.g. lm_head:Q4K:BF16:1.
+    /// Needs METAL_CAPTURE_ENABLED=1; captures extra forwards AFTER the
+    /// timed loop so the timing rows stay clean.
+    #[arg(long)]
+    gpu_capture_cell: Option<String>,
+
     #[arg(long)]
     output: Option<PathBuf>,
 }

@@ -185,6 +185,18 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
         anyhow::bail!("--iterations must be greater than zero");
     }
 
+    let capture_cell = args
+        .gpu_capture_cell
+        .as_deref()
+        .map(parse_capture_cell)
+        .transpose()?;
+    if capture_cell.is_some() && std::env::var("METAL_CAPTURE_ENABLED").is_err() {
+        anyhow::bail!(
+            "--gpu-capture-cell needs METAL_CAPTURE_ENABLED=1 in the environment \
+             (undocumented Metal requirement)"
+        );
+    }
+
     let bundle = resolve_artifacts(&args.model)?;
     let device = select_device(args.model.cpu)?;
     let shapes = quant_matmul_shapes(&bundle.config, args.include_lm_head);
@@ -221,6 +233,7 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
                 device: &device,
                 warmup: args.warmup,
                 iterations: args.iterations,
+                capture: capture_cell.as_ref(),
             };
             for activation_dtype in activation_dtypes {
                 rows.push(bench_dense_matmul(&shape, tokens, activation_dtype, &ctx));
@@ -740,6 +753,32 @@ struct MatmulShape {
     out_dim: usize,
 }
 
+/// One quantized bench cell selected for a bounded Metal capture.
+#[derive(Clone, Debug)]
+struct CaptureCell {
+    shape: String,
+    weight: String,
+    activation: String,
+    tokens: usize,
+}
+
+fn parse_capture_cell(spec: &str) -> Result<CaptureCell> {
+    let parts = spec.split(':').collect::<Vec<_>>();
+    let [shape, weight, activation, tokens] = parts.as_slice() else {
+        anyhow::bail!(
+            "--gpu-capture-cell must be shape:weight:activation:tokens, e.g. lm_head:Q4K:BF16:1"
+        );
+    };
+    Ok(CaptureCell {
+        shape: shape.to_string(),
+        weight: weight.to_ascii_uppercase(),
+        activation: activation.to_ascii_uppercase(),
+        tokens: tokens
+            .parse()
+            .with_context(|| format!("--gpu-capture-cell tokens field {tokens:?} must be an integer"))?,
+    })
+}
+
 fn quant_matmul_shapes(cfg: &MiniCpmConfig, include_lm_head: bool) -> Vec<MatmulShape> {
     let text = &cfg.text_config;
     let key_dim = text.linear_key_head_dim * text.linear_num_key_heads;
@@ -802,6 +841,7 @@ struct MatmulBenchCtx<'a> {
     device: &'a Device,
     warmup: usize,
     iterations: usize,
+    capture: Option<&'a CaptureCell>,
 }
 
 fn bench_dense_matmul(
@@ -868,6 +908,31 @@ fn bench_quant_matmul(
         let elapsed = time_iterations(device, ctx.warmup, ctx.iterations, || {
             Ok(linear.forward(&input)?)
         })?;
+        let capture_match = ctx.capture.is_some_and(|cell| {
+            cell.shape == shape.name
+                && cell.weight == format!("{quant_dtype:?}").to_ascii_uppercase()
+                && cell.activation == format!("{activation_dtype:?}").to_ascii_uppercase()
+                && cell.tokens == tokens
+        });
+        if capture_match {
+            let Device::Metal(md) = device else {
+                anyhow::bail!("--gpu-capture-cell requires the Metal device");
+            };
+            let path = std::env::current_dir()?.join(format!(
+                "qmb-{}-{quant_dtype:?}-{activation_dtype:?}-m{tokens}.gputrace",
+                shape.name
+            ));
+            if path.exists() {
+                std::fs::remove_dir_all(&path)?;
+            }
+            md.capture(&path)?;
+            for _ in 0..3 {
+                linear.forward(&input)?;
+            }
+            device.synchronize()?;
+            md.stop_capture();
+            eprintln!("captured {}", path.display());
+        }
         Ok((prepare_elapsed, elapsed))
     })();
     matmul_bench_row(
