@@ -165,6 +165,15 @@ fn unfused_deltanet() -> bool {
     *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_DELTANET").is_ok_and(|v| v == "1"))
 }
 
+/// Fused q/k head-norm + partial rope + direct KV-cache write for the
+/// full-attention layers (bit-identical to the unfused chain; see
+/// fused_attn). Opt-out: default on; LMBRRR_FUSED_ATTN_PREP=0 restores the
+/// unfused chain for A/B.
+fn fused_attn_prep() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| !std::env::var("LMBRRR_FUSED_ATTN_PREP").is_ok_and(|v| v == "0"))
+}
+
 /// v2 fused DeltaNet (re-gridded decode/chunk kernels, transposed state
 /// layout). Opt-out: default on; LMBRRR_DELTANET_V2=0 restores the v1
 /// kernels for A/B and drift attribution.
@@ -369,6 +378,17 @@ impl TruncatableKvCache {
 
     fn ensure_capacity(slot: &mut Option<Tensor>, template: &Tensor, needed: usize, len: usize) -> Result<()> {
         let (b, h, _, d) = template.dims4()?;
+        Self::ensure_capacity_dims(slot, (b, h, d), template.dtype(), template.device(), needed, len)
+    }
+
+    fn ensure_capacity_dims(
+        slot: &mut Option<Tensor>,
+        (b, h, d): (usize, usize, usize),
+        dtype: DType,
+        device: &Device,
+        needed: usize,
+        len: usize,
+    ) -> Result<()> {
         let current_capacity = match slot {
             Some(buffer) => buffer.dim(2)?,
             None => 0,
@@ -377,7 +397,7 @@ impl TruncatableKvCache {
             return Ok(());
         }
         let capacity = needed.next_power_of_two().max(Self::MIN_CAPACITY);
-        let buffer = Tensor::zeros((b, h, capacity, d), template.dtype(), template.device())?;
+        let buffer = Tensor::zeros((b, h, capacity, d), dtype, device)?;
         if let Some(old) = slot.as_ref() {
             if len > 0 {
                 buffer.slice_set(&old.narrow(2, 0, len)?.contiguous()?, 2, 0)?;
@@ -385,6 +405,30 @@ impl TruncatableKvCache {
         }
         *slot = Some(buffer);
         Ok(())
+    }
+
+    /// Fused-append protocol: grow to fit `added` rows and hand out the raw
+    /// cache buffers plus the write position; the caller writes the rows
+    /// in-kernel (see fused_attn) and then calls `advance`.
+    pub fn reserve(
+        &mut self,
+        kv_heads: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &Device,
+        added: usize,
+    ) -> Result<(Tensor, Tensor, usize)> {
+        let needed = self.len + added;
+        let dims = (1, kv_heads, head_dim);
+        Self::ensure_capacity_dims(&mut self.k, dims, dtype, device, needed, self.len)?;
+        Self::ensure_capacity_dims(&mut self.v, dims, dtype, device, needed, self.len)?;
+        let k = self.k.clone().expect("k buffer allocated");
+        let v = self.v.clone().expect("v buffer allocated");
+        Ok((k, v, self.len))
+    }
+
+    pub fn advance(&mut self, added: usize) {
+        self.len += added;
     }
 
     /// Winner-path compaction after tree verification: moves `count` rows
@@ -647,32 +691,6 @@ impl FullAttention {
         let gate = q_gate
             .narrow(D::Minus1, self.head_dim, self.head_dim)?
             .reshape((b, l, self.hidden_size))?;
-        let (mut q, mut k, v) = profiled(
-            profiler,
-            &device,
-            Some((layer_index, "full_attention")),
-            "full_attention_kv_projection_norm",
-            l,
-            offset,
-            || {
-                let q = self.q_norm.forward(&q)?.transpose(1, 2)?;
-                let k = self
-                    .k_norm
-                    .forward(&qkv.narrow(D::Minus1, q_out, kv_out)?.reshape((
-                        b,
-                        l,
-                        self.num_kv_heads,
-                        self.head_dim,
-                    ))?)?
-                    .transpose(1, 2)?;
-                let v = qkv
-                    .narrow(D::Minus1, q_out + kv_out, kv_out)?
-                    .reshape((b, l, self.num_kv_heads, self.head_dim))?
-                    .transpose(1, 2)?;
-                Ok((q, k, v))
-            },
-        )?;
-
         // Decode (l == 1, no mask) routes to the fused SDPA vector kernel:
         // native GQA (no repeat_kv materialization of the whole cache) and
         // strided k/v (the cache narrows feed in directly, no k_t
@@ -688,33 +706,114 @@ impl FullAttention {
         let use_sdpa =
             (l == 1 && mask.is_none() || (2..=16).contains(&l) && mask.is_some())
                 && !unfused_sdpa();
-        let (q, k, v, k_t) = profiled(
-            profiler,
-            &device,
-            Some((layer_index, "full_attention")),
-            "full_attention_rotary_kv_cache",
-            l,
-            offset,
-            || {
-                (q, k) = match rope_positions {
-                    Some(positions) => self.rotary.apply_with_positions(&q, &k, positions)?,
-                    None => self.rotary.apply(&q, &k, offset)?,
-                };
-                let (k, v) = self
-                    .kv_cache
-                    .lock()
-                    .expect("full-attention KV cache lock poisoned")
-                    .append(&k.contiguous()?, &v.contiguous()?)?;
-                let q = q.contiguous()?;
-                if use_sdpa {
-                    return Ok((q, k, v, None));
-                }
-                let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
-                let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
-                let k_t = k.transpose(2, 3)?.contiguous()?;
-                Ok((q, k, v, Some(k_t)))
-            },
-        )?;
+        // Contiguous-position forwards take the fused prep path: q/k
+        // head-norm + partial rope + direct cache write in two dispatches,
+        // bit-identical to the chain below (see fused_attn). Tree
+        // verification passes explicit rope_positions and stays unfused.
+        let fused_prep = fused_attn_prep()
+            && b == 1
+            && rope_positions.is_none()
+            && qkv.dtype() == DType::BF16
+            && matches!(&device, Device::Metal(_))
+            && crate::fused_attn::supports_head_dim(self.head_dim);
+        let (q, k, v, k_t) = if fused_prep {
+            profiled(
+                profiler,
+                &device,
+                Some((layer_index, "full_attention")),
+                "full_attention_fused_qkv_prep",
+                l,
+                offset,
+                || {
+                    let mut cache = self
+                        .kv_cache
+                        .lock()
+                        .expect("full-attention KV cache lock poisoned");
+                    let (cache_k, cache_v, write_pos) =
+                        cache.reserve(self.num_kv_heads, self.head_dim, qkv.dtype(), &device, l)?;
+                    let q = crate::fused_attn::fused_qkv_prep(
+                        &qkv,
+                        &self.q_norm.weight_native,
+                        &self.k_norm.weight_native,
+                        self.q_norm.eps as f32,
+                        &self.rotary.cos,
+                        &self.rotary.sin,
+                        offset,
+                        self.num_heads,
+                        self.num_kv_heads,
+                        self.head_dim,
+                        &cache_k,
+                        &cache_v,
+                        write_pos,
+                    )
+                    .map_err(|e| candle::Error::Msg(format!("fused attn prep: {e:#}")))?;
+                    cache.advance(l);
+                    let len = cache.len();
+                    let k = cache_k.narrow(2, 0, len)?;
+                    let v = cache_v.narrow(2, 0, len)?;
+                    if use_sdpa {
+                        return Ok((q, k, v, None));
+                    }
+                    let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
+                    let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
+                    let k_t = k.transpose(2, 3)?.contiguous()?;
+                    Ok((q, k, v, Some(k_t)))
+                },
+            )?
+        } else {
+            let (mut q, mut k, v) = profiled(
+                profiler,
+                &device,
+                Some((layer_index, "full_attention")),
+                "full_attention_kv_projection_norm",
+                l,
+                offset,
+                || {
+                    let q = self.q_norm.forward(&q)?.transpose(1, 2)?;
+                    let k = self
+                        .k_norm
+                        .forward(&qkv.narrow(D::Minus1, q_out, kv_out)?.reshape((
+                            b,
+                            l,
+                            self.num_kv_heads,
+                            self.head_dim,
+                        ))?)?
+                        .transpose(1, 2)?;
+                    let v = qkv
+                        .narrow(D::Minus1, q_out + kv_out, kv_out)?
+                        .reshape((b, l, self.num_kv_heads, self.head_dim))?
+                        .transpose(1, 2)?;
+                    Ok((q, k, v))
+                },
+            )?;
+            profiled(
+                profiler,
+                &device,
+                Some((layer_index, "full_attention")),
+                "full_attention_rotary_kv_cache",
+                l,
+                offset,
+                || {
+                    (q, k) = match rope_positions {
+                        Some(positions) => self.rotary.apply_with_positions(&q, &k, positions)?,
+                        None => self.rotary.apply(&q, &k, offset)?,
+                    };
+                    let (k, v) = self
+                        .kv_cache
+                        .lock()
+                        .expect("full-attention KV cache lock poisoned")
+                        .append(&k.contiguous()?, &v.contiguous()?)?;
+                    let q = q.contiguous()?;
+                    if use_sdpa {
+                        return Ok((q, k, v, None));
+                    }
+                    let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
+                    let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
+                    let k_t = k.transpose(2, 3)?.contiguous()?;
+                    Ok((q, k, v, Some(k_t)))
+                },
+            )?
+        };
 
         let out = profiled(
             profiler,
