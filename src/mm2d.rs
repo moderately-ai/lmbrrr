@@ -47,27 +47,27 @@ pub fn mm2d_min_n() -> usize {
 }
 
 /// Minimum chunk rows for routing BODY linears (n below the head class)
-/// through the tensor op. Measured 2026-07-14: at m<=4 the wide kernels win
-/// the body (mm2d per-dispatch latency, 16-56 TGs); the wide slope
-/// (+1.5ms/row) hands it to flat mm2d around m=5. Head-class tensors route
-/// at any m in [2,8].
+/// through the tensor op. With split-K (the default) the body wins at every
+/// m in [2,8]: suite mean 145.2 vs 137.5 tok/s at BODY_MIN_M=2 vs the
+/// head-only route (2026-07-14). Without split-K the crossover was m=5.
 pub fn mm2d_body_min_m() -> usize {
     static MIN_M: OnceLock<usize> = OnceLock::new();
     *MIN_M.get_or_init(|| {
         std::env::var("LMBRRR_MM2D_BODY_MIN_M")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(5)
+            .unwrap_or(2)
     })
 }
 
 const HEAD_CLASS_MIN_N: usize = 100_000;
 
-/// Split-K for body shapes (LMBRRR_MM2D_SPLITK=1). Default off until the
-/// in-loop A/B arbitrates (the t32 lesson: isolated wins do not transfer).
+/// Split-K for body shapes. Default ON: the in-loop A/B (2026-07-14, d5
+/// warm) cut verify 13.36 -> 10.98 ms/round and the suite confirmed the
+/// mean win; LMBRRR_MM2D_SPLITK=0 restores the single-dispatch kernel.
 pub fn mm2d_splitk_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D_SPLITK").is_ok_and(|v| v != "0"))
+    *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D_SPLITK").map_or(true, |v| v != "0"))
 }
 
 /// Process-wide kill switch, set on the first dispatch failure (pre-26.4 OS).
