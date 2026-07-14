@@ -44,6 +44,23 @@ pub fn mm2d_min_n() -> usize {
     })
 }
 
+/// Minimum chunk rows for routing BODY linears (n below the head class)
+/// through the tensor op. Measured 2026-07-14: at m<=4 the wide kernels win
+/// the body (mm2d per-dispatch latency, 16-56 TGs); the wide slope
+/// (+1.5ms/row) hands it to flat mm2d around m=5. Head-class tensors route
+/// at any m in [2,8].
+pub fn mm2d_body_min_m() -> usize {
+    static MIN_M: OnceLock<usize> = OnceLock::new();
+    *MIN_M.get_or_init(|| {
+        std::env::var("LMBRRR_MM2D_BODY_MIN_M")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5)
+    })
+}
+
+const HEAD_CLASS_MIN_N: usize = 100_000;
+
 /// Process-wide kill switch, set on the first dispatch failure (pre-26.4 OS).
 static MM2D_BROKEN: AtomicBool = AtomicBool::new(false);
 
@@ -129,6 +146,11 @@ pub fn mm2d_eligible(xs: &Tensor) -> bool {
 /// can fall back; pass a fresh forward to the wide route on Err.
 pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
     anyhow::ensure!(planes.n >= mm2d_min_n(), "below LMBRRR_MM2D_MIN_N");
+    if planes.n < HEAD_CLASS_MIN_N {
+        let dims = xs.dims();
+        let m: usize = dims[..dims.len() - 1].iter().product();
+        anyhow::ensure!(m >= mm2d_body_min_m(), "body shape below BODY_MIN_M");
+    }
     let candle::Device::Metal(device) = xs.device() else {
         anyhow::bail!("mm2d forward requires a Metal device");
     };
