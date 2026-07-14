@@ -30,6 +30,20 @@ pub fn mm2d_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D").is_ok_and(|v| v != "0"))
 }
 
+/// Minimum weight rows (n) for the tensor-op route. Small-n dispatches have
+/// too few threadgroups to hide the serial K-loop latency in a dependent
+/// layer chain; LMBRRR_MM2D_MIN_N isolates that effect (e.g. 100000 =
+/// lm_head only).
+pub fn mm2d_min_n() -> usize {
+    static MIN_N: OnceLock<usize> = OnceLock::new();
+    *MIN_N.get_or_init(|| {
+        std::env::var("LMBRRR_MM2D_MIN_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
 /// Process-wide kill switch, set on the first dispatch failure (pre-26.4 OS).
 static MM2D_BROKEN: AtomicBool = AtomicBool::new(false);
 
@@ -114,6 +128,7 @@ pub fn mm2d_eligible(xs: &Tensor) -> bool {
 /// BF16. Errors mark the route broken process-wide (warn once) so the caller
 /// can fall back; pass a fresh forward to the wide route on Err.
 pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
+    anyhow::ensure!(planes.n >= mm2d_min_n(), "below LMBRRR_MM2D_MIN_N");
     let candle::Device::Metal(device) = xs.device() else {
         anyhow::bail!("mm2d forward requires a Metal device");
     };
