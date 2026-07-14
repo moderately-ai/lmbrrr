@@ -11,8 +11,10 @@ over target-generated conversations (the regen corpus IS the target's own
 distribution), teacher-forced, cross-entropy.
 
 Design notes:
-- batch size 1 + gradient accumulation: no padding, no masks, no admission
-  logic — the teacher is 0.8B on an H100, throughput is a non-issue.
+- length-bucketed batching (r2): sequences are right-padded within a batch;
+  causal attention means padded tails cannot influence real positions, and
+  their losses are masked. Per-sequence mean loss + effective batch of 16
+  sequences preserve the r1 (batch-1, grad-accum-16) training dynamics.
 - teacher hiddens come from the text model's last_hidden_state (post final
   norm — verified in-job by asserting lm_head(hidden) reproduces argmax of
   the model's own logits on the first sample).
@@ -51,7 +53,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-tokens", type=int, default=32)
     p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--warmup-steps", type=int, default=100)
-    p.add_argument("--grad-accum", type=int, default=16)
+    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--grad-accum", type=int, default=2)
+    p.add_argument("--bucket-window", type=int, default=512,
+                   help="shuffle window sorted by length before batching")
     p.add_argument("--eval-every", type=int, default=2000)
     p.add_argument("--seed", type=int, default=17)
     return p.parse_args()
@@ -174,14 +179,20 @@ def main() -> int:
             rows.append(conv)
     print(f"loaded {len(rows)} conversations", flush=True)
 
-    def encode(conv) -> torch.Tensor | None:
+    def encode_ids(conv) -> list[int] | None:
         text = tokenizer.apply_chat_template(
             conv, tokenize=False, add_generation_prompt=False, enable_thinking=False
         )
         ids = tokenizer(text, add_special_tokens=False)["input_ids"]
         if len(ids) < args.min_tokens:
             return None
-        return torch.tensor(ids[: args.max_tokens], device=device).unsqueeze(0)
+        return ids[: args.max_tokens]
+
+    def encode(conv) -> torch.Tensor | None:
+        ids = encode_ids(conv)
+        if ids is None:
+            return None
+        return torch.tensor(ids, device=device).unsqueeze(0)
 
     holdout = rows[: args.holdout]
     train_rows = rows[args.holdout :]
@@ -241,7 +252,7 @@ def main() -> int:
     print(f"VENDOR BASELINE holdout next-token top-1: {base_acc:.4f}", flush=True)
 
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=0.01)
-    total_steps = max(1, args.epochs * len(train_rows) // args.grad_accum)
+    total_steps = 1  # recomputed from the batch count below, before training
 
     def lr_at(step: int) -> float:
         if step < args.warmup_steps:
@@ -252,22 +263,76 @@ def main() -> int:
     os.makedirs(args.output_dir, exist_ok=True)
     from safetensors.torch import save_file
 
+    # Length-bucketed batches: tokenize once, shuffle, sort inside a window
+    # (keeps randomness, minimizes padding), batch, shuffle batch order.
+    import random
+
+    rng = random.Random(args.seed)
+    encoded = []
+    for conv in train_rows:
+        ids = encode_ids(conv)
+        if ids is not None and len(ids) >= 3:
+            encoded.append(ids)
+    print(f"encoded {len(encoded)} train sequences", flush=True)
+    rng.shuffle(encoded)
+    batches = []
+    for w0 in range(0, len(encoded), args.bucket_window):
+        window = sorted(encoded[w0 : w0 + args.bucket_window], key=len)
+        for b0 in range(0, len(window), args.batch_size):
+            batches.append(window[b0 : b0 + args.batch_size])
+    rng.shuffle(batches)
+    pad_waste = 1.0 - (
+        sum(len(s) for b in batches for s in b)
+        / max(1, sum(len(b) * len(b[-1]) for b in batches))
+    )
+    print(f"{len(batches)} batches of <= {args.batch_size}, padding waste {pad_waste:.1%}", flush=True)
+
+    def batch_loss_and_acc(batch: list[list[int]]):
+        # Right padding: causal attention keeps real positions independent of
+        # pads; padded label positions are ignored (-100). Per-sequence mean
+        # loss preserves the batch-1 weighting.
+        bsz = len(batch)
+        t = max(len(s) for s in batch)
+        ids = torch.zeros((bsz, t), dtype=torch.long, device=device)
+        mask = torch.zeros((bsz, t), dtype=torch.long, device=device)
+        for i, s in enumerate(batch):
+            ids[i, : len(s)] = torch.tensor(s, device=device)
+            mask[i, : len(s)] = 1
+        with torch.no_grad():
+            h = text_model(input_ids=ids, attention_mask=mask).last_hidden_state
+            embeds = embed(ids[:, 1:t])
+        post = head(h[:, : t - 1], embeds)
+        logits = lm_head(post[:, : t - 2])
+        labels = ids[:, 2:t].clone()
+        valid = mask[:, 2:t].bool()
+        labels[~valid] = -100
+        raw = nn.functional.cross_entropy(
+            logits.float().reshape(-1, logits.shape[-1]),
+            labels.reshape(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).reshape(bsz, t - 2)
+        per_seq = (raw * valid).sum(-1) / valid.sum(-1).clamp(min=1)
+        loss = per_seq.mean()
+        correct = int(((logits.argmax(-1) == labels) & valid).sum())
+        return loss, correct, int(valid.sum())
+
     best_acc = base_acc
     step = 0
     micro = 0
     running = 0.0
+    seen_tokens = 0
     start = time.monotonic()
     head.train()
+    total_steps = max(1, args.epochs * len(batches) // args.grad_accum)
     for epoch in range(args.epochs):
-        for row_idx, conv in enumerate(train_rows):
-            ids = encode(conv)
-            if ids is None:
-                continue
-            loss, _, n = head_loss_and_acc(ids)
+        for batch in batches:
+            loss, _, n = batch_loss_and_acc(batch)
             if n == 0:
                 continue
             (loss / args.grad_accum).backward()
             running += float(loss)
+            seen_tokens += sum(len(s) for s in batch)
             micro += 1
             if micro % args.grad_accum == 0:
                 step += 1
@@ -277,11 +342,12 @@ def main() -> int:
                 opt.step()
                 opt.zero_grad(set_to_none=True)
                 if step % 50 == 0:
+                    elapsed = time.monotonic() - start
                     print(
                         f"epoch {epoch} step {step}/{total_steps} "
                         f"loss {running / (50 * args.grad_accum):.4f} "
                         f"lr {lr_at(step):.2e} "
-                        f"({(time.monotonic() - start)/60:.1f} min)",
+                        f"({elapsed/60:.1f} min, {seen_tokens/max(elapsed,1e-9):.0f} tok/s)",
                         flush=True,
                     )
                     running = 0.0

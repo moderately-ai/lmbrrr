@@ -431,6 +431,8 @@ def mtp_distill(
     epochs: int = 2,
     lr: float = 5e-5,
     max_tokens: int = 1536,
+    batch_size: int = 8,
+    grad_accum: int = 2,
     exp_name: str = "mtp-distill-r1",
 ) -> None:
     """Align the Qwen3.5-0.8B vendor MTP head to the fakequant target
@@ -460,6 +462,10 @@ def mtp_distill(
             str(lr),
             "--max-tokens",
             str(max_tokens),
+            "--batch-size",
+            str(batch_size),
+            "--grad-accum",
+            str(grad_accum),
         ],
         env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
     )
