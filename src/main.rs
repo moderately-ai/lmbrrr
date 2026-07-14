@@ -482,6 +482,12 @@ struct QuantMatmulBenchArgs {
     #[arg(long, default_value_t = 128)]
     chunk_tokens: usize,
 
+    /// Activation row counts to sweep — the m axis of the verify intercept.
+    /// Default [1, chunk_tokens] preserves the historical decode/prefill
+    /// pair; pass e.g. 1,2,3,4,8 for the small-m kernel comparison.
+    #[arg(long, value_delimiter = ',')]
+    token_counts: Vec<usize>,
+
     #[arg(long, default_value_t = 2)]
     warmup: usize,
 

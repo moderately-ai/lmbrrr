@@ -196,16 +196,21 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
         GgmlDType::Q6K,
     ];
 
+    let token_counts = if args.token_counts.is_empty() {
+        vec![1, args.chunk_tokens]
+    } else {
+        args.token_counts.clone()
+    };
+    if token_counts.contains(&0) {
+        anyhow::bail!("--token-counts entries must be greater than zero");
+    }
+
     let mut rows = Vec::new();
     for shape in shapes {
         let weight_values = deterministic_values(shape.out_dim * shape.in_dim, 0.013);
         let weight_cpu =
             Tensor::from_vec(weight_values, (shape.out_dim, shape.in_dim), &Device::Cpu)?;
-        for mode in [MatmulMode::Decode, MatmulMode::Prefill] {
-            let tokens = match mode {
-                MatmulMode::Decode => 1,
-                MatmulMode::Prefill => args.chunk_tokens,
-            };
+        for &tokens in &token_counts {
             let input_values = deterministic_values(tokens * shape.in_dim, 0.017);
             let input_cpu =
                 Tensor::from_vec(input_values, (1, tokens, shape.in_dim), &Device::Cpu)?;
@@ -218,14 +223,14 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
                 iterations: args.iterations,
             };
             for activation_dtype in activation_dtypes {
-                rows.push(bench_dense_matmul(&shape, mode, activation_dtype, &ctx));
+                rows.push(bench_dense_matmul(&shape, tokens, activation_dtype, &ctx));
             }
 
             for quant_dtype in quant_dtypes {
                 for activation_dtype in activation_dtypes {
                     rows.push(bench_quant_matmul(
                         &shape,
-                        mode,
+                        tokens,
                         quant_dtype,
                         activation_dtype,
                         &ctx,
@@ -717,18 +722,13 @@ fn mean(values: impl Iterator<Item = f64>) -> f64 {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-enum MatmulMode {
-    Decode,
-    Prefill,
-}
-
-impl MatmulMode {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Decode => "decode_mv",
-            Self::Prefill => "prefill_mm",
-        }
+/// Report label for one token-count arm: m=1 is the decode matvec; larger m
+/// is the batched (verify-chunk / prefill) path.
+fn matmul_mode_name(tokens: usize) -> String {
+    if tokens == 1 {
+        "decode_mv".to_string()
+    } else {
+        format!("mm_{tokens}")
     }
 }
 
@@ -806,7 +806,7 @@ struct MatmulBenchCtx<'a> {
 
 fn bench_dense_matmul(
     shape: &MatmulShape,
-    mode: MatmulMode,
+    tokens: usize,
     activation_dtype: DType,
     ctx: &MatmulBenchCtx,
 ) -> serde_json::Value {
@@ -829,7 +829,7 @@ fn bench_dense_matmul(
     })();
     matmul_bench_row(
         shape,
-        mode,
+        tokens,
         BenchRowBackend {
             backend: "dense",
             weight_dtype: Some(format!("{activation_dtype:?}")),
@@ -843,7 +843,7 @@ fn bench_dense_matmul(
 
 fn bench_quant_matmul(
     shape: &MatmulShape,
-    mode: MatmulMode,
+    tokens: usize,
     quant_dtype: GgmlDType,
     activation_dtype: DType,
     ctx: &MatmulBenchCtx,
@@ -872,7 +872,7 @@ fn bench_quant_matmul(
     })();
     matmul_bench_row(
         shape,
-        mode,
+        tokens,
         BenchRowBackend {
             backend: "quantized",
             weight_dtype: Some(format!("{quant_dtype:?}")),
@@ -900,7 +900,7 @@ struct BenchRowBackend<'a> {
 
 fn matmul_bench_row(
     shape: &MatmulShape,
-    mode: MatmulMode,
+    tokens: usize,
     backend: BenchRowBackend,
     result: Result<(Duration, Duration)>,
     ctx: &MatmulBenchCtx,
@@ -917,7 +917,8 @@ fn matmul_bench_row(
         Ok((prepare_elapsed, elapsed)) => serde_json::json!({
             "shape": shape.name,
             "family": shape.family,
-            "mode": mode.name(),
+            "mode": matmul_mode_name(tokens),
+            "tokens": tokens,
             "backend": backend,
             "weight_dtype": weight_dtype,
             "activation_dtype": format!("{activation_dtype:?}"),
@@ -934,7 +935,8 @@ fn matmul_bench_row(
         Err(err) => serde_json::json!({
             "shape": shape.name,
             "family": shape.family,
-            "mode": mode.name(),
+            "mode": matmul_mode_name(tokens),
+            "tokens": tokens,
             "backend": backend,
             "weight_dtype": weight_dtype,
             "activation_dtype": format!("{activation_dtype:?}"),
