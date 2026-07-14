@@ -768,7 +768,10 @@ impl FullAttention {
             l,
             offset,
             || {
-                let out = (out * candle_nn::ops::sigmoid(&gate)?)?;
+                // Fused x * sigmoid(gate): one dispatch instead of sigmoid +
+                // bmul + their barrier; bit-identical (see fused_gate).
+                let out = crate::fused_gate::mul_sigmoid(&out, &gate)
+                    .map_err(|e| candle::Error::Msg(format!("mul_sigmoid: {e:#}")))?;
                 self.o_proj.forward(&out)
             },
         )

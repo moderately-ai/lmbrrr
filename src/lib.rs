@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod config;
 pub mod dspark;
 pub mod fused_deltanet;
+pub mod fused_gate;
 pub mod fused_head;
 pub mod fused_norm;
 pub mod generate;
