@@ -650,6 +650,12 @@ struct DsparkRunArgs {
     #[arg(long, default_value_t = 3)]
     mtp_depth: usize,
 
+    /// Bounded Metal capture around exactly this MTP round (draft chain +
+    /// verify + catch-up), written to dspark-round-<N>.gputrace. Needs
+    /// METAL_CAPTURE_ENABLED=1; earlier rounds warm the shader caches.
+    #[arg(long)]
+    gpu_capture_round: Option<usize>,
+
     /// Truncate each proposal to the leading positions whose calibrated
     /// confidence stays at or above this probability (DeepSpec inference
     /// contract; 0-draft rounds allowed). Calibration comes from sts.json

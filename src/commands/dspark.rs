@@ -1193,6 +1193,12 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     if depth == 0 || depth > 8 {
         anyhow::bail!("--mtp-depth must be in 1..=8");
     }
+    if args.gpu_capture_round.is_some() && std::env::var("METAL_CAPTURE_ENABLED").is_err() {
+        anyhow::bail!(
+            "--gpu-capture-round needs METAL_CAPTURE_ENABLED=1 in the environment \
+             (undocumented Metal requirement)"
+        );
+    }
     let bundle = resolve_artifacts(&args.model)?;
     let device = select_device(args.model.cpu)?;
     let dtype = args.model.dtype.resolve(&device);
@@ -1268,6 +1274,20 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
 
     if !eos_ids.contains(&anchor0) {
         while committed.len() < args.max_new_tokens {
+            // Bounded Metal capture around exactly this round: draft chain,
+            // verify chunk (the m = depth+1 forward), and catch-up.
+            let capture_this = args.gpu_capture_round == Some(rounds);
+            let capture_path =
+                std::env::current_dir()?.join(format!("dspark-round-{rounds}.gputrace"));
+            if capture_this {
+                if capture_path.exists() {
+                    std::fs::remove_dir_all(&capture_path)?;
+                }
+                match &device {
+                    Device::Metal(md) => md.capture(&capture_path)?,
+                    _ => anyhow::bail!("--gpu-capture-round requires the Metal device"),
+                }
+            }
             // Draft: draft_1 came from the previous catch-up; chain the rest
             // on the head's own post-norm hidden.
             let round_draft_start = Instant::now();
@@ -1344,6 +1364,12 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             post_last = cu_post.narrow(1, accepted, 1)?;
             device.synchronize()?;
             draft_seconds += secs(cu_draft_start.elapsed());
+            if capture_this {
+                if let Device::Metal(md) = &device {
+                    md.stop_capture();
+                }
+                println!("gpu capture written: {}", capture_path.display());
+            }
             anchor = bonus;
             anchor_pos += accepted + 1;
         }
