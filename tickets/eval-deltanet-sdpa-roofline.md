@@ -1,7 +1,7 @@
 ---
 id: eval-deltanet-sdpa-roofline
 title: "EVAL: the other 25% — DeltaNet decode + sdpa_vector achieved bandwidth vs roofline"
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: []
