@@ -221,7 +221,7 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=6552c231#6552c231a5a1ddd2831eed78a7368a9e0efc16ad"
+source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
 dependencies = [
  "byteorder",
  "candle-metal-kernels",
@@ -250,7 +250,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=6552c231#6552c231a5a1ddd2831eed78a7368a9e0efc16ad"
+source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
 dependencies = [
  "block2",
  "half",
@@ -265,7 +265,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=6552c231#6552c231a5a1ddd2831eed78a7368a9e0efc16ad"
+source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
 dependencies = [
  "candle-core",
  "candle-metal-kernels",
@@ -282,7 +282,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=6552c231#6552c231a5a1ddd2831eed78a7368a9e0efc16ad"
+source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -300,7 +300,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=6552c231#6552c231a5a1ddd2831eed78a7368a9e0efc16ad"
+source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
 dependencies = [
  "ug",
  "ug-metal",
@@ -727,7 +727,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -822,7 +822,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2667,7 +2667,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3078,7 +3078,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3684,7 +3684,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
