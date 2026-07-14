@@ -281,10 +281,12 @@ pub fn generate_tokens(
         // Fused head argmax (fused-gemv-argmax-head): the head GEMV reduces
         // straight to the winning id — the 248k-row logits are never
         // materialized. Exact by construction (same per-row bits, same tie
-        // rule; fork bench task `argmax-head` gates it). Opt-in via
-        // LMBRRR_FUSED_ARGMAX=1 until the production A/B ships a default.
+        // rule; fork bench task `argmax-head` gates it, committed text is
+        // byte-identical). Default on since the M3 A/B (paired median +1.19%,
+        // all rounds positive); LMBRRR_FUSED_ARGMAX=0 restores the
+        // stored-logits path.
         let fused_argmax = model.supports_fused_head_argmax()
-            && std::env::var("LMBRRR_FUSED_ARGMAX").is_ok_and(|v| v == "1");
+            && std::env::var("LMBRRR_FUSED_ARGMAX").map_or(true, |v| v != "0");
         // Holds the pre-reduced [1] id between iterations on the fused path
         // (the first iteration reduces the prefill logits normally).
         let mut fused_arg: Option<Tensor> = None;
