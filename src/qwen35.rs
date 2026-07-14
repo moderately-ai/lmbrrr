@@ -2164,31 +2164,35 @@ impl DecoderLayer {
         self.mixer.kind()
     }
 
+    /// One decoder block over pre-normed input: `normed` is
+    /// input_layernorm(hidden), computed by the caller's loop — which fuses
+    /// it into the PREVIOUS layer's MLP residual add (cross-layer add+norm:
+    /// one dispatch instead of badd + rmsnorm + their barrier, ~24 serial
+    /// dispatches per token across the stack). Returns (hidden_next,
+    /// normed_next) where normed_next is `next_norm` applied to hidden_next
+    /// in the same fused tail — the following layer's input norm, or the
+    /// model's final norm on the last layer. The sums stay bit-identical to
+    /// the unfused badd (per-layer captures/traces are unchanged); only the
+    /// normed outputs carry the sub-noise F32-sum-input difference (margin
+    /// class, same as the post-attention site).
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &mut self,
-        xs: &Tensor,
+        hidden: &Tensor,
+        normed: &Tensor,
+        next_norm: &Qwen35RmsNorm,
         mask: Option<&Tensor>,
         offset: usize,
         layer_index: usize,
         profiler: Option<&Qwen35Profiler>,
         tree: Option<&TreeForward>,
-    ) -> Result<Tensor> {
-        let (_, seq_len, _) = xs.dims3()?;
-        let device = xs.device().clone();
+    ) -> Result<(Tensor, Tensor)> {
+        let (_, seq_len, _) = hidden.dims3()?;
+        let device = hidden.device().clone();
         let layer_kind = self.mixer.kind();
-        let residual = xs;
-        let hidden = profiled(
-            profiler,
-            &device,
-            Some((layer_index, layer_kind)),
-            "input_layernorm",
-            seq_len,
-            offset,
-            || self.input_layernorm.forward(xs),
-        )?;
-        let hidden = match (&mut self.mixer, tree) {
+        let mixed = match (&mut self.mixer, tree) {
             (TokenMixer::Full(attn), _) => attn.forward(
-                &hidden,
+                normed,
                 mask,
                 offset,
                 layer_index,
@@ -2196,35 +2200,42 @@ impl DecoderLayer {
                 tree.map(|t| t.positions.as_slice()),
             )?,
             (TokenMixer::Linear(attn), None) => {
-                attn.forward(&hidden, layer_index, offset, profiler)?
+                attn.forward(normed, layer_index, offset, profiler)?
             }
             (TokenMixer::Linear(attn), Some(tree)) => {
-                attn.forward_tree(&hidden, tree.branch_width)?
+                attn.forward_tree(normed, tree.branch_width)?
             }
         };
         // Fused residual-add + post-attention norm: one dispatch emits both
-        // the new residual (residual + mixer_out) and its norm (fed to MLP),
-        // collapsing a badd + the following rmsnorm + their barrier.
-        let (xs, hidden) = profiled(
+        // the new residual (hidden + mixer_out) and its norm (fed to MLP).
+        let (xs, mlp_in) = profiled(
             profiler,
             &device,
             Some((layer_index, layer_kind)),
             "post_attention_layernorm",
             seq_len,
             offset,
-            || self.post_attention_layernorm.forward_add(residual, &hidden),
+            || self.post_attention_layernorm.forward_add(hidden, &mixed),
         )?;
-        let residual = &xs;
-        let hidden = profiled(
+        let mlp_out = profiled(
             profiler,
             &device,
             Some((layer_index, layer_kind)),
             "mlp",
             seq_len,
             offset,
-            || self.mlp.forward(&hidden),
+            || self.mlp.forward(&mlp_in),
         )?;
-        residual + hidden
+        // Fused MLP residual + the NEXT norm (cross-layer).
+        profiled(
+            profiler,
+            &device,
+            Some((layer_index, layer_kind)),
+            "mlp_residual_next_norm",
+            seq_len,
+            offset,
+            || next_norm.forward_add(&xs, &mlp_out),
+        )
     }
 
     fn clear_cache(&mut self) {
@@ -2362,17 +2373,42 @@ impl Qwen35TextModel {
         let trace_recorder = self.trace_recorder.clone();
         let capture_layers = self.device_capture_layers.clone();
         let mut captures = Vec::new();
+        // Cross-layer fused add+norm: the loop feeds each layer its
+        // pre-normed input and hands it the NEXT norm to fuse into its MLP
+        // residual tail (norm handles are Arc-cheap clones; the layer loop
+        // holds &mut self.layers). Layer 0's input norm runs standalone; the
+        // last layer's tail applies the model's final norm, so the loop ends
+        // holding the final-normed hidden.
+        let input_norms: Vec<Qwen35RmsNorm> = self
+            .layers
+            .iter()
+            .map(|layer| layer.input_layernorm.clone())
+            .collect();
         let mut hidden = inputs_embeds.clone();
+        let mut normed = profiled(
+            profiler.as_ref(),
+            &self.device,
+            Some((0, "input_layernorm")),
+            "input_layernorm",
+            l,
+            offset,
+            || input_norms[0].forward(&hidden),
+        )?;
         for (layer_index, layer) in self.layers.iter_mut().enumerate() {
             let layer_kind = layer.kind();
-            hidden = layer.forward(
+            let next_norm = input_norms.get(layer_index + 1).unwrap_or(&self.norm);
+            let (h_next, n_next) = layer.forward(
                 &hidden,
+                &normed,
+                next_norm,
                 mask.as_ref(),
                 offset,
                 layer_index,
                 profiler.as_ref(),
                 None,
             )?;
+            hidden = h_next;
+            normed = n_next;
             if let Some(trace_recorder) = trace_recorder.as_ref() {
                 trace_recorder.record_layer(layer_index, layer_kind, &hidden, offset)?;
             }
@@ -2385,15 +2421,8 @@ impl Qwen35TextModel {
         if capture_layers.is_some() {
             self.device_captures = captures;
         }
-        profiled(
-            profiler.as_ref(),
-            &self.device,
-            None,
-            "final_norm",
-            l,
-            offset,
-            || self.norm.forward(&hidden),
-        )
+        // `normed` is final_norm(hidden) via the last layer's fused tail.
+        Ok(normed)
     }
 
     /// Two-branch tree verify forward over the flattened
@@ -2430,16 +2459,28 @@ impl Qwen35TextModel {
         let profiler = self.profiler.clone();
         let capture_layers = self.device_capture_layers.clone();
         let mut captures = Vec::new();
+        // Same cross-layer fused add+norm structure as forward_embeds.
+        let input_norms: Vec<Qwen35RmsNorm> = self
+            .layers
+            .iter()
+            .map(|layer| layer.input_layernorm.clone())
+            .collect();
         let mut hidden = inputs_embeds.clone();
+        let mut normed = input_norms[0].forward(&hidden)?;
         for (layer_index, layer) in self.layers.iter_mut().enumerate() {
-            hidden = layer.forward(
+            let next_norm = input_norms.get(layer_index + 1).unwrap_or(&self.norm);
+            let (h_next, n_next) = layer.forward(
                 &hidden,
+                &normed,
+                next_norm,
                 Some(&tree.mask),
                 offset,
                 layer_index,
                 profiler.as_ref(),
                 Some(&tree),
             )?;
+            hidden = h_next;
+            normed = n_next;
             if let Some(capture_layers) = capture_layers.as_ref() {
                 if capture_layers.contains(&layer_index) {
                     captures.push(hidden.clone());
@@ -2449,7 +2490,8 @@ impl Qwen35TextModel {
         if capture_layers.is_some() {
             self.device_captures = captures;
         }
-        self.norm.forward(&hidden)
+        // `normed` is final_norm(hidden) via the last layer's fused tail.
+        Ok(normed)
     }
 
     /// Ancestor mask for the flattened tree layout: every row sees history
@@ -2721,10 +2763,20 @@ impl MtpHead {
         } else {
             None
         };
-        let x = self
-            .layer
-            .forward(&x, mask.as_ref(), offset, MTP_LAYER_INDEX, None, None)?;
-        self.norm.forward(&x)
+        // The layer's fused tail applies the head's final norm directly
+        // (next_norm = mtp.norm), so the returned normed IS the post hidden.
+        let normed_in = self.layer.input_layernorm.forward(&x)?;
+        let (_, post) = self.layer.forward(
+            &x,
+            &normed_in,
+            &self.norm,
+            mask.as_ref(),
+            offset,
+            MTP_LAYER_INDEX,
+            None,
+            None,
+        )?;
+        Ok(post)
     }
 
     /// Pairs fed so far (the head's rope offset).
