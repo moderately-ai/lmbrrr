@@ -278,6 +278,16 @@ pub fn generate_tokens(
                 false,
             )
         };
+        // Fused head argmax (fused-gemv-argmax-head): the head GEMV reduces
+        // straight to the winning id — the 248k-row logits are never
+        // materialized. Exact by construction (same per-row bits, same tie
+        // rule; fork bench task `argmax-head` gates it). Opt-in via
+        // LMBRRR_FUSED_ARGMAX=1 until the production A/B ships a default.
+        let fused_argmax = model.supports_fused_head_argmax()
+            && std::env::var("LMBRRR_FUSED_ARGMAX").is_ok_and(|v| v == "1");
+        // Holds the pre-reduced [1] id between iterations on the fused path
+        // (the first iteration reduces the prefill logits normally).
+        let mut fused_arg: Option<Tensor> = None;
         let mut produced = 0u64;
         let mut consumed = 0u64;
         loop {
@@ -285,7 +295,10 @@ pub fn generate_tokens(
                 (produced as usize) < generation.max_new_tokens && !eos_reached;
             if can_encode {
                 let sampling_start = Instant::now();
-                let next_id = model.remap_head_id(&logits.argmax(D::Minus1)?)?;
+                let next_id = match fused_arg.take() {
+                    Some(arg) => model.remap_head_id(&arg)?,
+                    None => model.remap_head_id(&logits.argmax(D::Minus1)?)?,
+                };
                 ring.slice_set(&next_id, 0, produced as usize)?;
                 produced += 1;
                 metal_dev
@@ -295,12 +308,21 @@ pub fn generate_tokens(
                 if (produced as usize) < generation.max_new_tokens {
                     let decode_model_start = Instant::now();
                     let input = next_id.reshape((1, 1))?;
-                    logits = model.forward(
-                        &input,
-                        None::<&ProcessedImages>,
-                        downsample_mode,
-                        position,
-                    )?;
+                    if fused_argmax {
+                        fused_arg = Some(model.forward_argmax(
+                            &input,
+                            None::<&ProcessedImages>,
+                            downsample_mode,
+                            position,
+                        )?);
+                    } else {
+                        logits = model.forward(
+                            &input,
+                            None::<&ProcessedImages>,
+                            downsample_mode,
+                            position,
+                        )?;
+                    }
                     decode_model_elapsed += decode_model_start.elapsed();
                     position += 1;
                 }

@@ -693,6 +693,40 @@ impl MiniCpmForConditionalGeneration {
         self.lm_head.forward(&hidden)
     }
 
+    /// Whether [`Self::forward_argmax`] is available: a Metal-resident q4_K
+    /// quantized head (the deployed configuration).
+    pub fn supports_fused_head_argmax(&self) -> bool {
+        self.device.is_metal()
+            && self
+                .lm_head
+                .qtensor()
+                .is_some_and(|q| q.dtype() == candle::quantized::GgmlDType::Q4K)
+    }
+
+    /// Greedy fused head: forward to the last position's hidden state, then
+    /// the fused GEMV->argmax pair — the 248k-row logits are never
+    /// materialized. Returns the [1] U32 argmax id (feed remap_head_id, same
+    /// as `logits.argmax(D::Minus1)` on the stored-logits path; exact by
+    /// construction, see fused_head.rs).
+    pub fn forward_argmax(
+        &mut self,
+        input_ids: &Tensor,
+        images: Option<&ProcessedImages>,
+        downsample_mode: &str,
+        offset: usize,
+    ) -> Result<Tensor> {
+        let (_, seq_len) = input_ids.dims2()?;
+        let hidden = self
+            .forward_hidden(input_ids, images, downsample_mode, offset)?
+            .narrow(1, seq_len - 1, 1)?
+            .contiguous()?;
+        let head = self
+            .lm_head
+            .qtensor()
+            .ok_or_else(|| candle::Error::Msg("fused head argmax needs a quantized head".into()))?;
+        crate::fused_head::q4k_head_argmax(&hidden, head).map_err(candle::Error::wrap)
+    }
+
     /// Dense logits plus the post-final-norm hidden states — the tensor MTP
     /// drafting feeds on (each accepted position's hidden pairs with its
     /// successor token in the head's cache).
