@@ -22,7 +22,9 @@ use candle::quantized::k_quants::BlockQ4K;
 use candle::quantized::{GgmlDType, QTensor};
 use candle::{DType, MetalDevice, Storage, Tensor};
 use candle_metal_kernels::metal::Buffer;
-use candle_metal_kernels::call_quantized_matmul_mm2d_q4k;
+use candle_metal_kernels::{
+    call_quantized_matmul_mm2d_q4k, call_quantized_matmul_mm2d_q4k_splitk,
+};
 
 /// Route master switch (default off until the verify refit ships it).
 pub fn mm2d_enabled() -> bool {
@@ -60,6 +62,13 @@ pub fn mm2d_body_min_m() -> usize {
 }
 
 const HEAD_CLASS_MIN_N: usize = 100_000;
+
+/// Split-K for body shapes (LMBRRR_MM2D_SPLITK=1). Default off until the
+/// in-loop A/B arbitrates (the t32 lesson: isolated wins do not transfer).
+pub fn mm2d_splitk_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D_SPLITK").is_ok_and(|v| v != "0"))
+}
 
 /// Process-wide kill switch, set on the first dispatch failure (pre-26.4 OS).
 static MM2D_BROKEN: AtomicBool = AtomicBool::new(false);
@@ -177,22 +186,59 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
         .with_label("mm2d_dst")
         .build()?;
 
+    // Split-K for body shapes (LMBRRR_MM2D_SPLITK=1, in-loop arbitrated):
+    // small-N grids under-occupy the GPU on a serial K loop; partition the
+    // K/32 slices so the grid reaches ~128 threadgroups.
+    let n_splits = if planes.n < HEAD_CLASS_MIN_N && mm2d_splitk_enabled() {
+        (128 / (planes.n_pad / 64)).clamp(1, planes.k / 32)
+    } else {
+        1
+    };
+    let partials = if n_splits > 1 {
+        Some(
+            device
+                .new_buffer_builder()
+                .with_size(n_splits * 8 * planes.n_pad * 4)
+                .with_label("mm2d_splitk_partials")
+                .build()?,
+        )
+    } else {
+        None
+    };
+
     let dispatch = || -> Result<()> {
         let encoder = device.command_encoder().context("mm2d encoder")?;
-        call_quantized_matmul_mm2d_q4k(
-            device.metal_device(),
-            &encoder,
-            device.kernels(),
-            (m, planes.n, planes.n_pad, planes.k),
-            ms.buffer(),
-            lhs_offset,
-            &planes.nibbles,
-            &planes.dsc,
-            &planes.dmm,
-            0,
-            &dst,
-        )
-        .context("mm2d matmul dispatch")?;
+        match &partials {
+            Some(partials) => call_quantized_matmul_mm2d_q4k_splitk(
+                device.metal_device(),
+                &encoder,
+                device.kernels(),
+                (m, planes.n, planes.n_pad, planes.k, n_splits),
+                ms.buffer(),
+                lhs_offset,
+                &planes.nibbles,
+                &planes.dsc,
+                &planes.dmm,
+                partials,
+                0,
+                &dst,
+            )
+            .context("mm2d splitk dispatch")?,
+            None => call_quantized_matmul_mm2d_q4k(
+                device.metal_device(),
+                &encoder,
+                device.kernels(),
+                (m, planes.n, planes.n_pad, planes.k),
+                ms.buffer(),
+                lhs_offset,
+                &planes.nibbles,
+                &planes.dsc,
+                &planes.dmm,
+                0,
+                &dst,
+            )
+            .context("mm2d matmul dispatch")?,
+        }
         Ok(())
     };
     if let Err(err) = dispatch() {
