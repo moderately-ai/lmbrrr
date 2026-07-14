@@ -926,6 +926,11 @@ fn bench_quant_matmul(
                 std::fs::remove_dir_all(&path)?;
             }
             md.capture(&path)?;
+            // Metal capture records only command buffers CREATED inside the
+            // window, and candle keeps one pre-created; retire it so the
+            // captured forwards land on a fresh buffer (else the trace is
+            // empty).
+            device.synchronize()?;
             for _ in 0..3 {
                 linear.forward(&input)?;
             }
