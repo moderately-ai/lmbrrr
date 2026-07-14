@@ -10,6 +10,7 @@ pub mod generate;
 pub mod image_processor;
 pub mod minicpm;
 pub mod ngram_draft;
+pub mod pack;
 pub mod token_recycle;
 pub mod prompt;
 pub mod quant_convert;

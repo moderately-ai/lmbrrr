@@ -545,11 +545,33 @@ impl MiniCpmForConditionalGeneration {
     /// gather). The 508 MB/token head read is 34% of all decode weight
     /// bytes; quality is advisory per campaign policy.
     pub fn quantize_lm_head(&mut self, ggml: candle::quantized::GgmlDType) -> Result<()> {
+        self.quantize_lm_head_with_pack(ggml, None)
+    }
+
+    /// Pack-aware head quantization: a pack hit uploads the stored q blocks
+    /// (bit-identical; same CPU quantizer); a miss quantizes and records the
+    /// bytes for the pack write.
+    pub fn quantize_lm_head_with_pack(
+        &mut self,
+        ggml: candle::quantized::GgmlDType,
+        pack: Option<&crate::pack::PackStore>,
+    ) -> Result<()> {
+        if let Some(pack) = pack {
+            if let Some(q) = pack.take("lm_head") {
+                self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q)?;
+                return Ok(());
+            }
+        }
         let weight = self.model.language_model.embeddings().clone();
         let cpu_f32 = weight
             .to_dtype(candle::DType::F32)?
             .to_device(&Device::Cpu)?;
-        let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
+        let q = match pack {
+            Some(pack) => pack
+                .quantize_and_record("lm_head", &cpu_f32, ggml)
+                .map_err(|e| candle::Error::Msg(format!("pack lm_head: {e:#}")))?,
+            None => candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?,
+        };
         self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q)?;
         Ok(())
     }

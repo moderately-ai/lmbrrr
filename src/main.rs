@@ -920,6 +920,8 @@ struct QuantizedLoadStats {
     backend: String,
     quantized_data_bytes: u64,
     dense_equivalent_bytes: usize,
+    pack_status: String,
+    quantize_seconds: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -966,18 +968,38 @@ fn load_model_with_optional_quantization(
     Option<QuantizedLoadStats>,
 )> {
     let (mut model, load_elapsed) = load_model(bundle, dtype, device)?;
-    if let Some(tier) = quantize_lm_head {
-        model.quantize_lm_head(tier.ggml())?;
-    }
+    let quantize_start = Instant::now();
     let Some(manifest) = quantized_manifest else {
+        if let Some(tier) = quantize_lm_head {
+            model.quantize_lm_head(tier.ggml())?;
+        }
         return Ok((model, load_elapsed, None));
     };
-    let artifact = QuantizedTextArtifact::from_manifest(manifest, device, dtype)?;
+    // GGML-ready weight pack: a valid sidecar skips the per-start
+    // decode + requantize entirely (the measured 8-16 s startup tax); a
+    // miss records the bytes and writes the pack for the next start.
+    let pack = std::sync::Arc::new(lmbrrr::pack::PackStore::open(
+        manifest,
+        quantize_lm_head.map(|t| t.ggml()),
+        device,
+    )?);
+    if let Some(tier) = quantize_lm_head {
+        model.quantize_lm_head_with_pack(tier.ggml(), Some(&pack))?;
+    }
+    let mut artifact = QuantizedTextArtifact::from_manifest(manifest, device, dtype)?;
+    artifact.set_pack(pack.clone());
     let quantized_tensors = artifact.quantized_tensor_count();
     let backend = artifact.backend().to_string();
     let quantized_data_bytes = artifact.quantized_data_bytes();
     let dense_equivalent_bytes = artifact.dense_equivalent_bytes();
     let replaced_text_linears = model.apply_quantized_text_artifact(&artifact)?;
+    if let Some(written) = pack.finish()? {
+        eprintln!(
+            "weight pack written: {} (next start skips requantization)",
+            written.display()
+        );
+    }
+    let quantize_seconds = secs(quantize_start.elapsed());
     Ok((
         model,
         load_elapsed,
@@ -988,6 +1010,8 @@ fn load_model_with_optional_quantization(
             backend,
             quantized_data_bytes,
             dense_equivalent_bytes,
+            pack_status: pack.status().to_string(),
+            quantize_seconds,
         }),
     ))
 }
@@ -1020,7 +1044,7 @@ fn maybe_restrict_head(model: &mut MiniCpmForConditionalGeneration, m: &ModelArg
             m.target_head_vocab_ranking.display()
         )
     })?;
-    let ranking: Ranking = serde_json::from_reader(file)
+    let ranking: Ranking = serde_json::from_reader(std::io::BufReader::new(file))
         .with_context(|| format!("parse {}", m.target_head_vocab_ranking.display()))?;
     if n > ranking.ids.len() {
         anyhow::bail!(
@@ -1134,6 +1158,8 @@ fn quantized_load_json(load: &Option<QuantizedLoadStats>) -> serde_json::Value {
             "quantized_data_bytes": load.quantized_data_bytes,
             "dense_equivalent_bytes": load.dense_equivalent_bytes,
             "approx_dense_bytes_avoided": load.dense_equivalent_bytes.saturating_sub(load.quantized_data_bytes as usize),
+            "pack_status": load.pack_status,
+            "quantize_seconds": load.quantize_seconds,
         }),
         None => serde_json::Value::Null,
     }

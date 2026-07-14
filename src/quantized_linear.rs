@@ -125,13 +125,14 @@ pub struct QuantizedTextArtifact {
     tensors: HashMap<String, QuantizedTensor>,
     device: Device,
     dtype: DType,
+    pack: Option<Arc<crate::pack::PackStore>>,
 }
 
 impl QuantizedTextArtifact {
     pub fn from_manifest(path: &Path, device: &Device, dtype: DType) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("open quantized manifest {}", path.display()))?;
-        let manifest: QuantizedManifest = serde_json::from_reader(file)
+        let manifest: QuantizedManifest = serde_json::from_reader(std::io::BufReader::new(file))
             .with_context(|| format!("parse quantized manifest {}", path.display()))?;
         if manifest.kind != "lmbrrr_mixed_precision_weights" {
             anyhow::bail!(
@@ -182,7 +183,15 @@ impl QuantizedTextArtifact {
             tensors,
             device: device.clone(),
             dtype,
+            pack: None,
         })
+    }
+
+    /// Attaches the GGML-ready weight pack: subsequent loads consume packed
+    /// tensors instead of decode+requantize, and misses are recorded for the
+    /// pack write (see crate::pack).
+    pub fn set_pack(&mut self, pack: Arc<crate::pack::PackStore>) {
+        self.pack = Some(pack);
     }
 
     pub fn manifest_path(&self) -> &Path {
@@ -194,7 +203,10 @@ impl QuantizedTextArtifact {
     }
 
     pub fn backend(&self) -> &'static str {
-        "candle_qtensor_requantized"
+        match &self.pack {
+            Some(pack) if pack.hit() => "candle_qtensor_packed",
+            _ => "candle_qtensor_requantized",
+        }
     }
 
     pub fn quantized_data_bytes(&self) -> u64 {
@@ -220,14 +232,36 @@ impl QuantizedTextArtifact {
         let Some(tensor) = self.tensors.get(name) else {
             return Ok(None);
         };
+        if let Some(pack) = &self.pack {
+            if let Some(qweight) = pack.take(name) {
+                return Ok(Some(MixedLinear::from_qtensor(qweight)?));
+            }
+        }
         let values = self.load_values(name, tensor)?;
         let cpu_weight = Tensor::from_vec(values, tensor.shape.clone(), &Device::Cpu)?;
         let dtype = tensor
             .ggml_dtype()
             .with_context(|| format!("map quantized tensor format for {name}"))?;
-        let qweight = QTensor::quantize_onto(&cpu_weight, dtype, &self.device)
+        let qweight = self
+            .quantize_for_device(name, &cpu_weight, dtype)
             .with_context(|| format!("requantize {name} into Candle {dtype:?} QTensor"))?;
         Ok(Some(MixedLinear::from_qtensor(qweight)?))
+    }
+
+    /// Slow-path quantization, routed through the pack when attached so the
+    /// bytes get recorded for the pack write (bit-identical either way: the
+    /// pack runs the same CPU quantizer as quantize_onto).
+    fn quantize_for_device(
+        &self,
+        key: &str,
+        cpu_weight: &Tensor,
+        dtype: GgmlDType,
+    ) -> Result<QTensor> {
+        match &self.pack {
+            Some(pack) => pack.quantize_and_record(key, cpu_weight, dtype),
+            None => QTensor::quantize_onto(cpu_weight, dtype, &self.device)
+                .context("quantize_onto"),
+        }
     }
 
     /// Loads several [out, in] weight tensors as ONE row-concatenated
@@ -243,6 +277,12 @@ impl QuantizedTextArtifact {
             match self.tensors.get(*name) {
                 Some(tensor) => tensors.push((*name, tensor)),
                 None => return Ok(None),
+            }
+        }
+        let key = names.join("+");
+        if let Some(pack) = &self.pack {
+            if let Some(qweight) = pack.take(&key) {
+                return Ok(Some(MixedLinear::from_qtensor(qweight)?));
             }
         }
         let in_dim = tensors[0].1.shape[1];
@@ -272,7 +312,8 @@ impl QuantizedTextArtifact {
             values.extend(self.load_values(name, tensor)?);
         }
         let cpu_weight = Tensor::from_vec(values, (out_dim, in_dim), &Device::Cpu)?;
-        let qweight = QTensor::quantize_onto(&cpu_weight, dtype, &self.device)
+        let qweight = self
+            .quantize_for_device(&key, &cpu_weight, dtype)
             .with_context(|| format!("requantize fused {names:?} into {dtype:?} QTensor"))?;
         Ok(Some(MixedLinear::from_qtensor(qweight)?))
     }

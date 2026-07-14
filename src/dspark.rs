@@ -78,7 +78,7 @@ impl DsparkConfig {
         let path = dir.join("config.json");
         let file =
             File::open(&path).with_context(|| format!("open drafter config {}", path.display()))?;
-        serde_json::from_reader(file)
+        serde_json::from_reader(std::io::BufReader::new(file))
             .with_context(|| format!("parse drafter config {}", path.display()))
     }
 }

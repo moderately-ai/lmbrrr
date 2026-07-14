@@ -32,7 +32,7 @@ impl MiniCpmConfig {
         let path = path.as_ref();
         let file = File::open(path).with_context(|| format!("open config {}", path.display()))?;
         let mut cfg: Self =
-            serde_json::from_reader(file).with_context(|| format!("parse {}", path.display()))?;
+            serde_json::from_reader(std::io::BufReader::new(file)).with_context(|| format!("parse {}", path.display()))?;
         cfg.vision_config.insert_layer_id = cfg.insert_layer_id;
         Ok(cfg)
     }
@@ -134,7 +134,7 @@ impl PreprocessorConfig {
         let path = path.as_ref();
         let file =
             File::open(path).with_context(|| format!("open preprocessor {}", path.display()))?;
-        serde_json::from_reader(file).with_context(|| format!("parse {}", path.display()))
+        serde_json::from_reader(std::io::BufReader::new(file)).with_context(|| format!("parse {}", path.display()))
     }
 }
 
@@ -149,7 +149,7 @@ impl GenerationConfig {
         let path = path.as_ref();
         let file = File::open(path)
             .with_context(|| format!("open generation config {}", path.display()))?;
-        serde_json::from_reader(file).with_context(|| format!("parse {}", path.display()))
+        serde_json::from_reader(std::io::BufReader::new(file)).with_context(|| format!("parse {}", path.display()))
     }
 }
 

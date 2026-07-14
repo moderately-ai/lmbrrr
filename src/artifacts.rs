@@ -84,7 +84,7 @@ fn hub_load_safetensors(repo: &ApiRepo, json_file: &str) -> Result<Vec<PathBuf>>
         .with_context(|| format!("download {json_file}"))?;
     let json_file =
         File::open(&json_path).with_context(|| format!("open {}", json_path.display()))?;
-    let json: serde_json::Value = serde_json::from_reader(json_file)
+    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(json_file))
         .with_context(|| format!("parse {}", json_path.display()))?;
     let weight_map = json
         .get("weight_map")
@@ -106,7 +106,7 @@ fn local_load_safetensors(dir: &Path, json_file: &str) -> Result<Vec<PathBuf>> {
     let json_path = dir.join(json_file);
     let json_file =
         File::open(&json_path).with_context(|| format!("open {}", json_path.display()))?;
-    let json: serde_json::Value = serde_json::from_reader(json_file)
+    let json: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(json_file))
         .with_context(|| format!("parse {}", json_path.display()))?;
     let weight_map = json
         .get("weight_map")

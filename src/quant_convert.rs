@@ -389,7 +389,7 @@ pub fn convert_mixed_precision(options: ConversionOptions) -> Result<serde_json:
 
 fn read_sensitivity(path: &Path) -> Result<SensitivityArtifact> {
     let file = File::open(path).with_context(|| format!("open sensitivity {}", path.display()))?;
-    serde_json::from_reader(file).with_context(|| format!("parse sensitivity {}", path.display()))
+    serde_json::from_reader(std::io::BufReader::new(file)).with_context(|| format!("parse sensitivity {}", path.display()))
 }
 
 fn validate_sensitivity(sensitivity: &SensitivityArtifact) -> Result<()> {
