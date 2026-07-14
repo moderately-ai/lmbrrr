@@ -1,7 +1,7 @@
 ---
 id: eval-host-loop-budget-census
 title: "EVAL: host-loop budget census — where the non-GPU milliseconds go in greedy decode"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: []

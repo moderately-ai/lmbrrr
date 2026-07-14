@@ -2,7 +2,7 @@
 id: metal-gpu-timestamp-meter
 title: In-binary GPU timestamp meter (per-command-buffer busy/idle, no Xcode)
 status: todo
-priority: p3
+priority: p2
 dependencies: []
 related: []
 scopes: [candle-fork]
