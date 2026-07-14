@@ -50,11 +50,29 @@ impl MixedLinear {
             weight.dtype(),
             GgmlDType::Q8_0 | GgmlDType::Q4K | GgmlDType::Q6K
         );
+        // Tensor-op planes build EAGERLY at load when the route is enabled:
+        // the CPU repack must never land inside the decode window (it
+        // contaminated the first verify's timing when lazy). Load-time cost
+        // is reported via load_seconds.
+        let mm2d = std::sync::OnceLock::new();
+        if crate::mm2d::mm2d_enabled() && weight.dtype() == GgmlDType::Q4K {
+            if let candle::Device::Metal(dev) = weight.device() {
+                match crate::mm2d::Mm2dPlanes::from_qtensor(&weight, &dev) {
+                    Ok(p) => {
+                        let _ = mm2d.set(Some(p));
+                    }
+                    Err(err) => {
+                        eprintln!("warning: mm2d repack failed, wide route stays ({err})");
+                        let _ = mm2d.set(None);
+                    }
+                }
+            }
+        }
         Ok(Self::QMatMul {
             matmul: Arc::new(QMatMul::from_qtensor(weight)?),
             force_f32_input: true,
             bf16_direct,
-            mm2d: Arc::new(std::sync::OnceLock::new()),
+            mm2d: Arc::new(mm2d),
         })
     }
 
@@ -99,29 +117,7 @@ impl MixedLinear {
                         // any dispatch failure disables it process-wide and
                         // falls through to the wide route.
                         if crate::mm2d::mm2d_eligible(xs) {
-                            let planes = mm2d.get_or_init(|| {
-                                let q = match matmul.as_ref() {
-                                    QMatMul::QTensor(q)
-                                        if q.dtype() == GgmlDType::Q4K =>
-                                    {
-                                        q
-                                    }
-                                    _ => return None,
-                                };
-                                let candle::Device::Metal(dev) = xs.device() else {
-                                    return None;
-                                };
-                                match crate::mm2d::Mm2dPlanes::from_qtensor(q, &dev) {
-                                    Ok(p) => Some(p),
-                                    Err(err) => {
-                                        eprintln!(
-                                            "warning: mm2d repack failed, wide route stays ({err})"
-                                        );
-                                        None
-                                    }
-                                }
-                            });
-                            if let Some(planes) = planes {
+                            if let Some(Some(planes)) = mm2d.get() {
                                 if let Ok(out) = crate::mm2d::mm2d_q4k_forward(xs, planes) {
                                     return Ok(out);
                                 }
