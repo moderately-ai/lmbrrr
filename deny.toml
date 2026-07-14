@@ -1,0 +1,64 @@
+# cargo-deny gate (ticket cargo-deny-license-gate): licenses, bans,
+# advisories for everything in the resolved dependency graph.
+#
+# The license section exists first and foremost for the planned gpui GUI:
+# zed issue #55470 documents a transitive GPL-3.0 static-link chain
+# (gpui -> sum_tree -> ztracing) that would contaminate a distributed
+# binary despite gpui's own Apache-2.0 grant. Any copyleft license anywhere
+# in the graph must FAIL this check; exceptions require an explicit entry
+# below with a reason.
+#
+# Run: `cargo deny check` (wired into evals/run_gate_battery.sh).
+
+[graph]
+all-features = false
+
+[licenses]
+# Permissive-only. Anything not on this list (notably GPL/AGPL/LGPL/MPL
+# copyleft families) fails the check.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# Scoped exceptions, each with a reason. Do NOT add blanket copyleft
+# allowances here.
+exceptions = [
+    # MPL-2.0 is file-level weak copyleft: linking an UNMODIFIED upstream
+    # crate into a binary carries no obligations beyond source availability
+    # of that crate itself. Pulled in by hf-hub -> dirs -> dirs-sys.
+    { crate = "option-ext", allow = ["MPL-2.0"] },
+]
+
+[bans]
+# Duplicate versions are a size/compile-time smell, not a blocker.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[advisories]
+yanked = "warn"
+ignore = [
+    # paste is archived/unmaintained (not a vulnerability). Pulled in by
+    # gemm/tokenizers/ratatui; nothing for us to action until upstreams move
+    # to a fork. Revisit if a real advisory lands against it.
+    "RUSTSEC-2024-0436",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    # Our pinned candle fork (Metal kernels).
+    "https://github.com/tomsanbear/candle",
+    # When lmbrrr-gui lands, add (and ONLY then — unused entries warn):
+    #   https://github.com/zed-industries/zed
+    #   https://github.com/longbridge/gpui-component
+]

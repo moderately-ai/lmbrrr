@@ -38,6 +38,11 @@ fail() { echo "GATE FAILED at: $*" >&2; exit 1; }
 [ -f "$MANIFEST" ] || fail "preflight — $MANIFEST missing (see artifacts recovery notes in tickets)"
 [ -d "$DRAFTER" ] || fail "preflight — $DRAFTER missing"
 
+step "licenses/sources/advisories (cargo-deny)"
+command -v cargo-deny >/dev/null 2>&1 \
+  || fail "cargo-deny not installed (cargo install cargo-deny --locked)"
+cargo deny check licenses sources advisories || fail "cargo-deny"
+
 step "build"
 cargo build --release || fail "build"
 

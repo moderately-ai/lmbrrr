@@ -424,6 +424,49 @@ def _train_impl(
     volume.commit()
 
 
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=12 * 3600)
+def mtp_distill(
+    input_name: str = "regen-r4-400k.jsonl",
+    num_samples: int = 40000,
+    epochs: int = 2,
+    lr: float = 5e-5,
+    max_tokens: int = 1536,
+    exp_name: str = "mtp-distill-r1",
+) -> None:
+    """Align the Qwen3.5-0.8B vendor MTP head to the fakequant target
+    (mtp_distill.py): (final hidden, next token) -> next-next token over the
+    round-4 regen corpus. Single H100; the head is ~30M params, the teacher
+    forward dominates and is cheap at 0.8B. Prints the vendor-baseline
+    holdout top-1 (the position-1 acceptance proxy) before training and at
+    every eval; best checkpoint lands at /vol/runs/<exp_name>/mtp.safetensors
+    (vendor tensor names — drop-in for lmbrrr --drafter-mtp)."""
+    monitor = GpuMonitor(tag=f"mtp-distill-{exp_name}")
+    monitor.start()
+    _run(
+        [
+            "python",
+            "/lmbrrr-dspark/mtp_distill.py",
+            "--model",
+            "/vol/models/minicpm-v46-fakequant-q4kft",
+            "--input",
+            f"/vol/data/{input_name}",
+            "--output-dir",
+            f"/vol/runs/{exp_name}",
+            "--num-samples",
+            str(num_samples),
+            "--epochs",
+            str(epochs),
+            "--lr",
+            str(lr),
+            "--max-tokens",
+            str(max_tokens),
+        ],
+        env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
+    )
+    print("MTP_DISTILL_GPU", json.dumps(monitor.stop()), flush=True)
+    volume.commit()
+
+
 @app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=1024 * 1024)
 def train(
     cache_name: str = "target-cache-smoke",
