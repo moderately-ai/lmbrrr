@@ -67,16 +67,21 @@ def main() -> int:
             offset = (rep - 1) % len(arms)
             for name, drafter, extra in arms[offset:] + arms[:offset]:
                 out = ROOT / f"artifacts/suite-{args.tag}-{name}-{qid}-{rep}.json"
+                # MTP arms name a .safetensors weights file instead of a
+                # DSpark drafter dir; they take --drafter-mtp and none of the
+                # DSpark-only defaults (gamma / drafter-quantize / cost model).
+                mtp_arm = drafter.endswith(".safetensors")
+                drafter_flag = "--drafter-mtp" if mtp_arm else "--drafter"
                 cmd = [str(ROOT / "target/release/lmbrrr"), "dspark-run",
-                       "--drafter", drafter, "--prompt", prompt,
+                       drafter_flag, drafter, "--prompt", prompt,
                        "--max-new-tokens", str(args.max_new_tokens)]
-                # Defaults an arm's extra flags may override (dspark-run
-                # rejects duplicate flags).
-                for flag, value in [("--quantized-manifest", str(ROOT / QMAN)),
-                                    ("--gamma", str(args.gamma)),
-                                    ("--drafter-quantize", "q8-0"),
-                                    ("--quantize-lm-head", "q4k"),
-                                    ("--cost-model", str(ROOT / COST))]:
+                defaults = [("--quantized-manifest", str(ROOT / QMAN)),
+                            ("--quantize-lm-head", "q4k")]
+                if not mtp_arm:
+                    defaults += [("--gamma", str(args.gamma)),
+                                 ("--drafter-quantize", "q8-0"),
+                                 ("--cost-model", str(ROOT / COST))]
+                for flag, value in defaults:
                     if flag not in extra:
                         cmd += [flag, value]
                 cmd += ["--output", str(out), *extra]
