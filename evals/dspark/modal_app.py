@@ -1508,3 +1508,68 @@ def round4_prep_and_train() -> None:
         checkpoint=f"runs/checkpoints/lmbrrr/{R4_EXP}/step_latest",
         target_model="/vol/models/minicpm-v46-fakequant-q4kft",
     )
+
+
+@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=7200)
+def rank_tokens(
+    input_name: str = "regen-r4-400k.jsonl",
+    output_name: str = "frspec-assistant-ranked.json",
+    keep_top: int = 65536,
+) -> None:
+    """FR-Spec frequency ranking: token counts over the regenerated ASSISTANT
+    text (exactly the distribution the drafter must predict), special/control
+    tokens pinned at the ranking front so EOS and template tokens stay
+    draftable at any slice size. Emits /vol/artifacts/<output_name> with an
+    "ids" array (most-frequent first, keep_top long) + count metadata."""
+    from collections import Counter
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(TARGET_MODEL, trust_remote_code=True)
+    counts: Counter = Counter()
+    rows = 0
+    toks = 0
+    with open(f"/vol/data/{input_name}", encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            if row.get("status") != "success":
+                continue
+            for msg in row.get("conversations", []):
+                if msg.get("role") != "assistant":
+                    continue
+                ids = tokenizer.encode(msg["content"], add_special_tokens=False)
+                counts.update(ids)
+                toks += len(ids)
+            rows += 1
+            if rows % 20000 == 0:
+                print(f"progress: rows={rows} tokens={toks}", flush=True)
+
+    special = [i for i in sorted(set(tokenizer.all_special_ids)) if i is not None]
+    ranked = special + [
+        t for t, _ in counts.most_common() if t not in set(special)
+    ]
+    seen = set(ranked)
+    # Back-fill by id order so any slice size up to the full vocab is valid.
+    vocab_size = len(tokenizer)
+    ranked.extend(i for i in range(vocab_size) if i not in seen)
+    ranked = ranked[:keep_top]
+
+    coverage = sum(counts[t] for t in ranked[: 32768]) / max(toks, 1)
+    os.makedirs("/vol/artifacts", exist_ok=True)
+    payload = {
+        "ids": ranked,
+        "source": input_name,
+        "rows": rows,
+        "assistant_tokens": toks,
+        "distinct_tokens": len(counts),
+        "top32k_coverage": coverage,
+        "special_pinned": len(special),
+    }
+    with open(f"/vol/artifacts/{output_name}", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    volume.commit()
+    print(
+        f"done: rows={rows} tokens={toks} distinct={len(counts)} "
+        f"top32k_coverage={coverage:.4f} -> /vol/artifacts/{output_name}",
+        flush=True,
+    )
