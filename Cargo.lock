@@ -221,7 +221,7 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
+source = "git+https://github.com/tomsanbear/candle.git?rev=00f836ab#00f836abc762ed00c0115707f5e32247cd554f83"
 dependencies = [
  "byteorder",
  "candle-metal-kernels",
@@ -250,9 +250,10 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
+source = "git+https://github.com/tomsanbear/candle.git?rev=00f836ab#00f836abc762ed00c0115707f5e32247cd554f83"
 dependencies = [
  "block2",
+ "dispatch2",
  "half",
  "objc2",
  "objc2-foundation",
@@ -265,7 +266,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
+source = "git+https://github.com/tomsanbear/candle.git?rev=00f836ab#00f836abc762ed00c0115707f5e32247cd554f83"
 dependencies = [
  "candle-core",
  "candle-metal-kernels",
@@ -282,7 +283,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
+source = "git+https://github.com/tomsanbear/candle.git?rev=00f836ab#00f836abc762ed00c0115707f5e32247cd554f83"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -300,7 +301,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=9232f7ab#9232f7ab50d7024f0223f565bdfbd35f53bf135e"
+source = "git+https://github.com/tomsanbear/candle.git?rev=00f836ab#00f836abc762ed00c0115707f5e32247cd554f83"
 dependencies = [
  "ug",
  "ug-metal",
@@ -737,6 +738,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.0",
+ "block2",
+ "libc",
  "objc2",
 ]
 
@@ -822,7 +825,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2667,7 +2670,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3078,7 +3081,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3684,7 +3687,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

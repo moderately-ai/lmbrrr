@@ -24,6 +24,9 @@ pub enum MixedLinear {
         // The fork's Metal kernels take BF16 activations directly for these
         // block dtypes, skipping the input-cast dispatch per call.
         bf16_direct: bool,
+        // Lazily-built tensor-op planes (LMBRRR_MM2D verify route); shared
+        // across clones so the repack happens once per weight.
+        mm2d: Arc<std::sync::OnceLock<Option<crate::mm2d::Mm2dPlanes>>>,
     },
 }
 
@@ -37,6 +40,7 @@ impl MixedLinear {
             matmul: Arc::new(QMatMul::Tensor(weight)),
             force_f32_input: false,
             bf16_direct: false,
+            mm2d: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -50,6 +54,7 @@ impl MixedLinear {
             matmul: Arc::new(QMatMul::from_qtensor(weight)?),
             force_f32_input: true,
             bf16_direct,
+            mm2d: Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -83,9 +88,45 @@ impl MixedLinear {
                 matmul,
                 force_f32_input,
                 bf16_direct,
+                mm2d,
             } => {
                 if *force_f32_input && xs.dtype() != DType::F32 {
                     if *bf16_direct && xs.dtype() == DType::BF16 && xs.device().is_metal() {
+                        // Tensor-op route for verify-chunk shapes (m in
+                        // [2,8]): the matrix units run the whole 8-row tile
+                        // at ~1.25x one GEMV read. Margin-class (not
+                        // bit-compatible with the wide kernels), env-gated;
+                        // any dispatch failure disables it process-wide and
+                        // falls through to the wide route.
+                        if crate::mm2d::mm2d_eligible(xs) {
+                            let planes = mm2d.get_or_init(|| {
+                                let q = match matmul.as_ref() {
+                                    QMatMul::QTensor(q)
+                                        if q.dtype() == GgmlDType::Q4K =>
+                                    {
+                                        q
+                                    }
+                                    _ => return None,
+                                };
+                                let candle::Device::Metal(dev) = xs.device() else {
+                                    return None;
+                                };
+                                match crate::mm2d::Mm2dPlanes::from_qtensor(q, &dev) {
+                                    Ok(p) => Some(p),
+                                    Err(err) => {
+                                        eprintln!(
+                                            "warning: mm2d repack failed, wide route stays ({err})"
+                                        );
+                                        None
+                                    }
+                                }
+                            });
+                            if let Some(planes) = planes {
+                                if let Ok(out) = crate::mm2d::mm2d_q4k_forward(xs, planes) {
+                                    return Ok(out);
+                                }
+                            }
+                        }
                         // mv/mc routes write BF16 directly (fork bf16-dst
                         // kernels; bit-identical to F32 + cast), making the
                         // to_dtype a no-op; the m>=8 tile-mm route still
