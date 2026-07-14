@@ -1257,8 +1257,13 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let mut draft_seconds = 0.0f64;
     let draft_start = Instant::now();
     let (cu_logits, cu_post) = model.mtp_step(&prompt_hidden, &catchup_input)?;
-    let (mut next_first_draft, _) =
-        argmax_token(&cu_logits.narrow(1, n - 1, 1)?.squeeze(1)?, &device)?;
+    // draft_1 stays on device: the chain consumes it as the next step's
+    // token tensor and the ids come back in ONE readback per round.
+    let mut next_first_draft_dev = cu_logits
+        .narrow(1, n - 1, 1)?
+        .squeeze(1)?
+        .argmax(D::Minus1)?
+        .reshape((1, 1))?;
     let mut post_last = cu_post.narrow(1, n - 1, 1)?;
     device.synchronize()?;
     draft_seconds += secs(draft_start.elapsed());
@@ -1289,18 +1294,23 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 }
             }
             // Draft: draft_1 came from the previous catch-up; chain the rest
-            // on the head's own post-norm hidden.
+            // on the head's own post-norm hidden. Zero per-step host syncs:
+            // the device argmax (identical semantics to argmax_token's
+            // kernel, readback deferred) feeds the next step's embedding
+            // lookup directly; the drafted ids come back in one readback
+            // that also bounds the draft timing bucket. Device-side chunk
+            // assembly (killing this last readback) is the one-sync ticket.
             let round_draft_start = Instant::now();
-            let mut drafts = vec![next_first_draft];
+            let mut draft_ids_dev = vec![next_first_draft_dev.clone()];
             for _ in 1..depth {
-                let prev = *drafts.last().expect("drafts is non-empty");
-                let tok = Tensor::from_slice(&[prev], (1, 1), &device)?;
+                let tok = draft_ids_dev.last().expect("drafts is non-empty").clone();
                 let (logits_j, post_j) = model.mtp_step(&post_last.contiguous()?, &tok)?;
-                let (draft_j, _) = argmax_token(&logits_j.squeeze(1)?, &device)?;
-                drafts.push(draft_j);
+                draft_ids_dev.push(logits_j.squeeze(1)?.argmax(D::Minus1)?.reshape((1, 1))?);
                 post_last = post_j;
             }
-            device.synchronize()?;
+            let drafts = Tensor::cat(&draft_ids_dev.iter().collect::<Vec<_>>(), 1)?
+                .flatten_all()?
+                .to_vec1::<u32>()?;
             draft_seconds += secs(round_draft_start.elapsed());
             // Recursion pairs are approximations — drop them before verify;
             // the cache goes back to true-hidden committed pairs only.
@@ -1358,9 +1368,11 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             let cu_hidden = hidden.narrow(1, 0, accepted + 1)?.contiguous()?;
             let cu_tokens = Tensor::from_slice(&successors, (1, accepted + 1), &device)?;
             let (cu_logits, cu_post) = model.mtp_step(&cu_hidden, &cu_tokens)?;
-            let (first_draft, _) =
-                argmax_token(&cu_logits.narrow(1, accepted, 1)?.squeeze(1)?, &device)?;
-            next_first_draft = first_draft;
+            next_first_draft_dev = cu_logits
+                .narrow(1, accepted, 1)?
+                .squeeze(1)?
+                .argmax(D::Minus1)?
+                .reshape((1, 1))?;
             post_last = cu_post.narrow(1, accepted, 1)?;
             device.synchronize()?;
             draft_seconds += secs(cu_draft_start.elapsed());
