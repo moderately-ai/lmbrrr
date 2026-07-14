@@ -22,7 +22,7 @@ use candle::quantized::k_quants::BlockQ4K;
 use candle::quantized::{GgmlDType, QTensor};
 use candle::{DType, MetalDevice, Storage, Tensor};
 use candle_metal_kernels::metal::Buffer;
-use candle_metal_kernels::{call_mm2d_q4k_rowsums, call_quantized_matmul_mm2d_q4k};
+use candle_metal_kernels::call_quantized_matmul_mm2d_q4k;
 
 /// Route master switch (default off until the verify refit ships it).
 pub fn mm2d_enabled() -> bool {
@@ -134,11 +134,6 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
     };
     let lhs_offset = layout.start_offset() * 2;
 
-    let rs = device
-        .new_buffer_builder()
-        .with_size(m * (k / 32) * 4)
-        .with_label("mm2d_rowsums")
-        .build()?;
     let dst = device
         .new_buffer_builder()
         .with_size(m * planes.n * 2)
@@ -147,16 +142,6 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
 
     let dispatch = || -> Result<()> {
         let encoder = device.command_encoder().context("mm2d encoder")?;
-        call_mm2d_q4k_rowsums(
-            device.metal_device(),
-            &encoder,
-            device.kernels(),
-            (m, k),
-            ms.buffer(),
-            lhs_offset,
-            &rs,
-        )
-        .context("mm2d rowsums dispatch")?;
         call_quantized_matmul_mm2d_q4k(
             device.metal_device(),
             &encoder,
@@ -167,7 +152,6 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
             &planes.nibbles,
             &planes.dsc,
             &planes.dmm,
-            &rs,
             0,
             &dst,
         )
