@@ -424,7 +424,7 @@ def _train_impl(
     volume.commit()
 
 
-@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=12 * 3600)
+@app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600)
 def mtp_distill(
     input_name: str = "regen-r4-400k.jsonl",
     num_samples: int = 40000,
