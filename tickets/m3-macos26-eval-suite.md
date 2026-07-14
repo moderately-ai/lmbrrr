@@ -1,7 +1,7 @@
 ---
 id: m3-macos26-eval-suite
 title: "EVAL: M3/macOS-26 box battery — packed_numeric 4-bit unpack, Metal 4.1 probes, drift cross-check"
-status: blocked
+status: in-progress
 priority: p1
 dependencies: []
 related: []
