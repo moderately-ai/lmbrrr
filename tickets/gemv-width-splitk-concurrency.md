@@ -1,7 +1,7 @@
 ---
 id: gemv-width-splitk-concurrency
 title: GEMV width fusion, split-K, and barrier-minimal encoding
-status: todo
+status: blocked
 priority: p1
 dependencies: []
 related: []
