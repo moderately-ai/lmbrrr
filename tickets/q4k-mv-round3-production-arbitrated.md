@@ -1,7 +1,7 @@
 ---
 id: q4k-mv-round3-production-arbitrated
 title: "q4_K mv round 3: production-arbitrated kernel variants (nr0=2, rt2, K-amortization) + M3/macOS-26 packed_numeric"
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: []
