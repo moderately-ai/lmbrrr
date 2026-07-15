@@ -88,10 +88,10 @@ impl Default for Mm2dConfig {
 }
 
 impl Mm2dConfig {
-    /// The entrypoint's env resolution (LMBRRR_MM2D, _MIN_N, _BODY_MIN_M,
-    /// _HEAD_MIN_N, _SPLITK, _SPLIT_TGS, _PLANE_CACHE, _CACHE_DIR) over the
-    /// arbitrated defaults. The only place these variables are read.
+    /// The entrypoint's env resolution over the arbitrated defaults. The only
+    /// place these variables are read (keys in `crate::env_keys`).
     pub fn from_env() -> Self {
+        use crate::env_keys as k;
         let base = Self::default();
         let parse = |key: &str, default: usize| -> usize {
             std::env::var(key)
@@ -100,31 +100,27 @@ impl Mm2dConfig {
                 .unwrap_or(default)
         };
         Self {
-            enabled: std::env::var("LMBRRR_MM2D").is_ok_and(|v| v != "0"),
-            min_n: parse("LMBRRR_MM2D_MIN_N", base.min_n),
-            body_min_m: parse("LMBRRR_MM2D_BODY_MIN_M", base.body_min_m),
-            head_min_n: parse("LMBRRR_MM2D_HEAD_MIN_N", base.head_min_n),
-            splitk: std::env::var("LMBRRR_MM2D_SPLITK").map_or(base.splitk, |v| v != "0"),
-            split_target_tgs: parse("LMBRRR_MM2D_SPLIT_TGS", base.split_target_tgs),
-            plane_cache_dir: if std::env::var("LMBRRR_MM2D_PLANE_CACHE").is_ok_and(|v| v == "0")
-            {
+            enabled: std::env::var(k::MM2D).is_ok_and(|v| v != "0"),
+            min_n: parse(k::MM2D_MIN_N, base.min_n),
+            body_min_m: parse(k::MM2D_BODY_MIN_M, base.body_min_m),
+            head_min_n: parse(k::MM2D_HEAD_MIN_N, base.head_min_n),
+            splitk: std::env::var(k::MM2D_SPLITK).map_or(base.splitk, |v| v != "0"),
+            split_target_tgs: parse(k::MM2D_SPLIT_TGS, base.split_target_tgs),
+            plane_cache_dir: if std::env::var(k::MM2D_PLANE_CACHE).is_ok_and(|v| v == "0") {
                 None
             } else {
-                std::env::var("LMBRRR_MM2D_CACHE_DIR")
+                std::env::var(k::MM2D_CACHE_DIR)
                     .map(std::path::PathBuf::from)
                     .ok()
                     .or_else(default_plane_cache_dir)
             },
-            fused_verify_argmax: std::env::var("LMBRRR_FUSED_VERIFY_ARGMAX")
-                .is_ok_and(|v| v == "1"),
+            fused_verify_argmax: std::env::var(k::FUSED_VERIFY_ARGMAX).is_ok_and(|v| v == "1"),
         }
     }
 }
 
 fn default_plane_cache_dir() -> Option<std::path::PathBuf> {
-    Some(
-        std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".cache/lmbrrr/mm2d"),
-    )
+    Some(std::path::PathBuf::from(std::env::var(crate::env_keys::HOME).ok()?).join(".cache/lmbrrr/mm2d"))
 }
 
 /// Process-wide kill switch, set on the first dispatch failure (pre-26.4 OS).

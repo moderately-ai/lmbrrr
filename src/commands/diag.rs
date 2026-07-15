@@ -211,7 +211,7 @@ pub(crate) fn verify_table(args: VerifyTableArgs) -> Result<()> {
                 // final iteration so the chunk cost decomposes (used to chase
                 // the l=1 -> l=2 doubling). Host-side attribution: encode +
                 // queue backpressure per component, not GPU time.
-                let profile_this = std::env::var("LMBRRR_VT_PROFILE").is_ok_and(|v| v == "1")
+                let profile_this = std::env::var(lmbrrr::env_keys::VT_PROFILE).is_ok_and(|v| v == "1")
                     && iteration + 1 == args.warmup + args.iterations;
                 let vt_profiler = profile_this.then(Qwen35Profiler::new);
                 if let Some(p) = &vt_profiler {
@@ -465,7 +465,7 @@ pub(crate) fn trace_hidden_states(args: TraceArgs) -> Result<()> {
     // A GPU capture run wants a pristine step: no hidden-state recorder
     // readbacks polluting the trace.
     let capture_layers = if args.gpu_capture_step.is_some() {
-        if std::env::var("METAL_CAPTURE_ENABLED").is_err() {
+        if std::env::var(lmbrrr::env_keys::METAL_CAPTURE_ENABLED).is_err() {
             anyhow::bail!(
                 "--gpu-capture-step needs METAL_CAPTURE_ENABLED=1 in the environment \
                  (undocumented Metal requirement)"

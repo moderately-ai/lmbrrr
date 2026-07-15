@@ -67,21 +67,20 @@ impl KernelRouteConfig {
     /// place these vars are read). `LMBRRR_UNFUSED_*` invert their gate;
     /// `LMBRRR_FUSED_*`/`_DELTANET_V2` opt out with "0".
     pub fn from_env() -> Self {
+        use crate::env_keys as k;
         let base = Self::default();
         let unfused = |key: &str| std::env::var(key).is_ok_and(|v| v == "1");
-        let opt_out = |key: &str, default: bool| {
-            std::env::var(key).map_or(default, |v| v != "0")
-        };
+        let opt_out = |key: &str, default: bool| std::env::var(key).map_or(default, |v| v != "0");
         Self {
-            fused_rmsnorm: !unfused("LMBRRR_UNFUSED_RMSNORM"),
-            fused_sdpa: !unfused("LMBRRR_UNFUSED_SDPA"),
-            fused_reconstruct: !unfused("LMBRRR_UNFUSED_RECONSTRUCT"),
-            fused_deltanet: !unfused("LMBRRR_UNFUSED_DELTANET"),
-            fused_attn_prep: opt_out("LMBRRR_FUSED_ATTN_PREP", base.fused_attn_prep),
-            fused_mtp_fc: opt_out("LMBRRR_FUSED_MTP_FC", base.fused_mtp_fc),
-            deltanet_v2: opt_out("LMBRRR_DELTANET_V2", base.deltanet_v2),
+            fused_rmsnorm: !unfused(k::UNFUSED_RMSNORM),
+            fused_sdpa: !unfused(k::UNFUSED_SDPA),
+            fused_reconstruct: !unfused(k::UNFUSED_RECONSTRUCT),
+            fused_deltanet: !unfused(k::UNFUSED_DELTANET),
+            fused_attn_prep: opt_out(k::FUSED_ATTN_PREP, base.fused_attn_prep),
+            fused_mtp_fc: opt_out(k::FUSED_MTP_FC, base.fused_mtp_fc),
+            deltanet_v2: opt_out(k::DELTANET_V2, base.deltanet_v2),
             // Any presence enables the fallback (historical `is_ok()` sense).
-            deltanet_sequential_fallback: std::env::var("LMBRRR_DELTANET_SEQUENTIAL").is_ok(),
+            deltanet_sequential_fallback: std::env::var(k::DELTANET_SEQUENTIAL).is_ok(),
         }
     }
 }
@@ -103,7 +102,7 @@ impl Default for PackConfig {
 impl PackConfig {
     pub fn from_env() -> Self {
         Self {
-            enabled: std::env::var("LMBRRR_PACK").map_or(true, |v| v != "0"),
+            enabled: std::env::var(crate::env_keys::PACK).map_or(true, |v| v != "0"),
         }
     }
 }
@@ -130,12 +129,46 @@ impl Default for DecodeConfig {
 
 impl DecodeConfig {
     pub fn from_env() -> Self {
-        let opt_out = |key: &str, default: bool| {
-            std::env::var(key).map_or(default, |v| v != "0")
-        };
+        use crate::env_keys as k;
+        let opt_out = |key: &str, default: bool| std::env::var(key).map_or(default, |v| v != "0");
         Self {
-            async_readback: opt_out("LMBRRR_ASYNC_READBACK", true),
-            fused_argmax: opt_out("LMBRRR_FUSED_ARGMAX", true),
+            async_readback: opt_out(k::ASYNC_READBACK, true),
+            fused_argmax: opt_out(k::FUSED_ARGMAX, true),
+        }
+    }
+}
+
+/// Spec-run command knobs: diagnostics and reference-path selectors resolved
+/// once at each spec-run command entry. COMMAND-SCOPE — deliberately not a
+/// field of [`RuntimeConfig`]: these configure a run, not a model component,
+/// and never thread into the model tree. All default off.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpecRunConfig {
+    /// Re-enable per-phase `synchronize()` so draft/verify/rollback buckets
+    /// measure GPU time. Off: the round pays exactly two readback waits and
+    /// the buckets attribute encode+queue time only.
+    pub loop_timing: bool,
+    /// Restore the legacy restore + re-advance rollback (reference path for
+    /// the state-selection mechanism).
+    pub readvance_rollback: bool,
+    /// Per-bucket verify/draft sync walls (fenced instrumentation).
+    pub fenced_timing: bool,
+    /// Adaptive MTP draft depth.
+    pub adaptive_depth: bool,
+    /// Per-segment fenced propose timing (DSpark drafter attribution).
+    pub propose_timing: bool,
+}
+
+impl SpecRunConfig {
+    pub fn from_env() -> Self {
+        use crate::env_keys as k;
+        let on = |key: &str| std::env::var(key).is_ok_and(|v| v == "1");
+        Self {
+            loop_timing: on(k::LOOP_TIMING),
+            readvance_rollback: on(k::READVANCE_ROLLBACK),
+            fenced_timing: on(k::SPEC_FENCED_TIMING),
+            adaptive_depth: on(k::MTP_ADAPTIVE_DEPTH),
+            propose_timing: on(k::PROPOSE_TIMING),
         }
     }
 }
@@ -161,8 +194,11 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     /// The entrypoint's env resolution. The only call sites are `main()`
-    /// and standalone command entries (tests use `Default`).
+    /// and standalone command entries (tests use `Default`). Also warns on
+    /// any `LMBRRR_*` var in the environment that no resolver consumes — the
+    /// typo guard for the bench/suite scripts.
     pub fn from_env() -> Self {
+        warn_unknown_lmbrrr_keys(std::env::vars().map(|(k, _)| k));
         Self {
             model: ModelCtx {
                 mm2d: Arc::new(Mm2dConfig::from_env()),
@@ -170,7 +206,64 @@ impl RuntimeConfig {
             },
             pack: PackConfig::from_env(),
             decode: DecodeConfig::from_env(),
-            mtp_quantize_only: std::env::var("LMBRRR_MTP_Q_ONLY").ok(),
+            mtp_quantize_only: std::env::var(crate::env_keys::MTP_Q_ONLY).ok(),
         }
+    }
+}
+
+/// Emit a warning for every `LMBRRR_*` environment key not in the known-key
+/// registry ([`crate::env_keys::KNOWN_LMBRRR_KEYS`]). Compile-time keys
+/// (`LMBRRR_GIT_REV`, `LMBRRR_CANDLE_PIN`) are excluded — they are `env!`
+/// build inputs, never resolved at runtime. Factored out so it is unit
+/// testable without mutating the process environment.
+fn warn_unknown_lmbrrr_keys(env_keys_present: impl Iterator<Item = String>) {
+    for unknown in unknown_lmbrrr_keys(env_keys_present) {
+        eprintln!(
+            "warning: {unknown} is set but unknown to lmbrrr — typo? \
+             (no config resolver reads it)"
+        );
+    }
+}
+
+/// The `LMBRRR_*` keys present in `env_keys_present` that are neither in the
+/// runtime registry nor a compile-time (`env!`) key. Pure; the testable core
+/// of [`warn_unknown_lmbrrr_keys`].
+fn unknown_lmbrrr_keys(env_keys_present: impl Iterator<Item = String>) -> Vec<String> {
+    const COMPILE_TIME: &[&str] = &["LMBRRR_GIT_REV", "LMBRRR_CANDLE_PIN"];
+    env_keys_present
+        .filter(|k| {
+            k.starts_with("LMBRRR_")
+                && !crate::env_keys::KNOWN_LMBRRR_KEYS.contains(&k.as_str())
+                && !COMPILE_TIME.contains(&k.as_str())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_keys_flag_typos_not_known_or_compile_time_keys() {
+        let present = [
+            crate::env_keys::MM2D.to_string(), // known -> ok
+            "LMBRRR_GIT_REV".to_string(),      // compile-time -> ok
+            "LMBRRR_MM2D_TYPOO".to_string(),   // typo -> flagged
+            "PATH".to_string(),                // non-lmbrrr -> ignored
+        ];
+        let unknown = unknown_lmbrrr_keys(present.into_iter());
+        assert_eq!(unknown, vec!["LMBRRR_MM2D_TYPOO".to_string()]);
+    }
+
+    #[test]
+    fn every_known_key_is_a_distinct_lmbrrr_name() {
+        let keys = crate::env_keys::KNOWN_LMBRRR_KEYS;
+        for k in keys {
+            assert!(k.starts_with("LMBRRR_"), "{k} is not an LMBRRR_ key");
+        }
+        let mut sorted = keys.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "duplicate key in the registry");
     }
 }

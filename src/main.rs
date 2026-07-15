@@ -1205,22 +1205,6 @@ impl DrafterQuantArg {
     }
 }
 
-/// `LMBRRR_LOOP_TIMING=1` re-enables the per-phase synchronize() calls in the
-/// speculative round so draft/verify/rollback buckets measure GPU time. Off
-/// (default) the round pays exactly two readback waits and the buckets
-/// attribute encode+queue time only.
-fn loop_timing() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("LMBRRR_LOOP_TIMING").is_ok_and(|v| v == "1"))
-}
-
-/// `LMBRRR_READVANCE_ROLLBACK=1` restores the legacy restore + re-advance
-/// rollback (reference path for the state-selection mechanism).
-fn readvance_rollback() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("LMBRRR_READVANCE_ROLLBACK").is_ok_and(|v| v == "1"))
-}
-
 fn write_json_report(path: Option<&PathBuf>, value: &serde_json::Value) -> Result<()> {
     match path {
         Some(path) => {

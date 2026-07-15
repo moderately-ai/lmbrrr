@@ -94,6 +94,7 @@ fn dspark_stub_run(
         downsample_mode,
         eos_ids,
     } = spec;
+    let spec_run = lmbrrr::runtime_config::SpecRunConfig::from_env();
     let wall_start = Instant::now();
     model.clear_cache();
     let prompt_input = Tensor::from_slice(prompt_tokens, (1, prompt_tokens.len()), device)?;
@@ -103,7 +104,7 @@ fn dspark_stub_run(
     device.synchronize()?;
     let prefill_seconds = secs(prefill_start.elapsed());
     let (first_token, mut argmax_elapsed) = argmax_token(&prompt_logits, device)?;
-    model.set_verify_state_capture(!readvance_rollback());
+    model.set_verify_state_capture(!spec_run.readvance_rollback);
 
     let mut committed = vec![first_token];
     let mut committed_top_k = top_k_values(&prompt_logits)?;
@@ -164,7 +165,7 @@ fn dspark_stub_run(
             } else {
                 rollbacks += 1;
                 let readvance_start = Instant::now();
-                if readvance_rollback() {
+                if spec_run.readvance_rollback {
                     model.restore_decode_state(&snapshot)?;
                     let readvance = &chunk[..accepted + 1];
                     let readvance_input =
@@ -237,6 +238,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
     let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
+    let spec_run = lmbrrr::runtime_config::SpecRunConfig::from_env();
     let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
@@ -276,9 +278,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             dtype,
             quantize_heads: args.drafter_quantize.map(DrafterQuantArg::ggml),
             draft_vocab: draft_vocab_ids.as_deref(),
-            // Command-scope diagnostic (entrypoint env read); Slice 4 folds
-            // this into SpecRunConfig alongside the other spec-run knobs.
-            propose_timing: std::env::var("LMBRRR_PROPOSE_TIMING").is_ok_and(|v| v == "1"),
+            propose_timing: spec_run.propose_timing,
         },
         &runtime.model,
     )?;
@@ -348,7 +348,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let ctx = Tensor::cat(&capture_refs, D::Minus1)?;
     drafter.append_context(&ctx, 0)?;
     let (first_token, _) = argmax_token(&prompt_logits, &device)?;
-    model.set_verify_state_capture(!readvance_rollback());
+    model.set_verify_state_capture(!spec_run.readvance_rollback);
 
     let mut committed = vec![first_token];
     let mut anchor = first_token;
@@ -487,7 +487,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                         &args.model.downsample_mode,
                         start,
                     )?;
-                    if loop_timing() {
+                    if spec_run.loop_timing {
                         device.synchronize()?;
                     }
                     verify_seconds += secs(verify_start.elapsed());
@@ -518,7 +518,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                     } else {
                         rollbacks += 1;
                         let readvance_start = Instant::now();
-                        if readvance_rollback() {
+                        if spec_run.readvance_rollback {
                             model.restore_decode_state(&snapshot)?;
                             let readvance = &chunk[..accepted + 1];
                             let readvance_input =
@@ -533,7 +533,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                             let _ = model.take_device_captures();
                         } else {
                             model.rollback_to_prefix(&snapshot, accepted + 1)?;
-                            if loop_timing() {
+                            if spec_run.loop_timing {
                                 device.synchronize()?;
                             }
                         }
@@ -611,7 +611,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             } else if lag_round {
                 let draft_start = Instant::now();
                 let dp = drafter.propose_device(anchor, start, gamma)?;
-                if loop_timing() {
+                if spec_run.loop_timing {
                     device.synchronize()?;
                 }
                 draft_seconds += secs(draft_start.elapsed());
@@ -623,7 +623,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 } else {
                     drafter.propose(anchor, start, gamma)?
                 };
-                if loop_timing() {
+                if spec_run.loop_timing {
                     device.synchronize()?;
                 }
                 draft_seconds += secs(draft_start.elapsed());
@@ -711,7 +711,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 let flat_input = Tensor::from_slice(&flat, (1, flat.len()), &device)?;
                 let verify_start = Instant::now();
                 let logits = model.forward_tree_all_logits(&flat_input, start, w)?;
-                if loop_timing() {
+                if spec_run.loop_timing {
                     device.synchronize()?;
                 }
                 verify_seconds += secs(verify_start.elapsed());
@@ -781,7 +781,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 // Winner install is unconditional: even a full main accept
                 // must drop the alternate's KV rows.
                 model.rollback_tree(&snapshot, w, on_alt, accepted)?;
-                if loop_timing() {
+                if spec_run.loop_timing {
                     device.synchronize()?;
                 }
                 if accepted < w {
@@ -838,7 +838,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                 &args.model.downsample_mode,
                 start,
             )?;
-            if loop_timing() {
+            if spec_run.loop_timing {
                 device.synchronize()?;
             }
             verify_seconds += secs(verify_start.elapsed());
@@ -977,7 +977,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             } else {
                 rollbacks += 1;
                 let readvance_start = Instant::now();
-                if readvance_rollback() {
+                if spec_run.readvance_rollback {
                     model.restore_decode_state(&snapshot)?;
                     let readvance = &chunk[..accepted + 1];
                     let readvance_input =
@@ -994,7 +994,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
                     model.rollback_to_prefix(&snapshot, accepted + 1)?;
                     // No sync: the reconstruction orders behind the next
                     // round's work on the queue; only timing mode waits.
-                    if loop_timing() {
+                    if spec_run.loop_timing {
                         device.synchronize()?;
                     }
                 }
@@ -1199,11 +1199,12 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
 /// (recursion pairs are scratch, truncated every round — lossless by
 /// construction).
 fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
+    let spec_run = lmbrrr::runtime_config::SpecRunConfig::from_env();
     let depth = args.mtp_depth;
     if depth == 0 || depth > 8 {
         anyhow::bail!("--mtp-depth must be in 1..=8");
     }
-    if args.gpu_capture_round.is_some() && std::env::var("METAL_CAPTURE_ENABLED").is_err() {
+    if args.gpu_capture_round.is_some() && std::env::var(lmbrrr::env_keys::METAL_CAPTURE_ENABLED).is_err() {
         anyhow::bail!(
             "--gpu-capture-round needs METAL_CAPTURE_ENABLED=1 in the environment \
              (undocumented Metal requirement)"
@@ -1266,7 +1267,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
 
     model.clear_cache();
     model.mtp_clear();
-    model.set_verify_state_capture(!readvance_rollback());
+    model.set_verify_state_capture(!spec_run.readvance_rollback);
     let wall_start = Instant::now();
     let n = prompt_tokens.len();
     let prompt_input = Tensor::from_slice(&prompt_tokens, (1, n), &device)?;
@@ -1287,10 +1288,10 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         .squeeze(1)?
         .argmax(D::Minus1)?
         .reshape((1, 1))?;
-    // Instrumentation syncs (per-bucket verify/draft walls) are opt-in:
-    // LMBRRR_SPEC_FENCED_TIMING=1. Unfenced (default), the round pipelines
-    // freely and the buckets measure enqueue + the single verdict drain.
-    let fenced_timing = std::env::var("LMBRRR_SPEC_FENCED_TIMING").is_ok_and(|v| v == "1");
+    // Instrumentation syncs (per-bucket verify/draft walls) are opt-in
+    // (fenced_timing). Unfenced (default), the round pipelines freely and the
+    // buckets measure enqueue + the single verdict drain.
+    let fenced_timing = spec_run.fenced_timing;
     // Divergence-margin diagnostics read the full verify logits back every
     // round — opt-in only (--mtp-margin-oracle), never on the measured path.
     let margin_oracle = args.mtp_margin_oracle;
@@ -1356,8 +1357,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     // so the MTP cache stays a contiguous committed-pair history. Tokens
     // stay device-resident (slices of the skip verdicts).
     let mut pending_catchup: Vec<(Tensor, Tensor)> = Vec::new();
-    let adaptive_depth =
-        std::env::var("LMBRRR_MTP_ADAPTIVE_DEPTH").is_ok_and(|v| v == "1");
+    let adaptive_depth = spec_run.adaptive_depth;
     let mut prev_accepted = depth; // first round drafts at full depth
     // Margin-oracle top-k rows for the round, staged between verify and
     // commit (the fused-argmax path never materializes the logits).

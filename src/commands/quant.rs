@@ -191,7 +191,7 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
         .as_deref()
         .map(parse_capture_cell)
         .transpose()?;
-    if capture_cell.is_some() && std::env::var("METAL_CAPTURE_ENABLED").is_err() {
+    if capture_cell.is_some() && std::env::var(lmbrrr::env_keys::METAL_CAPTURE_ENABLED).is_err() {
         anyhow::bail!(
             "--gpu-capture-cell needs METAL_CAPTURE_ENABLED=1 in the environment \
              (undocumented Metal requirement)"
