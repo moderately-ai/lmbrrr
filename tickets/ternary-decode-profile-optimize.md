@@ -14,10 +14,28 @@ tags: [ternary-bonsai, perf]
 
 Ternary target decode faster than the llama.cpp reference (13.7 tok/s, M3 Pro, same GGUF). Iterate data-driven; every number from the M3 referee.
 
-## BASELINE (2026-07-15, M3, release, `gguf-run` naive greedy decode)
+## RESULTS (M3, release, `gguf-run` naive greedy decode)
 
-- **4.98 tok/s** (200 ms/token) vs llama.cpp **13.7** → at ~36% of the bar.
-- prefill 9–15 tok/s; load 7 s.
+| step | decode tok/s | steady tok/s | fwd ms/token |
+|---|---|---|---|
+| baseline | 4.98 | 4.97 | 200.9 |
+| **+ GQA-fused deltanet decode** | **11.5** | **12.9** | **86.4** |
+| llama.cpp bar | 13.7 | — | — |
+
+**WIN 1 (2026-07-15): GQA-fused deltanet decode → 2.6× (4.98 → 12.9 steady), coherent, at the llama.cpp bar.** candle b79233c0. The `deltanet_recurrent_rule` (46%, unfused) is gone — decode now hits the fused v2 kernel with the GQA head map (kh = h % num_k_heads). One correctness bug caught + fixed: the map is TILE (`h % K`, matching `maybe_repeat_heads` = cat of tiles), not interleave (`h*K/heads`).
+
+Still short of BEATING 13.7. The gguf-run path still syncs + host-argmaxes per token (baseline). Next: re-profile the 86 ms forward for the new top item, + kill the per-token host sync.
+
+## RE-PROFILE after WIN 1 (M3, --profile, relative split; norms inflated by per-op sync)
+
+| component | pct | note |
+|---|---|---|
+| **mlp** | **43.2** | 3×(17408×5120) Q2_0 GEMVs/layer ≈ 4.5 GB — bandwidth-bound |
+| deltanet_fused_decode | 25.2 | was 46% unfused; now one fused kernel/layer |
+| norms (mlp_residual/post_attn) | ~18 | inflated by profiler sync (tiny ops) |
+| full_attention_* (16 layers) | ~13 | |
+
+Host path confirmed negligible again (0.37 ms/token) → fused-argmax / async-readback / device-chain buy ~nothing; do NOT invest there. **Next lever: Q2_0 GEMV bandwidth 93 → ~135 GB/s (Q4K hits 90% of peak; mine is 62%).** The MLP is 43% and bandwidth-bound, so closing the kernel gap is the path past 13.7. Approach: higher-occupancy geometry (fewer rows/simdgroup → smaller accumulator state → more resident simdgroups hide DRAM latency — the q4k-mv-rewrite `nr2sg2` lesson). My Q2_0 mv reuses Q8_0's N_DST=4/nsg=2; try nr=2.
 
 ## EVIDENCE (measured, not assumed)
 
