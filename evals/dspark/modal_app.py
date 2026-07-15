@@ -1071,16 +1071,14 @@ def vllm_regenerate(
             "0.85",
             "--limit-mm-per-prompt",
             '{"image": 0, "video": 0}',
-            # Batch regen: prioritize reliable, fast startup over peak decode.
-            # vLLM 0.24's full CUDA-graph capture (50+ sizes) + FlashInfer GDN
-            # JIT on the hybrid model blew past the health deadline; eager +
-            # triton GDN prefill skip both long startups.
-            "--enforce-eager",
-            "--gdn-prefill-backend",
-            "triton",
         ]
     )
     try:
+        # vLLM 0.24's CUDA-graph capture (50+ sizes) + FlashInfer GDN JIT push
+        # first-token readiness past the old 1200s deadline on the hybrid model.
+        # Fix is PATIENCE, not --enforce-eager (which disables CUDA graphs and
+        # cut regen throughput ~8x: 817 vs round-4's ~6600 tok/s). Keep graphs;
+        # just wait out the one-time startup.
         deadline = time.monotonic() + 2700
         while True:
             if server.poll() is not None:
