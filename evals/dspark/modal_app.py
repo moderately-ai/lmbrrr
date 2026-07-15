@@ -434,6 +434,8 @@ def mtp_distill(
     batch_size: int = 8,
     grad_accum: int = 2,
     exp_name: str = "mtp-distill-r1",
+    qat_q4k: bool = False,
+    init_from: str | None = None,
 ) -> None:
     """Align the Qwen3.5-0.8B vendor MTP head to the fakequant target
     (mtp_distill.py): (final hidden, next token) -> next-next token over the
@@ -444,31 +446,33 @@ def mtp_distill(
     (vendor tensor names — drop-in for lmbrrr --drafter-mtp)."""
     monitor = GpuMonitor(tag=f"mtp-distill-{exp_name}")
     monitor.start()
-    _run(
-        [
-            "python",
-            "/lmbrrr-dspark/mtp_distill.py",
-            "--model",
-            "/vol/models/minicpm-v46-fakequant-q4kft",
-            "--input",
-            f"/vol/data/{input_name}",
-            "--output-dir",
-            f"/vol/runs/{exp_name}",
-            "--num-samples",
-            str(num_samples),
-            "--epochs",
-            str(epochs),
-            "--lr",
-            str(lr),
-            "--max-tokens",
-            str(max_tokens),
-            "--batch-size",
-            str(batch_size),
-            "--grad-accum",
-            str(grad_accum),
-        ],
-        env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
-    )
+    cmd = [
+        "python",
+        "/lmbrrr-dspark/mtp_distill.py",
+        "--model",
+        "/vol/models/minicpm-v46-fakequant-q4kft",
+        "--input",
+        f"/vol/data/{input_name}",
+        "--output-dir",
+        f"/vol/runs/{exp_name}",
+        "--num-samples",
+        str(num_samples),
+        "--epochs",
+        str(epochs),
+        "--lr",
+        str(lr),
+        "--max-tokens",
+        str(max_tokens),
+        "--batch-size",
+        str(batch_size),
+        "--grad-accum",
+        str(grad_accum),
+    ]
+    if qat_q4k:
+        cmd.append("--qat-q4k")
+    if init_from:
+        cmd.extend(["--init-from", init_from])
+    _run(cmd, env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     print("MTP_DISTILL_GPU", json.dumps(monitor.stop()), flush=True)
     volume.commit()
 

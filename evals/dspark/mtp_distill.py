@@ -59,7 +59,61 @@ def parse_args() -> argparse.Namespace:
                    help="shuffle window sorted by length before batching")
     p.add_argument("--eval-every", type=int, default=2000)
     p.add_argument("--seed", type=int, default=17)
+    p.add_argument("--init-from", default=None,
+                   help="warm-start from a prior run's mtp.safetensors "
+                        "(vendor tensor names) instead of the HF vendor head")
+    p.add_argument("--qat-q4k", action="store_true",
+                   help="straight-through q4_K fake-quant on every head "
+                        "linear (QAT); the exported checkpoint keeps the "
+                        "full-precision master weights")
     return p.parse_args()
+
+
+def fake_quant_q4k(w: torch.Tensor) -> torch.Tensor:
+    """Approximate GGML q4_K applied to a [out, in] weight: superblocks of
+    256 along the input dim, 8 sub-blocks of 32 quantized to 4-bit against
+    6-bit sub-block scale/min pairs and fp16 superblock scales. Min-max grid
+    per sub-block — the reference quantizer's search refines this slightly,
+    but the noise structure (grid spacing, scale quantization, fp16 supers)
+    is what robustness training needs to see."""
+    out_dim, in_dim = w.shape
+    assert in_dim % 256 == 0, f"q4_K needs in_dim % 256 == 0, got {in_dim}"
+    v = w.float().reshape(out_dim, in_dim // 256, 8, 32)
+    vmax = v.amax(-1, keepdim=True)
+    vmin = v.amin(-1, keepdim=True).clamp(max=0)  # ggml mins are >= 0
+    s = (vmax - vmin) / 15.0
+    m = -vmin
+    d = (s.amax(2, keepdim=True) / 63.0).half().float()  # fp16 super scales
+    dm = (m.amax(2, keepdim=True) / 63.0).half().float()
+    sc = torch.where(d > 0, (s / d).round().clamp(0, 63), torch.zeros_like(s))
+    mq = torch.where(dm > 0, (m / dm).round().clamp(0, 63), torch.zeros_like(m))
+    scale = d * sc
+    minv = dm * mq
+    q = torch.where(
+        scale > 0, ((v + minv) / scale).round().clamp(0, 15), torch.zeros_like(v)
+    )
+    wq = (q * scale - minv).reshape(out_dim, in_dim)
+    return wq.to(w.dtype)
+
+
+def patch_qat_q4k(head: nn.Module) -> int:
+    """Route every head linear through straight-through fake-quant: forward
+    sees the quantized grid, backward passes gradients to the bf16 masters.
+    Mirrors lmbrrr's --mtp-quantize scope (all unbiased head linears; norms
+    and the shared embed/lm_head are untouched)."""
+    import types
+
+    def qat_forward(self, x):
+        w = self.weight
+        wq = w + (fake_quant_q4k(w) - w).detach()
+        return nn.functional.linear(x, wq, self.bias)
+
+    n = 0
+    for mod in head.modules():
+        if isinstance(mod, nn.Linear):
+            mod.forward = types.MethodType(qat_forward, mod)
+            n += 1
+    return n
 
 
 class MtpHead(nn.Module):
@@ -86,9 +140,17 @@ class MtpHead(nn.Module):
 
     def load_vendor(self, base: str) -> None:
         from huggingface_hub import hf_hub_download
-        from safetensors.torch import load_file
 
         path = hf_hub_download(base, "model.safetensors-00001-of-00001.safetensors")
+        self._load_mtp_file(path)
+
+    def load_checkpoint(self, path: str) -> None:
+        """Warm-start from a prior run's export (vendor tensor names)."""
+        self._load_mtp_file(path)
+
+    def _load_mtp_file(self, path: str) -> None:
+        from safetensors.torch import load_file
+
         raw = load_file(path)
         remap = {}
         for k, v in raw.items():
@@ -162,9 +224,20 @@ def main() -> int:
     text_cfg = getattr(base_cfg, "text_config", base_cfg)
     text_cfg._attn_implementation = "sdpa"
     head = MtpHead(text_cfg).to(device=device, dtype=torch.bfloat16)
-    head.load_vendor(args.mtp_base)
+    if args.init_from:
+        head.load_checkpoint(args.init_from)
+        init_desc = f"warm start {args.init_from}"
+    else:
+        head.load_vendor(args.mtp_base)
+        init_desc = "vendor init"
     n_params = sum(p.numel() for p in head.parameters())
-    print(f"mtp head: {n_params/1e6:.1f}M params, vendor init loaded", flush=True)
+    print(f"mtp head: {n_params/1e6:.1f}M params, {init_desc} loaded", flush=True)
+    if args.qat_q4k:
+        n_patched = patch_qat_q4k(head)
+        # Eval runs through the same patched forwards, so every holdout
+        # number (including the baseline) measures the QUANTIZED head — the
+        # baseline is the init checkpoint's q4k acceptance-proxy drop.
+        print(f"QAT: q4_K straight-through on {n_patched} linears", flush=True)
 
     # Corpus: templated conversations, tokenized once, filtered by length.
     rows = []
@@ -249,7 +322,8 @@ def main() -> int:
         return correct / max(total, 1)
 
     base_acc = evaluate()
-    print(f"VENDOR BASELINE holdout next-token top-1: {base_acc:.4f}", flush=True)
+    base_label = "INIT BASELINE" if args.init_from else "VENDOR BASELINE"
+    print(f"{base_label} holdout next-token top-1: {base_acc:.4f}", flush=True)
 
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=0.01)
     total_steps = 1  # recomputed from the batch count below, before training
@@ -381,6 +455,8 @@ def main() -> int:
                 "lr": args.lr,
                 "max_tokens": args.max_tokens,
                 "loss_positions": "all (assistant-span masking = iteration 2)",
+                "qat_q4k": args.qat_q4k,
+                "init_from": args.init_from,
             },
             fh,
             indent=1,
