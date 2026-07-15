@@ -1312,6 +1312,37 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let mut accepted_histogram = vec![0usize; depth + 1];
     let mut verify_seconds = 0.0f64;
 
+    // Greedy chain-handoff (the DSpark loop's skip-hysteresis, ported):
+    // rounds that commit fewer tokens than their wall would have bought at
+    // the greedy rate are "low-value"; skip_after consecutive ones park the
+    // drafter and the loop emits plain 1-token rounds, probing a drafted
+    // round on an exponential-backoff schedule. Weak classes thereby get
+    // (approximately) the greedy floor instead of paying for rejected
+    // drafts. Evidence rule and reset semantics mirror the drafter loop.
+    let greedy_step_ms = baseline
+        .steady_state_tokens_per_second()
+        .filter(|tps| *tps > 0.0)
+        .map(|tps| 1000.0 / tps)
+        .unwrap_or_else(|| {
+            let tps = baseline.decode_tokens_per_second();
+            if tps > 0.0 {
+                1000.0 / tps
+            } else {
+                f64::INFINITY
+            }
+        });
+    let skip_after = args.skip_draft_after;
+    let probe_every = args.probe_every.max(1);
+    let backoff_cap = args.probe_backoff_cap.max(probe_every);
+    let mut consecutive_low = 0usize;
+    let mut skipped_rounds = 0usize;
+    let mut probe_interval = probe_every;
+    let mut next_probe_round = 0usize;
+    // (hidden, successor) pairs accumulated during skip rounds; flushed as
+    // ONE batched mtp_step before the next drafted round so the MTP cache
+    // stays a contiguous committed-pair history.
+    let mut pending_catchup: Vec<(Tensor, u32)> = Vec::new();
+
     if !eos_ids.contains(&anchor0) {
         while committed.len() < args.max_new_tokens {
             // Bounded Metal capture around exactly this round: draft chain,
@@ -1328,12 +1359,70 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                     _ => anyhow::bail!("--gpu-capture-round requires the Metal device"),
                 }
             }
+            // Skip/probe decision (greedy handoff).
+            let in_skip = consecutive_low >= skip_after;
+            if !in_skip {
+                probe_interval = probe_every;
+                next_probe_round = 0;
+            } else if next_probe_round == 0 {
+                next_probe_round = rounds + probe_interval;
+            }
+            let probe_round = in_skip && rounds >= next_probe_round;
+            if probe_round {
+                probe_interval = (probe_interval * 2).min(backoff_cap);
+                next_probe_round = rounds + probe_interval;
+            }
+            if in_skip && !probe_round {
+                // Parked: one greedy token per round through the same
+                // device-assembled path (chunk = anchor only), no draft, no
+                // rollback. The MTP pair for this position queues for a
+                // batched catch-up at the next drafted round.
+                let round_start = Instant::now();
+                let (logits, hidden) = model.forward_all_logits_and_hidden(
+                    &anchor_dev,
+                    None::<&ProcessedImages>,
+                    &args.model.downsample_mode,
+                    offset,
+                )?;
+                let targets_dev = logits.squeeze(0)?.argmax(D::Minus1)?;
+                let bonus = targets_dev.to_vec1::<u32>()?[0];
+                anchor_dev = targets_dev.narrow(0, 0, 1)?.reshape((1, 1))?;
+                verify_seconds += secs(round_start.elapsed());
+                pending_catchup.push((hidden.narrow(1, 0, 1)?, bonus));
+                committed.push(bonus);
+                offset += 1;
+                anchor_pos += 1;
+                rounds += 1;
+                skipped_rounds += 1;
+                if eos_ids.contains(&bonus) {
+                    break;
+                }
+                continue;
+            }
+            // Flush skip-window MTP pairs as one batched catch-up: restores
+            // draft_1/post_last and keeps the cache contiguous.
+            if !pending_catchup.is_empty() {
+                let w = pending_catchup.len();
+                let hiddens = pending_catchup.iter().map(|(h, _)| h).collect::<Vec<_>>();
+                let hidden_cat = Tensor::cat(&hiddens, 1)?.contiguous()?;
+                let successors = pending_catchup.iter().map(|(_, t)| *t).collect::<Vec<u32>>();
+                let tokens = Tensor::from_slice(&successors, (1, w), &device)?;
+                let (cu_logits, cu_post) = model.mtp_step(&hidden_cat, &tokens)?;
+                next_first_draft_dev = model
+                    .remap_mtp_draft_id(
+                        &cu_logits.narrow(1, w - 1, 1)?.squeeze(1)?.argmax(D::Minus1)?,
+                    )?
+                    .reshape((1, 1))?;
+                post_last = cu_post.narrow(1, w - 1, 1)?;
+                pending_catchup.clear();
+            }
             // Draft: draft_1 came from the previous catch-up; chain the rest
             // on the head's own post-norm hidden. Zero per-step host syncs:
             // the device argmax feeds the next step's embedding lookup
             // directly and the ids never leave the GPU pre-verify — the
             // verify chunk is assembled on device, so the ROUND has exactly
             // one structural readback (the verdict, below).
+            let round_start = Instant::now();
             let round_draft_start = Instant::now();
             let mut draft_ids_dev = vec![next_first_draft_dev.clone()];
             for _ in 1..depth {
@@ -1385,6 +1474,15 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             let bonus = targets[accepted];
             // Next round's anchor stays on device (a slice of this verdict).
             anchor_dev = targets_dev.narrow(0, accepted, 1)?.reshape((1, 1))?;
+            // Hysteresis evidence: the round is low-value when its committed
+            // tokens cost more than the greedy rate would have charged. The
+            // verdict readback above bounds the wall.
+            let round_ms = secs(round_start.elapsed()) * 1000.0;
+            if (accepted + 1) as f64 * greedy_step_ms >= round_ms {
+                consecutive_low = 0;
+            } else {
+                consecutive_low += 1;
+            }
 
             if accepted < drafts.len() {
                 rollbacks += 1;
@@ -1483,6 +1581,8 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         "kind": "lmbrrr_mtp_draft_run",
         "schema_version": 1,
         "fenced_timing": fenced_timing,
+        "skipped_rounds": skipped_rounds,
+        "greedy_step_ms_estimate": greedy_step_ms,
         "mtp_weights": mtp_weights,
         "mtp_depth": depth,
         "prompt_tokens": prompt_tokens.len(),
