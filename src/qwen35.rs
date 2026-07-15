@@ -2962,16 +2962,31 @@ impl MtpHead {
             *lin = MixedLinear::from_qtensor(qt)?;
             Ok(())
         }
-        q(&mut self.fc, ggml, pack, format!("{key_prefix}fc"))?;
+        // Bisection hook (diagnostics): LMBRRR_MTP_Q_ONLY=fc|qkv|o|gate_up|down
+        // quantizes a single linear, isolating per-path damage (filed q8_0
+        // m-in-[2,8] anomaly, 2026-07-15).
+        let only = std::env::var("LMBRRR_MTP_Q_ONLY").ok();
+        let want = |name: &str| only.as_deref().is_none_or(|o| o == name);
+        if want("fc") {
+            q(&mut self.fc, ggml, pack, format!("{key_prefix}fc"))?;
+        }
         match &mut self.layer.mixer {
             TokenMixer::Full(attn) => {
-                q(&mut attn.qkv_proj, ggml, pack, format!("{key_prefix}qkv"))?;
-                q(&mut attn.o_proj, ggml, pack, format!("{key_prefix}o"))?;
+                if want("qkv") {
+                    q(&mut attn.qkv_proj, ggml, pack, format!("{key_prefix}qkv"))?;
+                }
+                if want("o") {
+                    q(&mut attn.o_proj, ggml, pack, format!("{key_prefix}o"))?;
+                }
             }
             TokenMixer::Linear(_) => unreachable!("MTP layer is full attention"),
         }
-        q(&mut self.layer.mlp.gate_up_proj, ggml, pack, format!("{key_prefix}gate_up"))?;
-        q(&mut self.layer.mlp.down_proj, ggml, pack, format!("{key_prefix}down"))?;
+        if want("gate_up") {
+            q(&mut self.layer.mlp.gate_up_proj, ggml, pack, format!("{key_prefix}gate_up"))?;
+        }
+        if want("down") {
+            q(&mut self.layer.mlp.down_proj, ggml, pack, format!("{key_prefix}down"))?;
+        }
         Ok(())
     }
 
