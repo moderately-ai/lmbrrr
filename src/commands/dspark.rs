@@ -1342,6 +1342,9 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     // ONE batched mtp_step before the next drafted round so the MTP cache
     // stays a contiguous committed-pair history.
     let mut pending_catchup: Vec<(Tensor, u32)> = Vec::new();
+    let adaptive_depth =
+        std::env::var("LMBRRR_MTP_ADAPTIVE_DEPTH").is_ok_and(|v| v == "1");
+    let mut prev_accepted = depth; // first round drafts at full depth
     // Margin-oracle top-k rows for the round, staged between verify and
     // commit (the fused-argmax path never materializes the logits).
     let mut committed_top_k_pending: Option<Vec<Vec<f32>>> = None;
@@ -1421,10 +1424,18 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             // directly and the ids never leave the GPU pre-verify — the
             // verify chunk is assembled on device, so the ROUND has exactly
             // one structural readback (the verdict, below).
+            // Adaptive depth (scheduler-lite, zero-sync): draft as deep as
+            // the previous round proved productive, +1 to probe upward.
+            // LMBRRR_MTP_ADAPTIVE_DEPTH=1 enables; --mtp-depth is the cap.
+            let round_depth = if adaptive_depth {
+                (prev_accepted + 1).clamp(1, depth)
+            } else {
+                depth
+            };
             let round_start = Instant::now();
             let round_draft_start = Instant::now();
             let mut draft_ids_dev = vec![next_first_draft_dev.clone()];
-            for _ in 1..depth {
+            for _ in 1..round_depth {
                 let tok = draft_ids_dev.last().expect("drafts is non-empty").clone();
                 let post_j = model.mtp_step(&post_last.contiguous()?, &tok)?;
                 draft_ids_dev.push(model.mtp_draft_next(&post_j)?);
@@ -1471,7 +1482,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 .flatten_all()?;
             let packed = Tensor::cat(&[&targets_dev, &drafts_dev], 0)?.to_vec1::<u32>()?;
             verify_seconds += secs(verify_start.elapsed());
-            let chunk_len = depth + 1;
+            let chunk_len = round_depth + 1;
             let (targets, drafts) = packed.split_at(chunk_len);
             let accepted = drafts
                 .iter()
@@ -1493,6 +1504,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             } else if (accepted + 1) as f64 * greedy_step_ms >= round_ms {
                 consecutive_low = 0;
             }
+            prev_accepted = accepted;
 
             if accepted < drafts.len() {
                 rollbacks += 1;
