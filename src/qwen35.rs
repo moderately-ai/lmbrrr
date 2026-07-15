@@ -2829,7 +2829,7 @@ fn causal_mask(b: usize, tgt: usize, offset: usize, dtype: DType, device: &Devic
 /// plain truncate by the rejected count.
 #[derive(Clone, Debug)]
 pub struct MtpHead {
-    fc: candle_nn::Linear,
+    fc: MixedLinear,
     pre_fc_norm_embedding: Qwen35RmsNorm,
     pre_fc_norm_hidden: Qwen35RmsNorm,
     norm: Qwen35RmsNorm,
@@ -2854,7 +2854,7 @@ impl MtpHead {
         let rotary = Arc::new(RotaryEmbedding::new(cfg, vb.dtype(), vb.device())?);
         let fc_w = vb.get((cfg.hidden_size, 2 * cfg.hidden_size), "fc.weight")?;
         Ok(Self {
-            fc: candle_nn::Linear::new(fc_w, None),
+            fc: MixedLinear::dense(candle_nn::Linear::new(fc_w, None)),
             pre_fc_norm_embedding: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
@@ -2912,6 +2912,67 @@ impl MtpHead {
             None,
         )?;
         Ok(post)
+    }
+
+    /// Quantizes the head's dense linears in place (fc, qkv, o_proj,
+    /// gate_up, down — ~37MB -> ~10MB of reads per chain step at q4k).
+    /// Draft-side only: the target's verify is untouched, so committed
+    /// output stays lossless; drafted tokens are margin-class (acceptance
+    /// is the arbiter). Biased linears are skipped (MixedLinear's quantized
+    /// form carries no bias; this model's attention_bias is false). Pack
+    /// hits upload the stored blocks bit-identically (same CPU quantizer);
+    /// misses record for the pack write — `key_prefix` must encode the
+    /// drafter checkpoint identity + tier so checkpoints coexist.
+    pub fn quantize_with_pack(
+        &mut self,
+        ggml: candle::quantized::GgmlDType,
+        pack: Option<&crate::pack::PackStore>,
+        key_prefix: &str,
+    ) -> Result<()> {
+        fn q(
+            lin: &mut MixedLinear,
+            ggml: candle::quantized::GgmlDType,
+            pack: Option<&crate::pack::PackStore>,
+            key: String,
+        ) -> Result<()> {
+            if let Some(pack) = pack {
+                if let Some(qt) = pack.take(&key) {
+                    *lin = MixedLinear::from_qtensor(qt)?;
+                    return Ok(());
+                }
+            }
+            let qt = {
+                if let MixedLinear::Dense(inner) = &*lin {
+                    if inner.bias().is_some() {
+                        return Ok(());
+                    }
+                }
+                let Some(w) = lin.dense_weight() else {
+                    return Ok(());
+                };
+                let device = w.device().clone();
+                let cpu = w.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+                match pack {
+                    Some(pack) => pack
+                        .quantize_and_record(&key, &cpu, ggml)
+                        .map_err(|e| candle::Error::Msg(format!("pack {key}: {e:#}")))?,
+                    None => candle::quantized::QTensor::quantize_onto(&cpu, ggml, &device)?,
+                }
+            };
+            *lin = MixedLinear::from_qtensor(qt)?;
+            Ok(())
+        }
+        q(&mut self.fc, ggml, pack, format!("{key_prefix}fc"))?;
+        match &mut self.layer.mixer {
+            TokenMixer::Full(attn) => {
+                q(&mut attn.qkv_proj, ggml, pack, format!("{key_prefix}qkv"))?;
+                q(&mut attn.o_proj, ggml, pack, format!("{key_prefix}o"))?;
+            }
+            TokenMixer::Linear(_) => unreachable!("MTP layer is full attention"),
+        }
+        q(&mut self.layer.mlp.gate_up_proj, ggml, pack, format!("{key_prefix}gate_up"))?;
+        q(&mut self.layer.mlp.down_proj, ggml, pack, format!("{key_prefix}down"))?;
+        Ok(())
     }
 
     /// Pairs fed so far (the head's rope offset).

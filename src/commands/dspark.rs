@@ -1205,14 +1205,15 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
-    let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
-        &bundle,
-        dtype,
-        &device,
-        args.model.quantized_manifest.as_ref(),
-        args.model.quantize_lm_head,
-    )?;
-    model.load_mtp_head(&bundle.config, mtp_weights)?;
+    let (mut model, load_elapsed, quantized_load) =
+        load_model_with_optional_quantization_and_mtp(
+            &bundle,
+            dtype,
+            &device,
+            args.model.quantized_manifest.as_ref(),
+            args.model.quantize_lm_head,
+            Some((mtp_weights, args.mtp_quantize.map(|t| t.ggml()))),
+        )?;
     if let Some(n) = args.mtp_draft_vocab {
         #[derive(serde::Deserialize)]
         struct Ranking {

@@ -679,6 +679,13 @@ struct DsparkRunArgs {
     #[arg(long)]
     mtp_margin_oracle: bool,
 
+    /// Quantize the MTP head's dense linears (fc/qkv/o/gate_up/down) at
+    /// this tier: ~37MB -> ~10MB of weight reads per chain step at q4k.
+    /// Draft-side only — committed output stays lossless (target verifies
+    /// full precision); drafted-token acceptance is the arbiter.
+    #[arg(long, value_enum)]
+    mtp_quantize: Option<DrafterQuantArg>,
+
     /// Bounded Metal capture around exactly this MTP round (draft chain +
     /// verify + catch-up), written to dspark-round-<N>.gputrace. Needs
     /// METAL_CAPTURE_ENABLED=1; earlier rounds warm the shader caches.
@@ -990,11 +997,53 @@ fn load_model_with_optional_quantization(
     Duration,
     Option<QuantizedLoadStats>,
 )> {
+    load_model_with_optional_quantization_and_mtp(
+        bundle,
+        dtype,
+        device,
+        quantized_manifest,
+        quantize_lm_head,
+        None,
+    )
+}
+
+/// Checkpoint identity for pack keys: first 8 hex of the file's sha256, so
+/// distinct drafter checkpoints (and tiers) coexist in one pack without
+/// stale-bytes risk.
+fn file_sha8(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let digest = Sha256::digest(&bytes);
+    Ok(digest[..4].iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Full loader: quantized text artifact + optional post-hoc lm_head tier +
+/// optional MTP head (weights path, optional quantize tier), all routed
+/// through ONE pack sidecar whose write happens after every consumer has
+/// recorded its bytes.
+fn load_model_with_optional_quantization_and_mtp(
+    bundle: &ArtifactBundle,
+    dtype: DType,
+    device: &Device,
+    quantized_manifest: Option<&PathBuf>,
+    quantize_lm_head: Option<DrafterQuantArg>,
+    mtp: Option<(&std::path::Path, Option<candle::quantized::GgmlDType>)>,
+) -> Result<(
+    MiniCpmForConditionalGeneration,
+    Duration,
+    Option<QuantizedLoadStats>,
+)> {
     let (mut model, load_elapsed) = load_model(bundle, dtype, device)?;
     let quantize_start = Instant::now();
     let Some(manifest) = quantized_manifest else {
         if let Some(tier) = quantize_lm_head {
             model.quantize_lm_head(tier.ggml())?;
+        }
+        if let Some((weights, mtp_tier)) = mtp {
+            model.load_mtp_head(&bundle.config, weights)?;
+            if let Some(ggml) = mtp_tier {
+                model.quantize_mtp_head_with_pack(ggml, None, "")?;
+            }
         }
         return Ok((model, load_elapsed, None));
     };
@@ -1016,6 +1065,15 @@ fn load_model_with_optional_quantization(
     let quantized_data_bytes = artifact.quantized_data_bytes();
     let dense_equivalent_bytes = artifact.dense_equivalent_bytes();
     let replaced_text_linears = model.apply_quantized_text_artifact(&artifact)?;
+    // MTP head loads inside the pack lifecycle so its quantized blocks ride
+    // the same sidecar (checkpoint-keyed: r1/r2 coexist).
+    if let Some((weights, mtp_tier)) = mtp {
+        model.load_mtp_head(&bundle.config, weights)?;
+        if let Some(ggml) = mtp_tier {
+            let key_prefix = format!("mtp:{}:{ggml:?}:", file_sha8(weights)?);
+            model.quantize_mtp_head_with_pack(ggml, Some(&pack), &key_prefix)?;
+        }
+    }
     if let Some(written) = pack.finish()? {
         eprintln!(
             "weight pack written: {} (next start skips requantization)",

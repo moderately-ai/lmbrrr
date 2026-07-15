@@ -502,6 +502,20 @@ impl MiniCpmForConditionalGeneration {
         self.mtp.is_some()
     }
 
+    /// Quantizes the loaded MTP head's dense linears (draft-side only; see
+    /// MtpHead::quantize_with_pack).
+    pub fn quantize_mtp_head_with_pack(
+        &mut self,
+        ggml: candle::quantized::GgmlDType,
+        pack: Option<&crate::pack::PackStore>,
+        key_prefix: &str,
+    ) -> Result<()> {
+        match self.mtp.as_mut() {
+            Some(m) => m.quantize_with_pack(ggml, pack, key_prefix),
+            None => Err(candle::Error::Msg("mtp head not loaded".to_string())),
+        }
+    }
+
     /// One MTP step over S (hidden, successor-token) pairs; returns
     /// (logits [1, S, V], post-norm hidden [1, S, H]). See MtpHead::step for
     /// the pairing contract.
