@@ -117,6 +117,7 @@ pub(crate) fn multi_bench(args: MultiBenchArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         head_loader_quant(&args.model),
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let len = prompt_tokens.len();
@@ -256,6 +257,7 @@ pub(crate) fn bench(args: BenchArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         head_loader_quant(&args.model),
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     maybe_restrict_head(&mut model, &args.model)?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
@@ -422,6 +424,7 @@ pub(crate) fn run(args: RunArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         head_loader_quant(&args.model),
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     maybe_restrict_head(&mut model, &args.model)?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());

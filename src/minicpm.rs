@@ -458,10 +458,18 @@ pub struct MiniCpmForConditionalGeneration {
     // verify-pass hiddens); loaded on demand from the base checkpoint's
     // mtp.* tensors via load_mtp_head.
     mtp: Option<crate::qwen35::MtpHead>,
+    /// Route config injected at construction (entrypoint-resolved); used by
+    /// every quantized-linear the model builds post-load (head slices, MTP
+    /// quantization) and the verify-head argmax route.
+    mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
 }
 
 impl MiniCpmForConditionalGeneration {
-    pub fn new(cfg: &MiniCpmConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        cfg: &MiniCpmConfig,
+        vb: VarBuilder,
+        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
+    ) -> Result<Self> {
         let model = MiniCpmModel::new(cfg, vb.pp("model"))?;
         let lm_head = if vb.contains_tensor("lm_head.weight") {
             candle_nn::linear_no_bias(
@@ -480,6 +488,7 @@ impl MiniCpmForConditionalGeneration {
             head_vocab_ids: None,
             mtp: None,
             mtp_draft_head: None,
+            mm2d_cfg,
         })
     }
 
@@ -503,15 +512,18 @@ impl MiniCpmForConditionalGeneration {
     }
 
     /// Quantizes the loaded MTP head's dense linears (draft-side only; see
-    /// MtpHead::quantize_with_pack).
+    /// MtpHead::quantize_with_pack). `only` is the per-linear bisection hook
+    /// (entrypoint-resolved from LMBRRR_MTP_Q_ONLY).
     pub fn quantize_mtp_head_with_pack(
         &mut self,
         ggml: candle::quantized::GgmlDType,
         pack: Option<&crate::pack::PackStore>,
         key_prefix: &str,
+        only: Option<&str>,
     ) -> Result<()> {
+        let cfg = self.mm2d_cfg.clone();
         match self.mtp.as_mut() {
-            Some(m) => m.quantize_with_pack(ggml, pack, key_prefix),
+            Some(m) => m.quantize_with_pack(ggml, pack, key_prefix, &cfg, only),
             None => Err(candle::Error::Msg("mtp head not loaded".to_string())),
         }
     }
@@ -560,7 +572,7 @@ impl MiniCpmForConditionalGeneration {
             Some(ggml) => {
                 let cpu_f32 = sliced.to_dtype(candle::DType::F32)?.to_device(&Device::Cpu)?;
                 let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
-                crate::quantized_linear::MixedLinear::from_qtensor(q)?
+                crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?
             }
             None => crate::quantized_linear::MixedLinear::dense(Linear::new(sliced, None)),
         };
@@ -625,7 +637,8 @@ impl MiniCpmForConditionalGeneration {
     ) -> Result<()> {
         if let Some(pack) = pack {
             if let Some(q) = pack.take("lm_head") {
-                self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q)?;
+                self.lm_head =
+                    crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?;
                 return Ok(());
             }
         }
@@ -639,7 +652,7 @@ impl MiniCpmForConditionalGeneration {
                 .map_err(|e| candle::Error::Msg(format!("pack lm_head: {e:#}")))?,
             None => candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?,
         };
-        self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q)?;
+        self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?;
         Ok(())
     }
 
@@ -662,7 +675,7 @@ impl MiniCpmForConditionalGeneration {
             Some(ggml) => {
                 let cpu_f32 = sliced.to_dtype(candle::DType::F32)?.to_device(&Device::Cpu)?;
                 let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
-                crate::quantized_linear::MixedLinear::from_qtensor(q)?
+                crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?
             }
             None => crate::quantized_linear::MixedLinear::dense(Linear::new(sliced, None)),
         };
@@ -842,7 +855,7 @@ impl MiniCpmForConditionalGeneration {
         offset: usize,
     ) -> Result<(Tensor, Tensor)> {
         let hidden = self.forward_hidden(input_ids, images, downsample_mode, offset)?;
-        if let Some(ids) = crate::mm2d::mm2d_head_argmax(&hidden, &self.lm_head)
+        if let Some(ids) = crate::mm2d::mm2d_head_argmax(&hidden, &self.lm_head, &self.mm2d_cfg)
             .map_err(|e| candle::Error::Msg(format!("fused verify argmax: {e:#}")))?
         {
             return Ok((ids, hidden));

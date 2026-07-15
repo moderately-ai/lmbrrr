@@ -82,6 +82,7 @@ pub(crate) fn quant_sensitivity(args: QuantSensitivityArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
 
     let baseline_started = Instant::now();
@@ -199,6 +200,7 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
 
     let bundle = resolve_artifacts(&args.model)?;
     let device = select_device(args.model.cpu)?;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let shapes = quant_matmul_shapes(&bundle.config, args.include_lm_head);
     let activation_dtypes = [DType::F32, DType::F16, DType::BF16];
     let quant_dtypes = [
@@ -234,6 +236,7 @@ pub(crate) fn quant_matmul_bench(args: QuantMatmulBenchArgs) -> Result<()> {
                 warmup: args.warmup,
                 iterations: args.iterations,
                 capture: capture_cell.as_ref(),
+                mm2d_cfg: runtime.mm2d.clone(),
             };
             for activation_dtype in activation_dtypes {
                 rows.push(bench_dense_matmul(&shape, tokens, activation_dtype, &ctx));
@@ -493,6 +496,7 @@ fn run_quant_quality_policy(
         ctx.device,
         quantized_manifest,
         None,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     let mut generations = Vec::with_capacity(rows.len());
     for row in rows {
@@ -842,6 +846,9 @@ struct MatmulBenchCtx<'a> {
     warmup: usize,
     iterations: usize,
     capture: Option<&'a CaptureCell>,
+    /// Route config for the MixedLinear under test; resolved once at the
+    /// bench entry (this is a standalone command entrypoint).
+    mm2d_cfg: std::sync::Arc<lmbrrr::mm2d::Mm2dConfig>,
 }
 
 fn bench_dense_matmul(
@@ -901,7 +908,8 @@ fn bench_quant_matmul(
     let result = (|| -> Result<(Duration, Duration)> {
         let prepare_started = Instant::now();
         let qweight = QTensor::quantize_onto(ctx.weight_cpu, quant_dtype, device)?;
-        let linear = lmbrrr::quantized_linear::MixedLinear::from_qtensor(qweight)?;
+        let linear =
+            lmbrrr::quantized_linear::MixedLinear::from_qtensor(qweight, ctx.mm2d_cfg.clone())?;
         let input = ctx.input_cpu.to_device(device)?.to_dtype(activation_dtype)?;
         device.synchronize()?;
         let prepare_elapsed = prepare_started.elapsed();

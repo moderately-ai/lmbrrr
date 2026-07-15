@@ -24,9 +24,12 @@ pub enum MixedLinear {
         // The fork's Metal kernels take BF16 activations directly for these
         // block dtypes, skipping the input-cast dispatch per call.
         bf16_direct: bool,
-        // Lazily-built tensor-op planes (LMBRRR_MM2D verify route); shared
-        // across clones so the repack happens once per weight.
+        // Tensor-op planes (mm2d verify route); shared across clones so the
+        // repack happens once per weight.
         mm2d: Arc<std::sync::OnceLock<Option<crate::mm2d::Mm2dPlanes>>>,
+        // Route configuration, resolved at the entrypoint and passed down
+        // at construction — modules never read the environment.
+        mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
     },
 }
 
@@ -35,16 +38,10 @@ impl MixedLinear {
         Self::Dense(linear)
     }
 
-    pub fn from_dequantized_weight(weight: Tensor) -> Self {
-        Self::QMatMul {
-            matmul: Arc::new(QMatMul::Tensor(weight)),
-            force_f32_input: false,
-            bf16_direct: false,
-            mm2d: Arc::new(std::sync::OnceLock::new()),
-        }
-    }
-
-    pub fn from_qtensor(weight: QTensor) -> candle::Result<Self> {
+    pub fn from_qtensor(
+        weight: QTensor,
+        mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
+    ) -> candle::Result<Self> {
         use candle::quantized::GgmlDType;
         let bf16_direct = matches!(
             weight.dtype(),
@@ -55,9 +52,13 @@ impl MixedLinear {
         // contaminated the first verify's timing when lazy). Load-time cost
         // is reported via load_seconds.
         let mm2d = std::sync::OnceLock::new();
-        if crate::mm2d::mm2d_enabled() && weight.dtype() == GgmlDType::Q4K {
+        if mm2d_cfg.enabled && weight.dtype() == GgmlDType::Q4K {
             if let candle::Device::Metal(dev) = weight.device() {
-                match crate::mm2d::Mm2dPlanes::from_qtensor(&weight, &dev) {
+                match crate::mm2d::Mm2dPlanes::from_qtensor(
+                    &weight,
+                    &dev,
+                    mm2d_cfg.plane_cache_dir.as_deref(),
+                ) {
                     Ok(p) => {
                         let _ = mm2d.set(Some(p));
                     }
@@ -73,6 +74,7 @@ impl MixedLinear {
             force_f32_input: true,
             bf16_direct,
             mm2d: Arc::new(mm2d),
+            mm2d_cfg,
         })
     }
 
@@ -115,18 +117,21 @@ impl MixedLinear {
                 force_f32_input,
                 bf16_direct,
                 mm2d,
+                mm2d_cfg,
             } => {
                 if *force_f32_input && xs.dtype() != DType::F32 {
                     if *bf16_direct && xs.dtype() == DType::BF16 && xs.device().is_metal() {
                         // Tensor-op route for verify-chunk shapes (m in
                         // [2,8]): the matrix units run the whole 8-row tile
                         // at ~1.25x one GEMV read. Margin-class (not
-                        // bit-compatible with the wide kernels), env-gated;
-                        // any dispatch failure disables it process-wide and
-                        // falls through to the wide route.
-                        if crate::mm2d::mm2d_eligible(xs) {
+                        // bit-compatible with the wide kernels), config-
+                        // gated; any dispatch failure disables it
+                        // process-wide and falls through to the wide route.
+                        if crate::mm2d::mm2d_eligible(xs, mm2d_cfg) {
                             if let Some(Some(planes)) = mm2d.get() {
-                                if let Ok(out) = crate::mm2d::mm2d_q4k_forward(xs, planes) {
+                                if let Ok(out) =
+                                    crate::mm2d::mm2d_q4k_forward(xs, planes, mm2d_cfg)
+                                {
                                     return Ok(out);
                                 }
                             }
@@ -171,10 +176,18 @@ pub struct QuantizedTextArtifact {
     device: Device,
     dtype: DType,
     pack: Option<Arc<crate::pack::PackStore>>,
+    /// Route config injected at construction; every MixedLinear this
+    /// artifact builds carries it (the entrypoint resolved it from env).
+    mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
 }
 
 impl QuantizedTextArtifact {
-    pub fn from_manifest(path: &Path, device: &Device, dtype: DType) -> Result<Self> {
+    pub fn from_manifest(
+        path: &Path,
+        device: &Device,
+        dtype: DType,
+        mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
+    ) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("open quantized manifest {}", path.display()))?;
         let manifest: QuantizedManifest = serde_json::from_reader(std::io::BufReader::new(file))
@@ -229,6 +242,7 @@ impl QuantizedTextArtifact {
             device: device.clone(),
             dtype,
             pack: None,
+            mm2d_cfg,
         })
     }
 
@@ -279,7 +293,7 @@ impl QuantizedTextArtifact {
         };
         if let Some(pack) = &self.pack {
             if let Some(qweight) = pack.take(name) {
-                return Ok(Some(MixedLinear::from_qtensor(qweight)?));
+                return Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?));
             }
         }
         let values = self.load_values(name, tensor)?;
@@ -290,7 +304,7 @@ impl QuantizedTextArtifact {
         let qweight = self
             .quantize_for_device(name, &cpu_weight, dtype)
             .with_context(|| format!("requantize {name} into Candle {dtype:?} QTensor"))?;
-        Ok(Some(MixedLinear::from_qtensor(qweight)?))
+        Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?))
     }
 
     /// Slow-path quantization, routed through the pack when attached so the
@@ -327,7 +341,7 @@ impl QuantizedTextArtifact {
         let key = names.join("+");
         if let Some(pack) = &self.pack {
             if let Some(qweight) = pack.take(&key) {
-                return Ok(Some(MixedLinear::from_qtensor(qweight)?));
+                return Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?));
             }
         }
         let in_dim = tensors[0].1.shape[1];
@@ -360,7 +374,7 @@ impl QuantizedTextArtifact {
         let qweight = self
             .quantize_for_device(&key, &cpu_weight, dtype)
             .with_context(|| format!("requantize fused {names:?} into {dtype:?} QTensor"))?;
-        Ok(Some(MixedLinear::from_qtensor(qweight)?))
+        Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?))
     }
 
     fn load_values(&self, name: &str, tensor: &QuantizedTensor) -> Result<Vec<f32>> {
@@ -586,8 +600,13 @@ mod tests {
         )
         .unwrap();
 
-        let artifact =
-            QuantizedTextArtifact::from_manifest(&manifest_path, &Device::Cpu, DType::F32).unwrap();
+        let artifact = QuantizedTextArtifact::from_manifest(
+            &manifest_path,
+            &Device::Cpu,
+            DType::F32,
+            Arc::new(crate::mm2d::Mm2dConfig::default()),
+        )
+        .unwrap();
         let linear = artifact.load_linear("linear.weight").unwrap().unwrap();
         assert_eq!(artifact.backend(), "candle_qtensor_requantized");
         assert_eq!(artifact.quantized_data_bytes(), 36);

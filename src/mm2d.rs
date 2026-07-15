@@ -14,7 +14,7 @@
 //! back to the wide kernels.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use candle::op::BackpropOp;
@@ -26,64 +26,105 @@ use candle_metal_kernels::{
     call_quantized_matmul_mm2d_q4k, call_quantized_matmul_mm2d_q4k_splitk,
 };
 
-/// Route master switch (default off until the verify refit ships it).
-pub fn mm2d_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D").is_ok_and(|v| v != "0"))
+/// Tensor-op route configuration. Constructed ONCE at the entrypoint
+/// (usually via [`Mm2dConfig::from_env`]) and threaded to every
+/// [`crate::quantized_linear::MixedLinear`] at construction — modules never
+/// read the environment themselves. Defaults are this model's arbitrated
+/// values; a new model re-tunes by constructing a different config.
+#[derive(Clone, Debug)]
+pub struct Mm2dConfig {
+    /// Route master switch (default off until the verify refit ships it).
+    pub enabled: bool,
+    /// Minimum weight rows (n) for the tensor-op route. Small-n dispatches
+    /// have too few threadgroups to hide the serial K-loop latency in a
+    /// dependent layer chain; min_n isolates that effect (e.g. 100000 =
+    /// lm_head only).
+    pub min_n: usize,
+    /// Minimum chunk rows for routing BODY linears (n below the head class)
+    /// through the tensor op. With split-K (the default) the body wins at
+    /// every m in [2,8]: suite mean 145.2 vs 137.5 tok/s at body_min_m=2 vs
+    /// the head-only route (2026-07-14). Without split-K the crossover was
+    /// m=5.
+    pub body_min_m: usize,
+    /// Head-class boundary: weights with n at/above this route as the vocab
+    /// head (unsplit, any m); below it as body shapes (split-K, m-gated).
+    /// The default fits this model's 248k vocab; small-vocab (32k) models
+    /// need a lower boundary.
+    pub head_min_n: usize,
+    /// Split-K for body shapes. Default ON: the in-loop A/B (2026-07-14, d5
+    /// warm) cut verify 13.36 -> 10.98 ms/round and the suite confirmed the
+    /// mean win; off restores the single-dispatch kernel.
+    pub splitk: bool,
+    /// Split-K grid target (threadgroups). Suite-arbitrated at 128
+    /// (2026-07-15): 384 cut the round 2ms (gate_up finally split) but lost
+    /// the suite mean 182.6 -> 176.7 — the deeper split's
+    /// accumulation-order perturbation flips enough drafter near-ties to
+    /// eat the speed. Retest after acceptance rises.
+    pub split_target_tgs: usize,
+    /// Content-addressed plane cache directory; None disables caching.
+    pub plane_cache_dir: Option<std::path::PathBuf>,
+    /// Fused verify-head argmax. Opt-in: falsified in-loop 2026-07-15
+    /// (byte-identical but 11.71 -> 11.82 ms/round — the saved logits write
+    /// is ~0.02ms while the threadgroup argmax epilogue costs more than the
+    /// 0.13ms fast_argmax pass it replaces). Kept for deep-chunk scenarios.
+    pub fused_verify_argmax: bool,
 }
 
-/// Minimum weight rows (n) for the tensor-op route. Small-n dispatches have
-/// too few threadgroups to hide the serial K-loop latency in a dependent
-/// layer chain; LMBRRR_MM2D_MIN_N isolates that effect (e.g. 100000 =
-/// lm_head only).
-pub fn mm2d_min_n() -> usize {
-    static MIN_N: OnceLock<usize> = OnceLock::new();
-    *MIN_N.get_or_init(|| {
-        std::env::var("LMBRRR_MM2D_MIN_N")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-    })
+impl Default for Mm2dConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_n: 0,
+            body_min_m: 2,
+            head_min_n: 100_000,
+            splitk: true,
+            split_target_tgs: 128,
+            // Pure default: no caching. from_env (the entrypoint path)
+            // supplies the ~/.cache location so tests stay deterministic.
+            plane_cache_dir: None,
+            fused_verify_argmax: false,
+        }
+    }
 }
 
-/// Minimum chunk rows for routing BODY linears (n below the head class)
-/// through the tensor op. With split-K (the default) the body wins at every
-/// m in [2,8]: suite mean 145.2 vs 137.5 tok/s at BODY_MIN_M=2 vs the
-/// head-only route (2026-07-14). Without split-K the crossover was m=5.
-pub fn mm2d_body_min_m() -> usize {
-    static MIN_M: OnceLock<usize> = OnceLock::new();
-    *MIN_M.get_or_init(|| {
-        std::env::var("LMBRRR_MM2D_BODY_MIN_M")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(2)
-    })
+impl Mm2dConfig {
+    /// The entrypoint's env resolution (LMBRRR_MM2D, _MIN_N, _BODY_MIN_M,
+    /// _HEAD_MIN_N, _SPLITK, _SPLIT_TGS, _PLANE_CACHE, _CACHE_DIR) over the
+    /// arbitrated defaults. The only place these variables are read.
+    pub fn from_env() -> Self {
+        let base = Self::default();
+        let parse = |key: &str, default: usize| -> usize {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        Self {
+            enabled: std::env::var("LMBRRR_MM2D").is_ok_and(|v| v != "0"),
+            min_n: parse("LMBRRR_MM2D_MIN_N", base.min_n),
+            body_min_m: parse("LMBRRR_MM2D_BODY_MIN_M", base.body_min_m),
+            head_min_n: parse("LMBRRR_MM2D_HEAD_MIN_N", base.head_min_n),
+            splitk: std::env::var("LMBRRR_MM2D_SPLITK").map_or(base.splitk, |v| v != "0"),
+            split_target_tgs: parse("LMBRRR_MM2D_SPLIT_TGS", base.split_target_tgs),
+            plane_cache_dir: if std::env::var("LMBRRR_MM2D_PLANE_CACHE").is_ok_and(|v| v == "0")
+            {
+                None
+            } else {
+                std::env::var("LMBRRR_MM2D_CACHE_DIR")
+                    .map(std::path::PathBuf::from)
+                    .ok()
+                    .or_else(default_plane_cache_dir)
+            },
+            fused_verify_argmax: std::env::var("LMBRRR_FUSED_VERIFY_ARGMAX")
+                .is_ok_and(|v| v == "1"),
+        }
+    }
 }
 
-const HEAD_CLASS_MIN_N: usize = 100_000;
-
-/// Split-K for body shapes. Default ON: the in-loop A/B (2026-07-14, d5
-/// warm) cut verify 13.36 -> 10.98 ms/round and the suite confirmed the
-/// mean win; LMBRRR_MM2D_SPLITK=0 restores the single-dispatch kernel.
-pub fn mm2d_splitk_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D_SPLITK").map_or(true, |v| v != "0"))
-}
-
-/// Split-K grid target (threadgroups). Suite-arbitrated at 128
-/// (2026-07-15): 384 cut the round 2ms (gate_up finally split) but lost
-/// the suite mean 182.6 -> 176.7 — the deeper split's accumulation-order
-/// perturbation flips enough drafter near-ties to eat the speed. Retest
-/// after r2 lifts acceptance (fewer near-ties); LMBRRR_MM2D_SPLIT_TGS
-/// overrides.
-pub fn mm2d_split_target_tgs() -> usize {
-    static TGS: OnceLock<usize> = OnceLock::new();
-    *TGS.get_or_init(|| {
-        std::env::var("LMBRRR_MM2D_SPLIT_TGS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(128)
-    })
+fn default_plane_cache_dir() -> Option<std::path::PathBuf> {
+    Some(
+        std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".cache/lmbrrr/mm2d"),
+    )
 }
 
 /// Process-wide kill switch, set on the first dispatch failure (pre-26.4 OS).
@@ -104,32 +145,16 @@ pub struct Mm2dPlanes {
 /// changes; encoded in cache filenames so stale entries miss.
 const PLANE_CACHE_VERSION: u32 = 1;
 
-/// Content-addressed plane cache (default on; LMBRRR_MM2D_PLANE_CACHE=0
-/// disables). The CPU repack of the resident blocks costs seconds per
-/// process (lm_head dominated) and its output is a pure function of the
-/// block bytes, so it is cached by their sha256 under
-/// $LMBRRR_MM2D_CACHE_DIR (default ~/.cache/lmbrrr/mm2d).
-fn plane_cache_dir() -> Option<std::path::PathBuf> {
-    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-    DIR.get_or_init(|| {
-        if std::env::var("LMBRRR_MM2D_PLANE_CACHE").is_ok_and(|v| v == "0") {
-            return None;
-        }
-        let dir = match std::env::var("LMBRRR_MM2D_CACHE_DIR") {
-            Ok(d) => std::path::PathBuf::from(d),
-            Err(_) => std::path::PathBuf::from(std::env::var("HOME").ok()?)
-                .join(".cache/lmbrrr/mm2d"),
-        };
-        std::fs::create_dir_all(&dir).ok()?;
-        Some(dir)
-    })
-    .clone()
-}
-
 impl Mm2dPlanes {
-    /// Repacked planes for a q4_K weight: cache read, or CPU repack of the
-    /// resident ggml blocks (cached for the next process), then upload.
-    pub fn from_qtensor(weight: &QTensor, device: &MetalDevice) -> Result<Self> {
+    /// Repacked planes for a q4_K weight: cache read (`cache_dir` from the
+    /// config — the repack is a pure function of the block bytes, cached by
+    /// their sha256), or CPU repack of the resident ggml blocks (cached for
+    /// the next process), then upload.
+    pub fn from_qtensor(
+        weight: &QTensor,
+        device: &MetalDevice,
+        cache_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
         anyhow::ensure!(
             weight.dtype() == GgmlDType::Q4K,
             "mm2d planes need q4_K (got {:?})",
@@ -152,7 +177,8 @@ impl Mm2dPlanes {
         let scale_len = n_pad * (k / 32) * 2;
         let total_len = nib_len + 2 * scale_len;
 
-        let cache_path = plane_cache_dir().map(|dir| {
+        let cache_path = cache_dir.and_then(|dir| {
+            std::fs::create_dir_all(dir).ok()?;
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(&*data);
@@ -161,7 +187,7 @@ impl Mm2dPlanes {
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>();
-            dir.join(format!("{short}-{n}x{k}.v{PLANE_CACHE_VERSION}.bin"))
+            Some(dir.join(format!("{short}-{n}x{k}.v{PLANE_CACHE_VERSION}.bin")))
         });
 
         let upload = |bytes: &[u8], label: &str| -> Result<Arc<Buffer>> {
@@ -234,8 +260,8 @@ impl Mm2dPlanes {
 }
 
 /// Whether this activation shape is eligible for the tensor-op route.
-pub fn mm2d_eligible(xs: &Tensor) -> bool {
-    if !mm2d_enabled() || MM2D_BROKEN.load(Ordering::Relaxed) {
+pub fn mm2d_eligible(xs: &Tensor, cfg: &Mm2dConfig) -> bool {
+    if !cfg.enabled || MM2D_BROKEN.load(Ordering::Relaxed) {
         return false;
     }
     if xs.dtype() != DType::BF16 || !xs.device().is_metal() {
@@ -249,12 +275,12 @@ pub fn mm2d_eligible(xs: &Tensor) -> bool {
 /// One matmul through the tensor-op kernel: xs [.., m, k] BF16 -> [.., m, n]
 /// BF16. Errors mark the route broken process-wide (warn once) so the caller
 /// can fall back; pass a fresh forward to the wide route on Err.
-pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
-    anyhow::ensure!(planes.n >= mm2d_min_n(), "below LMBRRR_MM2D_MIN_N");
-    if planes.n < HEAD_CLASS_MIN_N {
+pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes, cfg: &Mm2dConfig) -> Result<Tensor> {
+    anyhow::ensure!(planes.n >= cfg.min_n, "below the configured mm2d min_n");
+    if planes.n < cfg.head_min_n {
         let dims = xs.dims();
         let m: usize = dims[..dims.len() - 1].iter().product();
-        anyhow::ensure!(m >= mm2d_body_min_m(), "body shape below BODY_MIN_M");
+        anyhow::ensure!(m >= cfg.body_min_m, "body shape below body_min_m");
     }
     let candle::Device::Metal(device) = xs.device() else {
         anyhow::bail!("mm2d forward requires a Metal device");
@@ -284,12 +310,12 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
 
     // Split-K for body shapes (in-loop arbitrated): small-N grids
     // under-occupy the GPU on a serial K loop; partition the K/32 slices so
-    // the grid reaches the target threadgroup count. The original 128
-    // target left gate_up (N=7168, 112 TGs) unsplit at 47 GB/s — 24 plain
-    // dispatches ~2ms/round in the labeled trace (2026-07-15); 256 splits
-    // it 2x. LMBRRR_MM2D_SPLIT_TGS overrides the target for A/B.
-    let n_splits = if planes.n < HEAD_CLASS_MIN_N && mm2d_splitk_enabled() {
-        (mm2d_split_target_tgs() / (planes.n_pad / 64)).clamp(1, planes.k / 32)
+    // the grid reaches the target threadgroup count. The 128 target leaves
+    // gate_up (N=7168, 112 TGs) unsplit at 47 GB/s — 24 plain dispatches
+    // ~2ms/round in the labeled trace (2026-07-15); 256 splits it 2x but is
+    // margin-class (split_target_tgs re-arbitrates per arm).
+    let n_splits = if planes.n < cfg.head_min_n && cfg.splitk {
+        (cfg.split_target_tgs / (planes.n_pad / 64)).clamp(1, planes.k / 32)
     } else {
         1
     };
@@ -364,20 +390,14 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
 /// from the mm2d planes — the m x V logits tensor is never materialized.
 /// bf16-rounded compares + lowest-index ties keep it byte-identical to
 /// head-forward + fast_argmax. Returns Ok(None) when the route does not
-/// apply (caller falls back); LMBRRR_FUSED_VERIFY_ARGMAX=0 disables.
+/// apply (caller falls back); gated by cfg.fused_verify_argmax (see its
+/// falsification note).
 pub fn mm2d_head_argmax(
     xs: &Tensor,
     head: &crate::quantized_linear::MixedLinear,
+    cfg: &Mm2dConfig,
 ) -> Result<Option<Tensor>> {
-    // Opt-in: falsified in-loop 2026-07-15 (byte-identical but 11.71 ->
-    // 11.82 ms/round — the saved logits write is ~0.02ms while the
-    // threadgroup argmax epilogue costs more than the 0.13ms fast_argmax
-    // pass it replaces). Kept for deep-chunk memory-traffic scenarios.
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let enabled = *ENABLED.get_or_init(|| {
-        std::env::var("LMBRRR_FUSED_VERIFY_ARGMAX").is_ok_and(|v| v == "1")
-    });
-    if !enabled || !mm2d_enabled() || MM2D_BROKEN.load(Ordering::Relaxed) {
+    if !cfg.fused_verify_argmax || !cfg.enabled || MM2D_BROKEN.load(Ordering::Relaxed) {
         return Ok(None);
     }
     let Some(planes) = head.mm2d_planes() else {

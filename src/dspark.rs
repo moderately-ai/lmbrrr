@@ -267,6 +267,7 @@ fn quantize_or_dense(
     weight: Tensor,
     dtype: Option<candle::quantized::GgmlDType>,
     device: &Device,
+    mm2d_cfg: &std::sync::Arc<crate::mm2d::Mm2dConfig>,
 ) -> Result<MixedLinear> {
     match dtype {
         None => Ok(MixedLinear::dense(Linear::new(weight, None))),
@@ -275,14 +276,19 @@ fn quantize_or_dense(
                 .to_dtype(DType::F32)?
                 .to_device(&Device::Cpu)?;
             let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, device)?;
-            Ok(MixedLinear::from_qtensor(q)?)
+            Ok(MixedLinear::from_qtensor(q, mm2d_cfg.clone())?)
         }
     }
 }
 
 impl DsparkDrafter {
-    pub fn load(dir: &Path, device: &Device, dtype: DType) -> Result<Self> {
-        Self::load_with_options(dir, device, dtype, None)
+    pub fn load(
+        dir: &Path,
+        device: &Device,
+        dtype: DType,
+        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
+    ) -> Result<Self> {
+        Self::load_with_options(dir, device, dtype, None, mm2d_cfg)
     }
 
     /// `quantize_heads` post-hoc quantizes the two 248k-vocab weight reads
@@ -294,8 +300,9 @@ impl DsparkDrafter {
         device: &Device,
         dtype: DType,
         quantize_heads: Option<candle::quantized::GgmlDType>,
+        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
     ) -> Result<Self> {
-        Self::load_with_draft_vocab(dir, device, dtype, quantize_heads, None)
+        Self::load_with_draft_vocab(dir, device, dtype, quantize_heads, None, mm2d_cfg)
     }
 
     /// `draft_vocab`: FR-Spec top-k token ids (rank order). The vocab-wide
@@ -309,6 +316,7 @@ impl DsparkDrafter {
         dtype: DType,
         quantize_heads: Option<candle::quantized::GgmlDType>,
         draft_vocab: Option<&[u32]>,
+        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
     ) -> Result<Self> {
         let config = DsparkConfig::from_dir(dir)?;
         if config.markov_head_type != "vanilla"
@@ -383,6 +391,7 @@ impl DsparkDrafter {
                 )?,
                 quantize_heads,
                 device,
+                &mm2d_cfg,
             )?,
             markov_w1: vb.get((config.vocab_size, config.markov_rank), "markov_head.markov_w1.weight")?,
             markov_w2: quantize_or_dense(
@@ -392,6 +401,7 @@ impl DsparkDrafter {
                 )?,
                 quantize_heads,
                 device,
+                &mm2d_cfg,
             )?,
             draft_vocab_ids: draft_vocab
                 .map(|ids| Tensor::from_slice(ids, ids.len(), device))

@@ -320,6 +320,7 @@ pub(crate) fn spec_verify(args: SpecVerifyArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
@@ -480,7 +481,9 @@ pub(crate) fn dspark_drafter_parity(args: DsparkDrafterParityArgs) -> Result<()>
 
     let device = select_device(args.cpu)?;
     let dtype = if device.is_cpu() { DType::F32 } else { DType::BF16 };
-    let mut drafter = DsparkDrafter::load(&args.checkpoint, &device, dtype)?;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
+    let mut drafter =
+        DsparkDrafter::load(&args.checkpoint, &device, dtype, runtime.mm2d.clone())?;
     let gamma = drafter.config.block_size;
 
     let fixture = candle::safetensors::load(&args.fixture, &device)
@@ -593,6 +596,7 @@ pub(crate) fn tree_check(args: TreeCheckArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
 
     let prompt_text = chat_prompt(&args.prompt, 0, false);

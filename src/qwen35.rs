@@ -3026,16 +3026,19 @@ impl MtpHead {
         ggml: candle::quantized::GgmlDType,
         pack: Option<&crate::pack::PackStore>,
         key_prefix: &str,
+        mm2d_cfg: &std::sync::Arc<crate::mm2d::Mm2dConfig>,
+        only: Option<&str>,
     ) -> Result<()> {
         fn q(
             lin: &mut MixedLinear,
             ggml: candle::quantized::GgmlDType,
             pack: Option<&crate::pack::PackStore>,
             key: String,
+            mm2d_cfg: &std::sync::Arc<crate::mm2d::Mm2dConfig>,
         ) -> Result<()> {
             if let Some(pack) = pack {
                 if let Some(qt) = pack.take(&key) {
-                    *lin = MixedLinear::from_qtensor(qt)?;
+                    *lin = MixedLinear::from_qtensor(qt, mm2d_cfg.clone())?;
                     return Ok(());
                 }
             }
@@ -3057,33 +3060,45 @@ impl MtpHead {
                     None => candle::quantized::QTensor::quantize_onto(&cpu, ggml, &device)?,
                 }
             };
-            *lin = MixedLinear::from_qtensor(qt)?;
+            *lin = MixedLinear::from_qtensor(qt, mm2d_cfg.clone())?;
             Ok(())
         }
-        // Bisection hook (diagnostics): LMBRRR_MTP_Q_ONLY=fc|qkv|o|gate_up|down
+        // Bisection hook (diagnostics): `only` = fc|qkv|o|gate_up|down
         // quantizes a single linear, isolating per-path damage (filed q8_0
-        // m-in-[2,8] anomaly, 2026-07-15).
-        let only = std::env::var("LMBRRR_MTP_Q_ONLY").ok();
-        let want = |name: &str| only.as_deref().is_none_or(|o| o == name);
+        // m-in-[2,8] anomaly, 2026-07-15). Entrypoint-resolved
+        // (LMBRRR_MTP_Q_ONLY), threaded as a param.
+        let want = |name: &str| only.is_none_or(|o| o == name);
         if want("fc") {
-            q(&mut self.fc, ggml, pack, format!("{key_prefix}fc"))?;
+            q(&mut self.fc, ggml, pack, format!("{key_prefix}fc"), mm2d_cfg)?;
         }
         match &mut self.layer.mixer {
             TokenMixer::Full(attn) => {
                 if want("qkv") {
-                    q(&mut attn.qkv_proj, ggml, pack, format!("{key_prefix}qkv"))?;
+                    q(&mut attn.qkv_proj, ggml, pack, format!("{key_prefix}qkv"), mm2d_cfg)?;
                 }
                 if want("o") {
-                    q(&mut attn.o_proj, ggml, pack, format!("{key_prefix}o"))?;
+                    q(&mut attn.o_proj, ggml, pack, format!("{key_prefix}o"), mm2d_cfg)?;
                 }
             }
             TokenMixer::Linear(_) => unreachable!("MTP layer is full attention"),
         }
         if want("gate_up") {
-            q(&mut self.layer.mlp.gate_up_proj, ggml, pack, format!("{key_prefix}gate_up"))?;
+            q(
+                &mut self.layer.mlp.gate_up_proj,
+                ggml,
+                pack,
+                format!("{key_prefix}gate_up"),
+                mm2d_cfg,
+            )?;
         }
         if want("down") {
-            q(&mut self.layer.mlp.down_proj, ggml, pack, format!("{key_prefix}down"))?;
+            q(
+                &mut self.layer.mlp.down_proj,
+                ggml,
+                pack,
+                format!("{key_prefix}down"),
+                mm2d_cfg,
+            )?;
         }
         Ok(())
     }

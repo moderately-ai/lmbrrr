@@ -236,12 +236,14 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &runtime,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
@@ -273,6 +275,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         dtype,
         args.drafter_quantize.map(DrafterQuantArg::ggml),
         draft_vocab_ids.as_deref(),
+        runtime.mm2d.clone(),
     )?;
     let gamma = args.gamma.min(drafter.config.block_size);
     let capture_layers = drafter.config.target_layer_ids.clone();
@@ -1213,6 +1216,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             args.model.quantized_manifest.as_ref(),
             args.model.quantize_lm_head,
             Some((mtp_weights, args.mtp_quantize.map(|t| t.ggml()))),
+            &lmbrrr::runtime_config::RuntimeConfig::from_env(),
         )?;
     if let Some(n) = args.mtp_draft_vocab {
         #[derive(serde::Deserialize)]
@@ -1665,6 +1669,7 @@ pub(crate) fn dspark_run(args: DsparkRunArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let vocab_size = bundle.config.text_config.vocab_size;

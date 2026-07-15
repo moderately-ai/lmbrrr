@@ -162,6 +162,7 @@ pub(crate) fn verify_table(args: VerifyTableArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
@@ -486,6 +487,7 @@ pub(crate) fn trace_hidden_states(args: TraceArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let trace_recorder = Qwen35TraceRecorder::new(capture_layers.clone());
@@ -652,6 +654,7 @@ pub(crate) fn profile_decode(args: ProfileArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
     let profiler = Qwen35Profiler::new();
     model.set_text_profiler(Some(profiler.clone()));
@@ -794,6 +797,7 @@ pub(crate) fn logits(args: LogitsArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
 
     let mut rows = Vec::with_capacity(cases.len());
@@ -910,6 +914,7 @@ pub(crate) fn vision_check(args: VisionCheckArgs) -> Result<()> {
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
+        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
     )?;
 
     let mut worst_abs = 0f32;

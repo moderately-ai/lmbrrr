@@ -992,6 +992,7 @@ fn load_model_with_optional_quantization(
     device: &Device,
     quantized_manifest: Option<&PathBuf>,
     quantize_lm_head: Option<DrafterQuantArg>,
+    runtime: &lmbrrr::runtime_config::RuntimeConfig,
 ) -> Result<(
     MiniCpmForConditionalGeneration,
     Duration,
@@ -1004,6 +1005,7 @@ fn load_model_with_optional_quantization(
         quantized_manifest,
         quantize_lm_head,
         None,
+        runtime,
     )
 }
 
@@ -1028,12 +1030,13 @@ fn load_model_with_optional_quantization_and_mtp(
     quantized_manifest: Option<&PathBuf>,
     quantize_lm_head: Option<DrafterQuantArg>,
     mtp: Option<(&std::path::Path, Option<candle::quantized::GgmlDType>)>,
+    runtime: &lmbrrr::runtime_config::RuntimeConfig,
 ) -> Result<(
     MiniCpmForConditionalGeneration,
     Duration,
     Option<QuantizedLoadStats>,
 )> {
-    let (mut model, load_elapsed) = load_model(bundle, dtype, device)?;
+    let (mut model, load_elapsed) = load_model(bundle, dtype, device, runtime)?;
     let quantize_start = Instant::now();
     let Some(manifest) = quantized_manifest else {
         if let Some(tier) = quantize_lm_head {
@@ -1042,7 +1045,12 @@ fn load_model_with_optional_quantization_and_mtp(
         if let Some((weights, mtp_tier)) = mtp {
             model.load_mtp_head(&bundle.config, weights)?;
             if let Some(ggml) = mtp_tier {
-                model.quantize_mtp_head_with_pack(ggml, None, "")?;
+                model.quantize_mtp_head_with_pack(
+                    ggml,
+                    None,
+                    "",
+                    runtime.mtp_quantize_only.as_deref(),
+                )?;
             }
         }
         return Ok((model, load_elapsed, None));
@@ -1058,7 +1066,8 @@ fn load_model_with_optional_quantization_and_mtp(
     if let Some(tier) = quantize_lm_head {
         model.quantize_lm_head_with_pack(tier.ggml(), Some(&pack))?;
     }
-    let mut artifact = QuantizedTextArtifact::from_manifest(manifest, device, dtype)?;
+    let mut artifact =
+        QuantizedTextArtifact::from_manifest(manifest, device, dtype, runtime.mm2d.clone())?;
     artifact.set_pack(pack.clone());
     let quantized_tensors = artifact.quantized_tensor_count();
     let backend = artifact.backend().to_string();
@@ -1071,7 +1080,12 @@ fn load_model_with_optional_quantization_and_mtp(
         model.load_mtp_head(&bundle.config, weights)?;
         if let Some(ggml) = mtp_tier {
             let key_prefix = format!("mtp:{}:{ggml:?}:", file_sha8(weights)?);
-            model.quantize_mtp_head_with_pack(ggml, Some(&pack), &key_prefix)?;
+            model.quantize_mtp_head_with_pack(
+                ggml,
+                Some(&pack),
+                &key_prefix,
+                runtime.mtp_quantize_only.as_deref(),
+            )?;
         }
     }
     if let Some(written) = pack.finish()? {
@@ -1350,11 +1364,13 @@ fn load_model(
     bundle: &ArtifactBundle,
     dtype: DType,
     device: &Device,
+    runtime: &lmbrrr::runtime_config::RuntimeConfig,
 ) -> Result<(MiniCpmForConditionalGeneration, Duration)> {
     let load_start = Instant::now();
     let vb =
         unsafe { VarBuilder::from_mmaped_safetensors(&bundle.artifacts.weights, dtype, device)? };
-    let model = MiniCpmForConditionalGeneration::new(&bundle.config, vb)?;
+    let model =
+        MiniCpmForConditionalGeneration::new(&bundle.config, vb, runtime.mm2d.clone())?;
     Ok((model, load_start.elapsed()))
 }
 

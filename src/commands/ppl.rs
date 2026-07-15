@@ -32,16 +32,18 @@ pub(crate) fn ppl(args: PplArgs) -> Result<()> {
         && args.model.quantize_lm_head.is_none()
         && args.model.target_head_vocab_size.is_none();
     let with_reference = !args.no_reference && !deployed_is_dense;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut deployed, _, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
         head_loader_quant(&args.model),
+        &runtime,
     )?;
     maybe_restrict_head(&mut deployed, &args.model)?;
     let mut reference = if with_reference {
-        Some(load_model(&bundle, dtype, &device)?.0)
+        Some(load_model(&bundle, dtype, &device, &runtime)?.0)
     } else {
         None
     };
