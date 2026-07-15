@@ -1335,6 +1335,7 @@ impl GatedDeltaNet {
             key_dim: self.key_dim,
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
+            num_k_heads: self.num_k_heads,
         };
         if use_v2 {
             let state_t = self.take_state_for_v2(b_sz, xs.device())?;
@@ -1399,7 +1400,10 @@ impl GatedDeltaNet {
             && matches!(xs.device(), Device::Metal(_))
             && xs.dtype() == DType::BF16
             && self.conv_state.is_some()
-            && self.num_k_heads == self.num_v_heads
+            // GQA DeltaNet: the v2 decode kernel maps each value-head to its
+            // group's key/query head, so num_k_heads may divide num_v_heads
+            // (Bonsai: 16 | 48). Chunk/v2 kernels still require equal heads.
+            && self.num_v_heads.is_multiple_of(self.num_k_heads)
             && self.head_k_dim == self.head_v_dim
             && self.head_v_dim.is_multiple_of(32)
             && self.head_v_dim <= 256
@@ -1446,6 +1450,7 @@ impl GatedDeltaNet {
             key_dim: self.key_dim,
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
+            num_k_heads: self.num_k_heads,
         };
         let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_chunk(
             &proj.flatten_to(1)?,
@@ -1557,6 +1562,7 @@ impl GatedDeltaNet {
             key_dim: self.key_dim,
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
+            num_k_heads: self.num_k_heads,
         };
         let (out, conv_new, state_new, cap) = crate::fused_deltanet::gated_delta_v2(
             &qkvz.flatten_all()?.contiguous()?,
@@ -1649,6 +1655,7 @@ impl GatedDeltaNet {
             key_dim: self.key_dim,
             value_dim: self.value_dim,
             ksz: self.conv_kernel_size,
+            num_k_heads: self.num_k_heads,
         };
         if use_v2 {
             // Single fused dispatch: the alternate segment restarts inside

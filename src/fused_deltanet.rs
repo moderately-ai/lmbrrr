@@ -50,6 +50,9 @@ pub struct GatedDeltaDims {
     pub key_dim: usize,
     pub value_dim: usize,
     pub ksz: usize,
+    /// GQA key/query heads (== `heads` unless the DeltaNet is grouped, as in
+    /// Bonsai-27B: 16 k-heads, 48 v-heads).
+    pub num_k_heads: usize,
 }
 
 /// Runs the fused chunk step (2 <= l <= 12). `proj` is the packed
@@ -134,6 +137,7 @@ pub fn gated_delta_chunk(
             key_dim: dims.key_dim as u32,
             value_dim: dims.value_dim as u32,
             ksz: dims.ksz as u32,
+            num_k_heads: dims.num_k_heads as u32,
             l2_eps,
             norm_eps,
         },
@@ -289,6 +293,7 @@ pub fn gated_delta_decode(
             key_dim: dims.key_dim as u32,
             value_dim: dims.value_dim as u32,
             ksz: dims.ksz as u32,
+            num_k_heads: dims.num_k_heads as u32,
             l2_eps,
             norm_eps,
         },
@@ -433,6 +438,7 @@ pub fn gated_delta_v2(
             key_dim: dims.key_dim as u32,
             value_dim: dims.value_dim as u32,
             ksz: dims.ksz as u32,
+            num_k_heads: dims.num_k_heads as u32,
             l2_eps,
             norm_eps,
         },
@@ -599,6 +605,7 @@ pub fn gated_delta_v2_decode(
             key_dim: dims.key_dim as u32,
             value_dim: dims.value_dim as u32,
             ksz: dims.ksz as u32,
+            num_k_heads: dims.num_k_heads as u32,
             l2_eps,
             norm_eps,
         },
@@ -742,6 +749,7 @@ pub fn gated_delta_v2_tree(
             key_dim: dims.key_dim as u32,
             value_dim: dims.value_dim as u32,
             ksz: dims.ksz as u32,
+            num_k_heads: dims.num_k_heads as u32,
             l2_eps,
             norm_eps,
         },

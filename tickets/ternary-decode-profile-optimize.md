@@ -33,9 +33,22 @@ Ternary target decode faster than the llama.cpp reference (13.7 tok/s, M3 Pro, s
 2. **Elementwise dispatch fusion** — sigmoid/rmsnorm/swiglu as separate small kernels; the campaign's metal-elementwise-fusion applies.
 3. **Q2_0 GEMV → close the gap to Q4K's 90%** (secondary; ~1 ms/layer only).
 
-## NEXT
+## PER-OP PROFILE (2026-07-15, M3, `--profile`, 24 decode steps, per-op-sync inflates absolute to 309 ms but the split is real)
 
-Software per-op-kind profile (`Qwen35Profiler`, labels deltanet_decode / attention / mlp / norms) to attribute the ~3 ms/layer precisely, then attack the top item.
+| component | ms/token | pct |
+|---|---|---|
+| **deltanet_recurrent_rule** | **142.5** | **46.1** |
+| mlp | 61.2 | 19.8 |
+| deltanet_qkv_projection | 20.1 | 6.5 |
+| deltanet_output_gate_norm_projection | 17.0 | 5.5 |
+| mlp_residual_next_norm / post_attn_norm / gates / conv | ~50 | ~16 |
+| full_attention_* (16 layers) | ~18 | ~6 |
+
+## ROOT CAUSE (found 2026-07-15) — GQA DeltaNet falls off the fused decode path
+
+`deltanet_recurrent_rule` (46%) is the UNFUSED candle-op path (qwen35.rs ~1890). Decode is supposed to hit `forward_fused_decode` (the `fused_deltanet.rs` kernel), but `fused_decode_eligible` (and `fused_chunk`/`fused_v2`) require **`num_k_heads == num_v_heads`** (line 1402). Bonsai's DeltaNet is **GQA-style: `num_k_heads=16` (ssm.group_count), `num_v_heads=48` (ssm.time_step_rank)** — so it fails the check and falls through to the slow recurrent_delta_rule. The unfused path handles the mismatch via `maybe_repeat_heads` (k/q repeated 16→48); the fused kernel assumes equal heads (built for MiniCPM, which has them equal).
+
+**FIX (decided 2026-07-15): GQA-aware fused v2 DECODE kernel, decode-only, no bloat.** Prefill (l=33 > chunk limit 12) is unfused regardless, so ONLY `gated_delta_v2_decode_bf16` needs changing. In it, grid is one threadgroup per VALUE-head `h`; q/k are read at `h*dk` / `key_dim+h*dk` (lines 309-310) and their conv-state written at 385. Add a `num_k_heads` param; map `kh = h*num_k_heads/heads` for the q/k channel reads + conv-state writes ONLY (v, gates b/a, decay, and the recurrent state stay per-v-head `h`). Guard the q/k conv-out write to the first v-head of each k-group (`h % (heads/num_k_heads) == 0`) to keep single-writer. conv_state stays raw (10240), state stays [48,dk,dv] (unfused-prefill→v2-decode handoff via `take_state_for_v2`, the proven MiniCPM path). Relax `fused_decode_eligible` `num_k_heads == num_v_heads` → `num_v_heads % num_k_heads == 0`. Files: candle fork `gated_delta_v2.metal` (decode kernel) + `kernels/gated_delta.rs` (pass num_k_heads) + `fused_deltanet.rs`; lmbrrr `qwen35.rs` (eligibility + thread num_k_heads). Verify: output stays coherent + decode tok/s.
 
 ## XCTRACE METHODOLOGY (macOS 27 / Xcode 26.6 CLI — reusable)
 
