@@ -188,27 +188,22 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
     let mut offset = ids.len();
     let mut out = Vec::new();
     let mut gaps = Vec::new();
-    let mut head_seconds = 0f64; // argmax + logits readback (host round-trip)
-    let mut fwd_seconds = 0f64; // model forward (embed + trunk + lm_head GEMV)
     let decode = Instant::now();
     for _ in 0..args.max_new_tokens {
         let t0 = Instant::now();
-        let a0 = Instant::now();
+        // The argmax read-back forces execution of the pending forward — no
+        // separate synchronize, so the forward + argmax batch into one point.
         let next = logits
             .argmax(D::Minus1)?
             .to_dtype(DType::U32)?
             .flatten_all()?
             .to_vec1::<u32>()?[0];
-        head_seconds += a0.elapsed().as_secs_f64();
         if next == eos {
             break;
         }
         out.push(next);
         let step = Tensor::from_slice(&[next], (1, 1), &device)?;
-        let f0 = Instant::now();
         logits = model.forward(&step, offset)?;
-        device.synchronize()?;
-        fwd_seconds += f0.elapsed().as_secs_f64();
         offset += 1;
         gaps.push(t0.elapsed().as_secs_f64());
     }
@@ -239,10 +234,6 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
             "decode_seconds": decode_seconds,
             "decode_tokens_per_second": out.len() as f64 / decode_seconds.max(f64::EPSILON),
             "steady_state_tokens_per_second": steady_tps,
-            "fwd_seconds": fwd_seconds,
-            "fwd_ms_per_token": 1000.0 * fwd_seconds / out.len().max(1) as f64,
-            "head_argmax_readback_seconds": head_seconds,
-            "head_ms_per_token": 1000.0 * head_seconds / out.len().max(1) as f64,
             "device": format!("{device:?}"),
             "dtype": "BF16",
         })

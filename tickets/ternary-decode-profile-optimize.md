@@ -35,7 +35,13 @@ Still short of BEATING 13.7. The gguf-run path still syncs + host-argmaxes per t
 | norms (mlp_residual/post_attn) | ~18 | inflated by profiler sync (tiny ops) |
 | full_attention_* (16 layers) | ~13 | |
 
-Host path confirmed negligible again (0.37 ms/token) → fused-argmax / async-readback / device-chain buy ~nothing; do NOT invest there. **Next lever: Q2_0 GEMV bandwidth 93 → ~135 GB/s (Q4K hits 90% of peak; mine is 62%).** The MLP is 43% and bandwidth-bound, so closing the kernel gap is the path past 13.7. Approach: higher-occupancy geometry (fewer rows/simdgroup → smaller accumulator state → more resident simdgroups hide DRAM latency — the q4k-mv-rewrite `nr2sg2` lesson). My Q2_0 mv reuses Q8_0's N_DST=4/nsg=2; try nr=2.
+Host path confirmed negligible again (0.37 ms/token) → fused-argmax / async-readback / device-chain buy ~nothing; do NOT invest there. **Next lever: Q2_0 GEMV bandwidth (Q4K hits 142 GB/s; mine 93).**
+
+## WIN 2 (2026-07-15): Q2_0 mv nr2 geometry → decode 13.5 tok/s steady
+
+nr=2 rows/simdgroup (align 4) vs N_DST=4: Q2_0 GEMV 93.3 → **98.6 GB/s**; E2E fwd 86.4 → **74.1 ms/token**, decode 12.9 → **13.5 tok/s steady** (coherent). candle b4940752. **Now MATCHING the llama.cpp bar (13.5 vs 13.7).**
+
+**KEY: decode is now bandwidth-bound at the Q2_0 kernel's 98 GB/s** (fwd 74 ms ≈ 7.17 GB / 98 GB/s = 71 ms roofline). Everything else (deltanet 25%, attention, norms) reads weights at the same rate. So the SINGULAR lever to beat 13.7 is Q2_0 kernel bandwidth → Q4K's 142 (a 45% gap = real headroom). Candidates: FMA-form dot (unpack code→float + 1 FMA vs 2 conditional selects/element, byte read once); vectorized block loads (34 B block via uint chunks vs 4-B/thread scattered reads); simdgroup-matrix (the q4k k1 keystone).
 
 ## EVIDENCE (measured, not assumed)
 
