@@ -830,6 +830,31 @@ impl MiniCpmForConditionalGeneration {
         Ok((self.lm_head.forward(&hidden)?, hidden))
     }
 
+    /// Verify forward returning per-row argmax ids (device U32 [C]) and the
+    /// hidden — via the fused mm2d head-argmax when available (the C x V
+    /// logits tensor is never materialized; bf16-rounded compares keep it
+    /// byte-identical to head-forward + fast_argmax), else the plain pair.
+    pub fn forward_verify_ids_and_hidden(
+        &mut self,
+        input_ids: &Tensor,
+        images: Option<&ProcessedImages>,
+        downsample_mode: &str,
+        offset: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let hidden = self.forward_hidden(input_ids, images, downsample_mode, offset)?;
+        if let Some(ids) = crate::mm2d::mm2d_head_argmax(&hidden, &self.lm_head)
+            .map_err(|e| candle::Error::Msg(format!("fused verify argmax: {e:#}")))?
+        {
+            return Ok((ids, hidden));
+        }
+        let ids = self
+            .lm_head
+            .forward(&hidden)?
+            .squeeze(0)?
+            .argmax(candle::D::Minus1)?;
+        Ok((ids, hidden))
+    }
+
     /// Tree verify forward: `input_ids` is the flattened
     /// [anchor, a_1..a_w, b_1..b_w] chunk (shape [1, 1 + 2w]). Returns dense
     /// logits for every row. Commit the winner with [`Self::rollback_tree`].

@@ -279,3 +279,98 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
         false,
     ))
 }
+
+/// Fused verify-head argmax: per-row argmax ids (device U32 [m]) straight
+/// from the mm2d planes — the m x V logits tensor is never materialized.
+/// bf16-rounded compares + lowest-index ties keep it byte-identical to
+/// head-forward + fast_argmax. Returns Ok(None) when the route does not
+/// apply (caller falls back); LMBRRR_FUSED_VERIFY_ARGMAX=0 disables.
+pub fn mm2d_head_argmax(
+    xs: &Tensor,
+    head: &crate::quantized_linear::MixedLinear,
+) -> Result<Option<Tensor>> {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var("LMBRRR_FUSED_VERIFY_ARGMAX").map_or(true, |v| v != "0")
+    });
+    if !enabled || !mm2d_enabled() || MM2D_BROKEN.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let Some(planes) = head.mm2d_planes() else {
+        return Ok(None);
+    };
+    if xs.dtype() != DType::BF16 || !xs.device().is_metal() {
+        return Ok(None);
+    }
+    let dims = xs.dims().to_vec();
+    let k = *dims.last().context("empty hidden shape")?;
+    let m: usize = dims[..dims.len() - 1].iter().product();
+    if !(2..=8).contains(&m) || k != planes.k {
+        return Ok(None);
+    }
+    let candle::Device::Metal(device) = xs.device() else {
+        return Ok(None);
+    };
+
+    let xs = if xs.is_contiguous() {
+        xs.clone()
+    } else {
+        xs.contiguous()?
+    };
+    let (storage, layout) = xs.storage_and_layout();
+    let Storage::Metal(ms) = &*storage else {
+        anyhow::bail!("hidden not Metal-resident");
+    };
+    let lhs_offset = layout.start_offset() * 2;
+    let n_tiles = planes.n_pad / 64;
+    let pval = device
+        .new_buffer_builder()
+        .with_size(n_tiles * 8 * 4)
+        .with_label("mm2d_amax_pval")
+        .build()?;
+    let pidx = device
+        .new_buffer_builder()
+        .with_size(n_tiles * 8 * 4)
+        .with_label("mm2d_amax_pidx")
+        .build()?;
+    let out = device
+        .new_buffer_builder()
+        .with_size(m * 4)
+        .with_label("mm2d_amax_out")
+        .build()?;
+
+    let dispatch = || -> Result<()> {
+        let encoder = device.command_encoder().context("mm2d argmax encoder")?;
+        candle_metal_kernels::call_quantized_matmul_mm2d_q4k_argmax(
+            device.metal_device(),
+            &encoder,
+            device.kernels(),
+            (m, planes.n, planes.n_pad, planes.k),
+            ms.buffer(),
+            lhs_offset,
+            &planes.nibbles,
+            &planes.dsc,
+            &planes.dmm,
+            &pval,
+            &pidx,
+            &out,
+        )
+        .context("mm2d argmax dispatch")?;
+        Ok(())
+    };
+    if let Err(err) = dispatch() {
+        if !MM2D_BROKEN.swap(true, Ordering::Relaxed) {
+            eprintln!("warning: mm2d argmax unavailable ({err})");
+        }
+        return Ok(None);
+    }
+    drop(storage);
+
+    let storage = candle::MetalStorage::new(out, device.clone(), m, DType::U32);
+    Ok(Some(Tensor::from_storage(
+        Storage::Metal(storage),
+        vec![m],
+        BackpropOp::none(),
+        false,
+    )))
+}

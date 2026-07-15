@@ -1342,6 +1342,9 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     // ONE batched mtp_step before the next drafted round so the MTP cache
     // stays a contiguous committed-pair history.
     let mut pending_catchup: Vec<(Tensor, u32)> = Vec::new();
+    // Margin-oracle top-k rows for the round, staged between verify and
+    // commit (the fused-argmax path never materializes the logits).
+    let mut committed_top_k_pending: Option<Vec<Vec<f32>>> = None;
 
     if !eos_ids.contains(&anchor0) {
         while committed.len() < args.max_new_tokens {
@@ -1439,19 +1442,31 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             chunk_parts.extend(draft_ids_dev.iter());
             let chunk_input = Tensor::cat(&chunk_parts, 1)?;
             let verify_start = Instant::now();
-            let (logits, hidden) = model.forward_all_logits_and_hidden(
-                &chunk_input,
-                None::<&ProcessedImages>,
-                &args.model.downsample_mode,
-                offset,
-            )?;
+            // The fused head-argmax path never materializes the C x 248k
+            // logits; margin-oracle mode needs them and keeps the old pair.
+            let (targets_dev, hidden) = if margin_oracle {
+                let (logits, hidden) = model.forward_all_logits_and_hidden(
+                    &chunk_input,
+                    None::<&ProcessedImages>,
+                    &args.model.downsample_mode,
+                    offset,
+                )?;
+                committed_top_k_pending = Some(top_k_values(&logits)?);
+                (logits.squeeze(0)?.argmax(D::Minus1)?, hidden)
+            } else {
+                model.forward_verify_ids_and_hidden(
+                    &chunk_input,
+                    None::<&ProcessedImages>,
+                    &args.model.downsample_mode,
+                    offset,
+                )?
+            };
             if fenced_timing {
                 device.synchronize()?;
             }
             // THE round's one structural sync: targets and drafted ids come
             // back in a single packed readback; everything the host does
             // with them (accept/commit/EOS) is trivial CPU work.
-            let targets_dev = logits.squeeze(0)?.argmax(D::Minus1)?;
             let drafts_dev = Tensor::cat(&draft_ids_dev.iter().collect::<Vec<_>>(), 1)?
                 .flatten_all()?;
             let packed = Tensor::cat(&[&targets_dev, &drafts_dev], 0)?.to_vec1::<u32>()?;
@@ -1486,8 +1501,8 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             offset += accepted + 1;
             committed.extend_from_slice(&drafts[..accepted]);
             committed.push(bonus);
-            if margin_oracle {
-                committed_top_k.extend_from_slice(&top_k_values(&logits)?[..=accepted]);
+            if let Some(chunk_top_k) = committed_top_k_pending.take() {
+                committed_top_k.extend_from_slice(&chunk_top_k[..=accepted]);
             }
             accepted_histogram[accepted] += 1;
             rounds += 1;

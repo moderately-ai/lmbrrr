@@ -88,6 +88,14 @@ impl MixedLinear {
         }
     }
 
+    /// The tensor-op planes, when built (eager at load under LMBRRR_MM2D).
+    pub fn mm2d_planes(&self) -> Option<&crate::mm2d::Mm2dPlanes> {
+        match self {
+            Self::QMatMul { mm2d, .. } => mm2d.get().and_then(|p| p.as_ref()),
+            Self::Dense(_) => None,
+        }
+    }
+
     /// The dense weight tensor, when unquantized (or dequantized-at-load).
     pub fn dense_weight(&self) -> Option<&Tensor> {
         match self {
