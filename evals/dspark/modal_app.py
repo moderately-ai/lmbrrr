@@ -436,6 +436,7 @@ def mtp_distill(
     exp_name: str = "mtp-distill-r1",
     qat_q4k: bool = False,
     init_from: str | None = None,
+    span_mask: bool = False,
 ) -> None:
     """Align the Qwen3.5-0.8B vendor MTP head to the fakequant target
     (mtp_distill.py): (final hidden, next token) -> next-next token over the
@@ -472,6 +473,8 @@ def mtp_distill(
         cmd.append("--qat-q4k")
     if init_from:
         cmd.extend(["--init-from", init_from])
+    if span_mask:
+        cmd.append("--span-mask")
     _run(cmd, env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     print("MTP_DISTILL_GPU", json.dumps(monitor.stop()), flush=True)
     volume.commit()

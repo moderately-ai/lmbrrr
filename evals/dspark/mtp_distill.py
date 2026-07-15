@@ -18,10 +18,14 @@ Design notes:
 - teacher hiddens come from the text model's last_hidden_state (post final
   norm — verified in-job by asserting lm_head(hidden) reproduces argmax of
   the model's own logits on the first sample).
-- loss over ALL positions (pilot simplification; assistant-span masking is
-  iteration 2 if acceptance disappoints).
+- loss over ALL positions by default (bit-identical to r1-r4); --span-mask
+  restricts it to assistant-content tokens (the only tokens the drafter ever
+  proposes), located by ChatML marker + char offsets since the template
+  carries no {% generation %} markers.
 - held-out next-token top-1 accuracy is the position-1 acceptance proxy,
-  reported for the vendor init (baseline) and at every eval.
+  reported for the init (baseline) and at every eval; under --span-mask it is
+  measured over assistant positions only (a tighter proxy, but not comparable
+  to the all-position r1-r4 baselines).
 - HF's Qwen3_5RMSNorm applies the zero-centred (1 + w) convention itself, so
   vendor tensors load verbatim and the saved checkpoint keeps raw weights —
   lmbrrr's loader applies its own shift exactly as it does for the vendor
@@ -66,6 +70,11 @@ def parse_args() -> argparse.Namespace:
                    help="straight-through q4_K fake-quant on every head "
                         "linear (QAT); the exported checkpoint keeps the "
                         "full-precision master weights")
+    p.add_argument("--span-mask", action="store_true",
+                   help="restrict the loss (and the holdout top-1 proxy) to "
+                        "assistant-content tokens — the only tokens the "
+                        "drafter ever proposes. Off = loss over all positions "
+                        "(bit-identical to r1-r4).")
     return p.parse_args()
 
 
@@ -252,20 +261,56 @@ def main() -> int:
             rows.append(conv)
     print(f"loaded {len(rows)} conversations", flush=True)
 
-    def encode_ids(conv) -> list[int] | None:
+    # Assistant-content spans in the ChatML-templated text run from just after
+    # "<|im_start|>assistant\n" to the next "<|im_end|>". The template carries
+    # no {% generation %} markers (checked), so return_assistant_tokens_mask is
+    # unavailable — locate spans by literal marker and map via char offsets.
+    IM_ASSIST = "<|im_start|>assistant\n"
+    IM_END = "<|im_end|>"
+
+    def _assistant_spans(text: str) -> list[tuple[int, int]]:
+        spans = []
+        pos = 0
+        while True:
+            i = text.find(IM_ASSIST, pos)
+            if i < 0:
+                break
+            s = i + len(IM_ASSIST)
+            j = text.find(IM_END, s)
+            e = j if j >= 0 else len(text)
+            spans.append((s, e))
+            pos = e + len(IM_END) if j >= 0 else len(text)
+        return spans
+
+    if args.span_mask:
+        assert tokenizer.is_fast, "--span-mask needs a fast tokenizer (char offsets)"
+
+    def encode_ids(conv) -> tuple[list[int], list[bool]] | None:
+        # (ids, assist): assist[k] marks token k as inside an assistant span.
+        # --span-mask off -> assist is all-True (loss over every position, the
+        # original r1-r4 behaviour), so the downstream mask is a no-op.
         text = tokenizer.apply_chat_template(
             conv, tokenize=False, add_generation_prompt=False, enable_thinking=False
         )
-        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        if not args.span_mask:
+            ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+            if len(ids) < args.min_tokens:
+                return None
+            ids = ids[: args.max_tokens]
+            return ids, [True] * len(ids)
+        enc = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+        ids = enc["input_ids"]
         if len(ids) < args.min_tokens:
             return None
-        return ids[: args.max_tokens]
+        spans = _assistant_spans(text)
+        assist = [any(s <= a < e for s, e in spans) for a, _ in enc["offset_mapping"]]
+        return ids[: args.max_tokens], assist[: args.max_tokens]
 
     def encode(conv) -> torch.Tensor | None:
-        ids = encode_ids(conv)
-        if ids is None:
+        enc = encode_ids(conv)
+        if enc is None:
             return None
-        return torch.tensor(ids, device=device).unsqueeze(0)
+        return torch.tensor(enc[0], device=device).unsqueeze(0)
 
     holdout = rows[: args.holdout]
     train_rows = rows[args.holdout :]
@@ -287,35 +332,37 @@ def main() -> int:
         assert torch.equal(via_head, direct), "post-norm identity check failed"
     print("teacher post-norm identity verified", flush=True)
 
-    def head_loss_and_acc(ids: torch.Tensor) -> tuple[torch.Tensor, int, int]:
-        # pairs: (h_p, t_{p+1}) -> t_{p+2} for p in 0..T-3.
-        h = teacher_hidden(ids)  # [1, T, H]
-        t = ids.shape[1]
+    def head_acc(ids_list: list[int], assist_list: list[bool]) -> tuple[int, int]:
+        # pairs: (h_p, t_{p+1}) -> t_{p+2} for p in 0..T-3. Top-1 counted only
+        # where the PREDICTED token t_{p+2} is an assistant token (assist[p+2]).
+        t = len(ids_list)
         if t < 3:
-            zero = torch.zeros((), device=device, requires_grad=True)
-            return zero, 0, 0
+            return 0, 0
+        ids = torch.tensor(ids_list, device=device).unsqueeze(0)
+        h = teacher_hidden(ids)  # [1, T, H]
         hidden = h[:, : t - 1]
         succ = ids[:, 1:t]
         with torch.no_grad():
             embeds = embed(succ)
         post = head(hidden, embeds)  # [1, T-1, H]
         logits = lm_head(post[:, : t - 2])
-        labels = ids[:, 2:t]
-        loss = nn.functional.cross_entropy(
-            logits.float().squeeze(0), labels.squeeze(0)
-        )
-        correct = int((logits.argmax(-1) == labels).sum())
-        return loss, correct, t - 2
+        labels = ids[:, 2:t].squeeze(0)
+        assist = torch.tensor(assist_list, device=device, dtype=torch.bool)[2:t]
+        hit = (logits.argmax(-1).squeeze(0) == labels) & assist
+        return int(hit.sum()), int(assist.sum())
 
     @torch.no_grad()
     def evaluate() -> float:
         head.eval()
         correct = total = 0
         for conv in holdout:
-            ids = encode(conv)
-            if ids is None:
+            enc = encode_ids(conv)
+            if enc is None:
                 continue
-            _, c, n = head_loss_and_acc(ids)
+            ids_list, assist_list = enc
+            if len(ids_list) < 3 or sum(assist_list[2:]) == 0:
+                continue
+            c, n = head_acc(ids_list, assist_list)
             correct += c
             total += n
         head.train()
@@ -343,42 +390,63 @@ def main() -> int:
 
     rng = random.Random(args.seed)
     encoded = []
+    n_drop_noassist = 0
     for conv in train_rows:
-        ids = encode_ids(conv)
-        if ids is not None and len(ids) >= 3:
-            encoded.append(ids)
-    print(f"encoded {len(encoded)} train sequences", flush=True)
+        enc = encode_ids(conv)
+        if enc is None:
+            continue
+        ids, assist = enc
+        if len(ids) < 3:
+            continue
+        if sum(assist[2:]) == 0:  # nothing to learn (assistant truncated out)
+            n_drop_noassist += 1
+            continue
+        encoded.append((ids, assist))
+    drop_note = f" (dropped {n_drop_noassist} with no assistant label)" if args.span_mask else ""
+    print(f"encoded {len(encoded)} train sequences{drop_note}", flush=True)
+    if args.span_mask and encoded:
+        # Correctness gate: a broken marker/offset map collapses the mask to
+        # all-off or all-on. Assistant spans should be a clear majority-ish of
+        # the regen corpus (user prompts are the minority).
+        na = sum(sum(a) for _, a in encoded)
+        nt = sum(len(a) for _, a in encoded)
+        frac = na / max(nt, 1)
+        print(f"assistant-span fraction: {frac:.3f} ({na}/{nt} tokens)", flush=True)
+        assert 0.1 <= frac <= 0.98, f"span mask looks broken: assistant frac {frac:.3f}"
     rng.shuffle(encoded)
     batches = []
     for w0 in range(0, len(encoded), args.bucket_window):
-        window = sorted(encoded[w0 : w0 + args.bucket_window], key=len)
+        window = sorted(encoded[w0 : w0 + args.bucket_window], key=lambda x: len(x[0]))
         for b0 in range(0, len(window), args.batch_size):
             batches.append(window[b0 : b0 + args.batch_size])
     rng.shuffle(batches)
     pad_waste = 1.0 - (
-        sum(len(s) for b in batches for s in b)
-        / max(1, sum(len(b) * len(b[-1]) for b in batches))
+        sum(len(s[0]) for b in batches for s in b)
+        / max(1, sum(len(b) * len(b[-1][0]) for b in batches))
     )
     print(f"{len(batches)} batches of <= {args.batch_size}, padding waste {pad_waste:.1%}", flush=True)
 
-    def batch_loss_and_acc(batch: list[list[int]]):
+    def batch_loss_and_acc(batch: list[tuple[list[int], list[bool]]]):
         # Right padding: causal attention keeps real positions independent of
         # pads; padded label positions are ignored (-100). Per-sequence mean
-        # loss preserves the batch-1 weighting.
+        # loss preserves the batch-1 weighting. valid = real position AND (with
+        # --span-mask) the predicted token is assistant content.
         bsz = len(batch)
-        t = max(len(s) for s in batch)
+        t = max(len(s) for s, _ in batch)
         ids = torch.zeros((bsz, t), dtype=torch.long, device=device)
         mask = torch.zeros((bsz, t), dtype=torch.long, device=device)
-        for i, s in enumerate(batch):
+        amask = torch.zeros((bsz, t), dtype=torch.bool, device=device)
+        for i, (s, a) in enumerate(batch):
             ids[i, : len(s)] = torch.tensor(s, device=device)
             mask[i, : len(s)] = 1
+            amask[i, : len(a)] = torch.tensor(a, device=device, dtype=torch.bool)
         with torch.no_grad():
             h = text_model(input_ids=ids, attention_mask=mask).last_hidden_state
             embeds = embed(ids[:, 1:t])
         post = head(h[:, : t - 1], embeds)
         logits = lm_head(post[:, : t - 2])
         labels = ids[:, 2:t].clone()
-        valid = mask[:, 2:t].bool()
+        valid = mask[:, 2:t].bool() & amask[:, 2:t]
         labels[~valid] = -100
         raw = nn.functional.cross_entropy(
             logits.float().reshape(-1, logits.shape[-1]),
@@ -406,7 +474,7 @@ def main() -> int:
                 continue
             (loss / args.grad_accum).backward()
             running += float(loss)
-            seen_tokens += sum(len(s) for s in batch)
+            seen_tokens += sum(len(s) for s, _ in batch)
             micro += 1
             if micro % args.grad_accum == 0:
                 step += 1
@@ -454,7 +522,8 @@ def main() -> int:
                 "epochs": args.epochs,
                 "lr": args.lr,
                 "max_tokens": args.max_tokens,
-                "loss_positions": "all (assistant-span masking = iteration 2)",
+                "loss_positions": "assistant-span" if args.span_mask else "all",
+                "span_mask": args.span_mask,
                 "qat_q4k": args.qat_q4k,
                 "init_from": args.init_from,
             },
