@@ -289,9 +289,13 @@ pub fn mm2d_head_argmax(
     xs: &Tensor,
     head: &crate::quantized_linear::MixedLinear,
 ) -> Result<Option<Tensor>> {
+    // Opt-in: falsified in-loop 2026-07-15 (byte-identical but 11.71 ->
+    // 11.82 ms/round — the saved logits write is ~0.02ms while the
+    // threadgroup argmax epilogue costs more than the 0.13ms fast_argmax
+    // pass it replaces). Kept for deep-chunk memory-traffic scenarios.
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let enabled = *ENABLED.get_or_init(|| {
-        std::env::var("LMBRRR_FUSED_VERIFY_ARGMAX").map_or(true, |v| v != "0")
+        std::env::var("LMBRRR_FUSED_VERIFY_ARGMAX").is_ok_and(|v| v == "1")
     });
     if !enabled || !mm2d_enabled() || MM2D_BROKEN.load(Ordering::Relaxed) {
         return Ok(None);
