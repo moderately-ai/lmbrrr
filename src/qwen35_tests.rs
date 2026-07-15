@@ -187,8 +187,31 @@ fn reconstruct_capture_state_matches_sequential_recurrence() {
         references.push(state.clone());
     }
 
+    // The Lazy variant defers the transpose+cat to the rollback; it must
+    // produce byte-identical windows to the assembled Full form.
+    let conv_prev = conv_full.narrow(2, 0, ksz).unwrap();
+    let mixed_raw = conv_full
+        .narrow(2, ksz, c)
+        .unwrap()
+        .transpose(1, 2)
+        .unwrap()
+        .contiguous()
+        .unwrap();
+
     for prefix in 1..=c {
         for transposed in [false, true] {
+            for lazy in [false, true] {
+            let conv_cap = if lazy {
+                ConvCapture::Lazy {
+                    conv_prev: conv_prev.clone(),
+                    mixed_raw: mixed_raw.clone(),
+                }
+            } else {
+                ConvCapture::Full {
+                    conv_full: conv_full.clone(),
+                    prev_conv_len: ksz,
+                }
+            };
             let cap = DeltaVerifyCapture {
                 s0: if transposed {
                     s0.transpose(2, 3).unwrap().contiguous().unwrap()
@@ -198,8 +221,7 @@ fn reconstruct_capture_state_matches_sequential_recurrence() {
                 kc: kc.clone(),
                 delta: delta.clone(),
                 gcs: gcs.clone(),
-                conv_full: conv_full.clone(),
-                prev_conv_len: ksz,
+                conv: conv_cap,
                 dtype: DType::F32,
                 transposed,
             };
@@ -226,8 +248,12 @@ fn reconstruct_capture_state_matches_sequential_recurrence() {
                 for col in 0..ksz {
                     let want = conv_v[ch * (ksz + c) + start + col];
                     let got = window[ch * ksz + col];
-                    assert_eq!(got, want, "conv ch {ch} col {col} prefix {prefix}");
+                    assert_eq!(
+                        got, want,
+                        "conv ch {ch} col {col} prefix {prefix} lazy {lazy}"
+                    );
                 }
+            }
             }
         }
     }

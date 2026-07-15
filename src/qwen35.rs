@@ -930,6 +930,75 @@ impl FullAttention {
 /// S_j = exp(G_j)·S0 + Σ_{i≤j} exp(G_j−G_i)·k_i ⊗ δ_i — the chunk-end update
 /// is exactly this formula at j = C−1, so the reconstruction shares its math.
 #[derive(Clone, Debug)]
+/// Conv-window source for rollback reconstruction. Only the last `ksz`
+/// columns at the rollback prefix are ever read, so the fused paths defer
+/// the transpose+cat to the rollback instead of materializing the whole
+/// window every captured round (18 strided copies/round saved).
+enum ConvCapture {
+    /// Assembled window cat(prev_conv_state, chunk_inputs) — the tensor path
+    /// (where the conv stages it anyway) and the tree path use this.
+    Full {
+        conv_full: Tensor,
+        /// Columns of conv_full belonging to the previous conv state.
+        prev_conv_len: usize,
+    },
+    /// Deferred: previous conv state (b, conv_dim, prev) + the RAW
+    /// un-transposed chunk inputs (b, l, conv_dim) as a zero-copy view of
+    /// the qkvz projection; the needed columns transpose on rollback only.
+    Lazy { conv_prev: Tensor, mixed_raw: Tensor },
+}
+
+impl ConvCapture {
+    /// The conv state as of `prefix_len` chunk positions: the last `ksz`
+    /// columns of cat(prev_state, inputs[..prefix]), front-padded with
+    /// zeros pre-warmup. Byte-identical between variants.
+    fn window(&self, prefix_len: usize, ksz: usize) -> Result<Tensor> {
+        match self {
+            Self::Full {
+                conv_full,
+                prev_conv_len,
+            } => {
+                let window_len = prev_conv_len + prefix_len;
+                if window_len >= ksz {
+                    conv_full.narrow(2, window_len - ksz, ksz)?.copy()
+                } else {
+                    conv_full
+                        .narrow(2, 0, window_len)?
+                        .pad_with_zeros(2, ksz - window_len, 0)?
+                        .copy()
+                }
+            }
+            Self::Lazy {
+                conv_prev,
+                mixed_raw,
+            } => {
+                let prev_len = conv_prev.dim(2)?;
+                let window_len = prev_len + prefix_len;
+                let start = window_len.saturating_sub(ksz);
+                let take = window_len - start;
+                let mixed_cols = |c0: usize, n: usize| -> Result<Tensor> {
+                    mixed_raw.narrow(1, c0, n)?.transpose(1, 2)?.contiguous()
+                };
+                let window = if start >= prev_len {
+                    mixed_cols(start - prev_len, take)?
+                } else if start + take <= prev_len {
+                    conv_prev.narrow(2, start, take)?.copy()?
+                } else {
+                    let head = conv_prev.narrow(2, start, prev_len - start)?;
+                    let tail = mixed_cols(0, start + take - prev_len)?;
+                    Tensor::cat(&[&head, &tail], 2)?
+                };
+                if take >= ksz {
+                    Ok(window)
+                } else {
+                    window.pad_with_zeros(2, ksz - take, 0)
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct DeltaVerifyCapture {
     /// Pre-chunk recurrent state, F32 (b, h, k_dim, v_dim).
     s0: Tensor,
@@ -939,10 +1008,8 @@ struct DeltaVerifyCapture {
     delta: Tensor,
     /// Inclusive per-position log-decay cumsum, F32 (b, h, C).
     gcs: Tensor,
-    /// Pre-conv input window cat(prev_conv_state, chunk_inputs).
-    conv_full: Tensor,
-    /// Columns of conv_full belonging to the previous conv state.
-    prev_conv_len: usize,
+    /// Pre-conv input window (assembled or deferred).
+    conv: ConvCapture,
     /// Storage dtype the chunked path would have used for the state.
     dtype: DType,
     /// Whether `s0` (and thus the reconstructed state) is in the v2
@@ -1112,15 +1179,7 @@ impl GatedDeltaNet {
             None => Self::reconstruct_state_reference(cap, prefix_len)?,
         };
 
-        let window_len = cap.prev_conv_len + prefix_len;
-        let conv = if window_len >= ksz {
-            cap.conv_full.narrow(2, window_len - ksz, ksz)?.copy()?
-        } else {
-            cap.conv_full
-                .narrow(2, 0, window_len)?
-                .pad_with_zeros(2, ksz - window_len, 0)?
-                .copy()?
-        };
+        let conv = cap.conv.window(prefix_len, ksz)?;
         Ok((recurrent, conv))
     }
 
@@ -1399,20 +1458,16 @@ impl GatedDeltaNet {
 
         if self.verify_capture {
             // Same reconstruction contract as the tensor path; the conv
-            // window is rebuilt from the pre-conv inputs + previous state.
-            let mixed_t = proj
-                .narrow(D::Minus1, 0, self.conv_dim)?
-                .transpose(1, 2)?
-                .contiguous()?;
-            let conv_full = Tensor::cat(&[&conv_state, &mixed_t], 2)?;
-            let prev_conv_len = conv_state.dim(2)?;
+            // window assembles lazily on rollback from the raw projection.
             self.verify_captured = Some(DeltaVerifyCapture {
                 s0: recurrent_state,
                 kc: cap.kc,
                 delta: cap.delta,
                 gcs: cap.gcs,
-                conv_full,
-                prev_conv_len,
+                conv: ConvCapture::Lazy {
+                    conv_prev: conv_state,
+                    mixed_raw: proj.narrow(D::Minus1, 0, self.conv_dim)?,
+                },
                 dtype: xs.dtype(),
                 transposed: false,
             });
@@ -1516,19 +1571,15 @@ impl GatedDeltaNet {
 
         if l >= 2 {
             if self.verify_capture {
-                let mixed_t = qkvz
-                    .narrow(D::Minus1, 0, self.conv_dim)?
-                    .transpose(1, 2)?
-                    .contiguous()?;
-                let conv_full = Tensor::cat(&[&conv_state, &mixed_t], 2)?;
-                let prev_conv_len = conv_state.dim(2)?;
                 self.verify_captured = Some(DeltaVerifyCapture {
                     s0: recurrent_state_t,
                     kc: cap.kc,
                     delta: cap.delta,
                     gcs: cap.gcs,
-                    conv_full,
-                    prev_conv_len,
+                    conv: ConvCapture::Lazy {
+                        conv_prev: conv_state,
+                        mixed_raw: qkvz.narrow(D::Minus1, 0, self.conv_dim)?,
+                    },
                     dtype: xs.dtype(),
                     transposed: true,
                 });
@@ -1633,8 +1684,10 @@ impl GatedDeltaNet {
                 kc: cap.kc.narrow(2, 0, seg1)?,
                 delta: cap.delta.narrow(2, 0, seg1)?,
                 gcs: cap.gcs.narrow(2, 0, seg1)?,
-                conv_full: conv_full_main,
-                prev_conv_len: conv_state.dim(2)?,
+                conv: ConvCapture::Full {
+                    conv_full: conv_full_main,
+                    prev_conv_len: conv_state.dim(2)?,
+                },
                 dtype: xs.dtype(),
                 transposed: true,
             };
@@ -1643,8 +1696,10 @@ impl GatedDeltaNet {
                 kc: cap.kc.narrow(2, seg1, w)?,
                 delta: cap.delta.narrow(2, seg1, w)?,
                 gcs: cap.gcs.narrow(2, seg1, w)?,
-                conv_full: conv_full_alt,
-                prev_conv_len: ksz,
+                conv: ConvCapture::Full {
+                    conv_full: conv_full_alt,
+                    prev_conv_len: ksz,
+                },
                 dtype: xs.dtype(),
                 transposed: true,
             };
@@ -1679,18 +1734,15 @@ impl GatedDeltaNet {
                 self.norm.eps as f32,
             )
             .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
-            let mixed_t = proj_seg
-                .narrow(D::Minus1, 0, self.conv_dim)?
-                .transpose(1, 2)?
-                .contiguous()?;
-            let conv_full = Tensor::cat(&[conv, &mixed_t], 2)?;
             let capture = DeltaVerifyCapture {
                 s0: state.clone(),
                 kc: cap.kc,
                 delta: cap.delta,
                 gcs: cap.gcs,
-                conv_full,
-                prev_conv_len: conv.dim(2)?,
+                conv: ConvCapture::Lazy {
+                    conv_prev: conv.clone(),
+                    mixed_raw: proj_seg.narrow(D::Minus1, 0, self.conv_dim)?,
+                },
                 dtype: xs.dtype(),
                 transposed: false,
             };
@@ -2030,8 +2082,10 @@ impl GatedDeltaNet {
                     kc: kc.clone(),
                     delta: delta.clone(),
                     gcs: gcs.clone(),
-                    conv_full,
-                    prev_conv_len,
+                    conv: ConvCapture::Full {
+                        conv_full,
+                        prev_conv_len,
+                    },
                     dtype,
                     transposed: false,
                 });
