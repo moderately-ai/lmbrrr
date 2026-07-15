@@ -200,6 +200,39 @@ def download_prompts(
     volume.commit()
 
 
+@app.function(image=image, volumes=VOLUMES, secrets=[hf_secret], timeout=3 * 3600)
+def build_blend(
+    output_name: str = "blend-v1-500k.jsonl",
+    scale: float = 1.0,
+    seed: int = 42,
+    per_source_cap: int = 0,
+) -> None:
+    """Build the task-balanced PROMPT corpus (build_blend.py) on the volume:
+    streams weak-class sources (WMT19/opus translation, XSum/BillSum summ,
+    NQ-open qa, SQuAD rag, WildChat/smoltalk writing) + downsampled math/code,
+    decontaminates each prompt against the Spec-Bench eval prompts + GSM8K test,
+    and writes a single ShareGPT-schema prompt JSONL. CPU-only; the target
+    regenerates every answer downstream (self-distillation). scale multiplies
+    every per-source count; per_source_cap>0 overrides all counts (smoke)."""
+    os.makedirs("/vol/data", exist_ok=True)
+    cmd = [
+        "python",
+        "/lmbrrr-dspark/build_blend.py",
+        "--output",
+        f"/vol/data/{output_name}",
+        "--spec-bench",
+        "/vol/data/spec_bench_question.jsonl",
+        "--scale",
+        str(scale),
+        "--seed",
+        str(seed),
+    ]
+    if per_source_cap:
+        cmd.extend(["--per-source-cap", str(per_source_cap)])
+    _run(cmd)
+    volume.commit()
+
+
 @app.function(image=image, gpu="H100", volumes=VOLUMES, secrets=[hf_secret], timeout=8 * 3600)
 def regenerate(
     num_samples: int = 500,
