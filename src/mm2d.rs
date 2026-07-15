@@ -70,15 +70,19 @@ pub fn mm2d_splitk_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D_SPLITK").map_or(true, |v| v != "0"))
 }
 
-/// Split-K grid target (threadgroups). 256 splits gate_up (N=7168) 2x,
-/// which the 128 target missed; in-loop arbitrated.
+/// Split-K grid target (threadgroups). Suite-arbitrated at 128
+/// (2026-07-15): 384 cut the round 2ms (gate_up finally split) but lost
+/// the suite mean 182.6 -> 176.7 — the deeper split's accumulation-order
+/// perturbation flips enough drafter near-ties to eat the speed. Retest
+/// after r2 lifts acceptance (fewer near-ties); LMBRRR_MM2D_SPLIT_TGS
+/// overrides.
 pub fn mm2d_split_target_tgs() -> usize {
     static TGS: OnceLock<usize> = OnceLock::new();
     *TGS.get_or_init(|| {
         std::env::var("LMBRRR_MM2D_SPLIT_TGS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(256)
+            .unwrap_or(128)
     })
 }
 
