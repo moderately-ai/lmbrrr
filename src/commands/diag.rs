@@ -156,13 +156,14 @@ pub(crate) fn verify_table(args: VerifyTableArgs) -> Result<()> {
     let device = select_device(args.model.cpu)?;
     let dtype = args.model.dtype.resolve(&device);
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
-        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
+        &runtime,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
 
@@ -181,6 +182,7 @@ pub(crate) fn verify_table(args: VerifyTableArgs) -> Result<()> {
             None::<&ProcessedImages>,
             &args.model.downsample_mode,
             &eos_ids,
+            &runtime.decode,
             |_, _, _, _| Ok(()),
         )?;
         let mut chunk_tokens = baseline.generated_token_ids.clone();

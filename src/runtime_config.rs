@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use crate::mm2d::Mm2dConfig;
+use crate::model_ctx::ModelCtx;
 
 /// Kernel-fusion / route gates for the text model, resolved at the
 /// entrypoint and stored on each layer at construction (see qwen35.rs).
@@ -85,13 +86,73 @@ impl KernelRouteConfig {
     }
 }
 
+/// GGML-ready weight pack (sidecar) gate.
+#[derive(Clone, Copy, Debug)]
+pub struct PackConfig {
+    /// Use + write the pack sidecar (skips the per-start requantize). Off
+    /// forces cold requantization every start.
+    pub enabled: bool,
+}
+
+impl Default for PackConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl PackConfig {
+    pub fn from_env() -> Self {
+        Self {
+            enabled: std::env::var("LMBRRR_PACK").map_or(true, |v| v != "0"),
+        }
+    }
+}
+
+/// Decode-loop path selection (host-side, model-agnostic).
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeConfig {
+    /// Async event-driven readback for the greedy device-chain (vs the
+    /// batched-flush path); the batched path is always used off Metal.
+    pub async_readback: bool,
+    /// Fused GEMV+argmax head (vs materializing logits then argmax), when
+    /// the model supports it.
+    pub fused_argmax: bool,
+}
+
+impl Default for DecodeConfig {
+    fn default() -> Self {
+        Self {
+            async_readback: true,
+            fused_argmax: true,
+        }
+    }
+}
+
+impl DecodeConfig {
+    pub fn from_env() -> Self {
+        let opt_out = |key: &str, default: bool| {
+            std::env::var(key).map_or(default, |v| v != "0")
+        };
+        Self {
+            async_readback: opt_out("LMBRRR_ASYNC_READBACK", true),
+            fused_argmax: opt_out("LMBRRR_FUSED_ARGMAX", true),
+        }
+    }
+}
+
+/// Composition root: resolved once per command entry (the sole env reader),
+/// then its layers thread down to their consumers. LAYERED — `model` is the
+/// construction-time context threaded into the model tree; the rest are
+/// run-time / command-scope knobs consumed at their point of use.
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeConfig {
-    /// Tensor-op (matmul2d) route: master switch, routing thresholds,
-    /// split-K geometry, plane cache. See mm2d.rs for field receipts.
-    pub mm2d: Arc<Mm2dConfig>,
-    /// Text-model kernel-fusion route gates (see qwen35.rs).
-    pub routes: Arc<KernelRouteConfig>,
+    /// Construction-time context (mm2d + fusion routes) + component
+    /// factories; threaded by `&ctx` into every model constructor.
+    pub model: ModelCtx,
+    /// Weight-pack sidecar gate (see pack.rs).
+    pub pack: PackConfig,
+    /// Decode-loop path selection (see generate.rs).
+    pub decode: DecodeConfig,
     /// MTP-quantization bisection hook (LMBRRR_MTP_Q_ONLY =
     /// fc|qkv|o|gate_up|down): quantize a single head linear to isolate
     /// per-path damage. Diagnostics only; None in production.
@@ -103,8 +164,12 @@ impl RuntimeConfig {
     /// and standalone command entries (tests use `Default`).
     pub fn from_env() -> Self {
         Self {
-            mm2d: Arc::new(Mm2dConfig::from_env()),
-            routes: Arc::new(KernelRouteConfig::from_env()),
+            model: ModelCtx {
+                mm2d: Arc::new(Mm2dConfig::from_env()),
+                routes: Arc::new(KernelRouteConfig::from_env()),
+            },
+            pack: PackConfig::from_env(),
+            decode: DecodeConfig::from_env(),
             mtp_quantize_only: std::env::var("LMBRRR_MTP_Q_ONLY").ok(),
         }
     }

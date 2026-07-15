@@ -191,6 +191,7 @@ pub fn generate_tokens(
     images: Option<&ProcessedImages>,
     downsample_mode: &str,
     eos_ids: &[u32],
+    decode: &crate::runtime_config::DecodeConfig,
     mut on_token: impl FnMut(u32, usize, Duration, Duration) -> Result<()>,
 ) -> Result<GenerationStats> {
     model.clear_cache();
@@ -240,9 +241,8 @@ pub fn generate_tokens(
     // Default on Metal (+2.6-3.4% e2e, jitter p95 44ms -> 5.5ms on M3);
     // LMBRRR_ASYNC_READBACK=0 restores the batched-flush path below, which
     // also remains the path for non-Metal devices.
-    let async_readback = device_chain
-        && matches!(device, Device::Metal(_))
-        && std::env::var("LMBRRR_ASYNC_READBACK").map_or(true, |v| v != "0");
+    let async_readback =
+        device_chain && matches!(device, Device::Metal(_)) && decode.async_readback;
     if async_readback {
         // Encoder run-ahead cap: bounds EOS overshoot (wasted forwards past
         // the stop token) and pending-tensor memory.
@@ -285,8 +285,7 @@ pub fn generate_tokens(
         // byte-identical). Default on since the M3 A/B (paired median +1.19%,
         // all rounds positive); LMBRRR_FUSED_ARGMAX=0 restores the
         // stored-logits path.
-        let fused_argmax = model.supports_fused_head_argmax()
-            && std::env::var("LMBRRR_FUSED_ARGMAX").map_or(true, |v| v != "0");
+        let fused_argmax = model.supports_fused_head_argmax() && decode.fused_argmax;
         // Holds the pre-reduced [1] id between iterations on the fused path
         // (the first iteration reduces the prefill logits normally).
         let mut fused_arg: Option<Tensor> = None;

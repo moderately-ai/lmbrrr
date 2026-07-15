@@ -24,17 +24,6 @@ use serde::Deserialize;
 use crate::quantized_linear::MixedLinear;
 use crate::qwen35::TruncatableKvCache;
 
-/// LMBRRR_PROPOSE_TIMING=1: fence after each propose segment and print the
-/// per-segment walls (backbone+heads / markov chain / pack / readback). The
-/// fences serialize the pipeline, so these are attribution numbers, not
-/// production walls — the instrument that decomposes the draft-cost bucket
-/// the round-level refit can't split.
-fn propose_timing() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("LMBRRR_PROPOSE_TIMING").is_ok_and(|v| v == "1"))
-}
-
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct DsparkRopeParameters {
     pub rope_theta: f64,
@@ -235,6 +224,9 @@ pub struct DsparkDrafter {
     markov_fused_slots: std::sync::OnceLock<std::sync::Arc<candle_metal_kernels::metal::Buffer>>,
     device: Device,
     dtype: DType,
+    /// Per-segment fenced propose timing (diagnostics); resolved at the
+    /// command entry and injected at load — the module reads no env.
+    propose_timing: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -267,7 +259,7 @@ fn quantize_or_dense(
     weight: Tensor,
     dtype: Option<candle::quantized::GgmlDType>,
     device: &Device,
-    mm2d_cfg: &std::sync::Arc<crate::mm2d::Mm2dConfig>,
+    ctx: &crate::model_ctx::ModelCtx,
 ) -> Result<MixedLinear> {
     match dtype {
         None => Ok(MixedLinear::dense(Linear::new(weight, None))),
@@ -276,48 +268,56 @@ fn quantize_or_dense(
                 .to_dtype(DType::F32)?
                 .to_device(&Device::Cpu)?;
             let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, device)?;
-            Ok(MixedLinear::from_qtensor(q, mm2d_cfg.clone())?)
+            Ok(ctx.quantized_linear(q)?)
+        }
+    }
+}
+
+/// Load request for [`DsparkDrafter::load`] — a parameter object so the
+/// loader has one named, evolvable argument instead of a positional list.
+///
+/// - `quantize_heads` post-hoc quantizes the two 248k-vocab weight reads
+///   (lm_head, markov_w2) at load — no artifact, no retraining. markov_w1
+///   stays BF16 (index_select gather) and the confidence head stays dense.
+///   The risk surface is tau, not correctness: drafts are target-verified.
+/// - `draft_vocab`: FR-Spec top-k token ids (rank order). The vocab-wide
+///   draft heads are sliced to these rows before any quantization; markov_w1,
+///   the embedding and the confidence head keep the full vocabulary.
+/// - `propose_timing`: the spec-run per-segment attribution diagnostic
+///   (entrypoint-resolved); off for non-spec-run entrypoints.
+pub struct DsparkDrafterRequest<'a> {
+    pub dir: &'a Path,
+    pub device: &'a Device,
+    pub dtype: DType,
+    pub quantize_heads: Option<candle::quantized::GgmlDType>,
+    pub draft_vocab: Option<&'a [u32]>,
+    pub propose_timing: bool,
+}
+
+impl<'a> DsparkDrafterRequest<'a> {
+    /// The minimal request: no head quantization, full vocab, no timing.
+    pub fn new(dir: &'a Path, device: &'a Device, dtype: DType) -> Self {
+        Self {
+            dir,
+            device,
+            dtype,
+            quantize_heads: None,
+            draft_vocab: None,
+            propose_timing: false,
         }
     }
 }
 
 impl DsparkDrafter {
-    pub fn load(
-        dir: &Path,
-        device: &Device,
-        dtype: DType,
-        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
-    ) -> Result<Self> {
-        Self::load_with_options(dir, device, dtype, None, mm2d_cfg)
-    }
-
-    /// `quantize_heads` post-hoc quantizes the two 248k-vocab weight reads
-    /// (lm_head, markov_w2) at load — no artifact, no retraining. markov_w1
-    /// stays BF16 (index_select gather) and the confidence head stays dense.
-    /// The risk surface is tau, not correctness: drafts are target-verified.
-    pub fn load_with_options(
-        dir: &Path,
-        device: &Device,
-        dtype: DType,
-        quantize_heads: Option<candle::quantized::GgmlDType>,
-        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
-    ) -> Result<Self> {
-        Self::load_with_draft_vocab(dir, device, dtype, quantize_heads, None, mm2d_cfg)
-    }
-
-    /// `draft_vocab`: FR-Spec top-k token ids (rank order). The vocab-wide
-    /// draft heads (lm_head, markov_w2) are sliced to these rows before any
-    /// quantization; markov_w1, the embedding and the confidence head keep
-    /// the full vocabulary (they index by committed-token id, which need not
-    /// be inside the draft vocabulary).
-    pub fn load_with_draft_vocab(
-        dir: &Path,
-        device: &Device,
-        dtype: DType,
-        quantize_heads: Option<candle::quantized::GgmlDType>,
-        draft_vocab: Option<&[u32]>,
-        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
-    ) -> Result<Self> {
+    pub fn load(req: DsparkDrafterRequest, ctx: &crate::model_ctx::ModelCtx) -> Result<Self> {
+        let DsparkDrafterRequest {
+            dir,
+            device,
+            dtype,
+            quantize_heads,
+            draft_vocab,
+            propose_timing,
+        } = req;
         let config = DsparkConfig::from_dir(dir)?;
         if config.markov_head_type != "vanilla"
             || !config.enable_confidence_head
@@ -391,7 +391,7 @@ impl DsparkDrafter {
                 )?,
                 quantize_heads,
                 device,
-                &mm2d_cfg,
+                ctx,
             )?,
             markov_w1: vb.get((config.vocab_size, config.markov_rank), "markov_head.markov_w1.weight")?,
             markov_w2: quantize_or_dense(
@@ -401,7 +401,7 @@ impl DsparkDrafter {
                 )?,
                 quantize_heads,
                 device,
-                &mm2d_cfg,
+                ctx,
             )?,
             draft_vocab_ids: draft_vocab
                 .map(|ids| Tensor::from_slice(ids, ids.len(), device))
@@ -415,6 +415,7 @@ impl DsparkDrafter {
             markov_fused_slots: std::sync::OnceLock::new(),
             device: device.clone(),
             dtype,
+            propose_timing,
             config,
         })
     }
@@ -516,10 +517,10 @@ impl DsparkDrafter {
         // before arming the first timer, or its fence absorbs the previous
         // round's tail and inflates the backbone bucket — the 6.7-vs-10.1ms
         // bimodality of the 2026-07-13 cpb-ladder was exactly this.
-        if propose_timing() {
+        if self.propose_timing {
             self.device.synchronize()?;
         }
-        let ladder_start = propose_timing().then(std::time::Instant::now);
+        let ladder_start = self.propose_timing.then(std::time::Instant::now);
         let backbone = self.propose_backbone(anchor_token, anchor_pos, gamma)?;
         let backbone_ms = ladder_start
             .map(|t0| -> Result<f64> {
@@ -531,7 +532,7 @@ impl DsparkDrafter {
         // logits, which only the ops chain materializes; everything else
         // takes the fused kernel — an unsupported device/dtype/w2 layout is a
         // misconfiguration and errors inside it rather than degrading.
-        let chain_start = propose_timing().then(std::time::Instant::now);
+        let chain_start = self.propose_timing.then(std::time::Instant::now);
         let out = if !branch && !force_ops {
             self.markov_chain_fused(anchor_token, gamma, &backbone)?
         } else {
@@ -994,7 +995,7 @@ impl DsparkDrafter {
     ) -> Result<DraftProposal> {
         let t = self.propose_tensors(anchor_token, anchor_pos, gamma, branch, diagnostics)?;
         // Single host readback: confidences and token ids ride one buffer.
-        let pack_start = propose_timing().then(std::time::Instant::now);
+        let pack_start = self.propose_timing.then(std::time::Instant::now);
         let packed_dev = self.pack_proposal(&t)?;
         let pack_ms = pack_start
             .map(|t0| -> Result<f64> {
@@ -1002,7 +1003,7 @@ impl DsparkDrafter {
                 Ok(t0.elapsed().as_secs_f64() * 1e3)
             })
             .transpose()?;
-        let read_start = propose_timing().then(std::time::Instant::now);
+        let read_start = self.propose_timing.then(std::time::Instant::now);
         let packed = packed_dev.to_device(&Device::Cpu)?.to_vec1::<f32>()?;
         if let (Some(t0), Some(pack)) = (read_start, pack_ms) {
             eprintln!(

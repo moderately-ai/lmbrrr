@@ -9,6 +9,7 @@ use candle_transformers::utils::repeat_kv;
 use serde::Serialize;
 
 use crate::config::{LayerType, TextConfig};
+use crate::model_ctx::ModelCtx;
 use crate::quantized_linear::{MixedLinear, QuantizedTextArtifact};
 use crate::runtime_config::KernelRouteConfig;
 
@@ -169,7 +170,7 @@ impl Qwen35RmsNorm {
         eps: f64,
         zero_centered: bool,
         vb: VarBuilder,
-        routes: Arc<KernelRouteConfig>,
+        ctx: &ModelCtx,
     ) -> Result<Self> {
         let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
         let weight_f32 = if zero_centered { (weight + 1.0)? } else { weight };
@@ -178,7 +179,7 @@ impl Qwen35RmsNorm {
             weight_f32,
             weight_native,
             eps,
-            routes,
+            routes: ctx.routes.clone(),
         })
     }
 
@@ -586,7 +587,7 @@ impl FullAttention {
         cfg: &TextConfig,
         rotary: Arc<RotaryEmbedding>,
         vb: VarBuilder,
-        routes: Arc<KernelRouteConfig>,
+        ctx: &ModelCtx,
     ) -> Result<Self> {
         let q_out = cfg.num_attention_heads * cfg.head_dim * 2;
         let kv_out = cfg.num_key_value_heads * cfg.head_dim;
@@ -615,14 +616,14 @@ impl FullAttention {
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("q_norm"),
-                routes.clone(),
+                ctx,
             )?,
             k_norm: Qwen35RmsNorm::new(
                 cfg.head_dim,
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("k_norm"),
-                routes.clone(),
+                ctx,
             )?,
             num_heads: cfg.num_attention_heads,
             num_kv_heads: cfg.num_key_value_heads,
@@ -631,7 +632,7 @@ impl FullAttention {
             num_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             rotary,
             kv_cache: Arc::new(Mutex::new(TruncatableKvCache::new())),
-            routes,
+            routes: ctx.routes.clone(),
         })
     }
 
@@ -1049,7 +1050,7 @@ struct GatedDeltaNet {
 }
 
 impl GatedDeltaNet {
-    fn new(cfg: &TextConfig, vb: VarBuilder, routes: Arc<KernelRouteConfig>) -> Result<Self> {
+    fn new(cfg: &TextConfig, vb: VarBuilder, ctx: &ModelCtx) -> Result<Self> {
         let key_dim = cfg.linear_key_head_dim * cfg.linear_num_key_heads;
         let value_dim = cfg.linear_value_head_dim * cfg.linear_num_value_heads;
         let conv_dim = key_dim * 2 + value_dim;
@@ -1099,7 +1100,7 @@ impl GatedDeltaNet {
                 cfg.rms_norm_eps,
                 false,
                 vb.pp("norm"),
-                routes.clone(),
+                ctx,
             )?,
             conv_state: None,
             recurrent_state: None,
@@ -1116,7 +1117,7 @@ impl GatedDeltaNet {
             key_dim,
             value_dim,
             conv_dim,
-            routes,
+            routes: ctx.routes.clone(),
         })
     }
 
@@ -2327,20 +2328,15 @@ impl DecoderLayer {
         cfg: &TextConfig,
         rotary: Arc<RotaryEmbedding>,
         vb: VarBuilder,
-        routes: Arc<KernelRouteConfig>,
+        ctx: &ModelCtx,
     ) -> Result<Self> {
         let mixer = match layer_type {
-            LayerType::FullAttention => TokenMixer::Full(FullAttention::new(
-                cfg,
-                rotary,
-                vb.pp("self_attn"),
-                routes.clone(),
-            )?),
-            LayerType::LinearAttention => TokenMixer::Linear(Box::new(GatedDeltaNet::new(
-                cfg,
-                vb.pp("linear_attn"),
-                routes.clone(),
-            )?)),
+            LayerType::FullAttention => {
+                TokenMixer::Full(FullAttention::new(cfg, rotary, vb.pp("self_attn"), ctx)?)
+            }
+            LayerType::LinearAttention => {
+                TokenMixer::Linear(Box::new(GatedDeltaNet::new(cfg, vb.pp("linear_attn"), ctx)?))
+            }
         };
         Ok(Self {
             mixer,
@@ -2350,14 +2346,14 @@ impl DecoderLayer {
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("input_layernorm"),
-                routes.clone(),
+                ctx,
             )?,
             post_attention_layernorm: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("post_attention_layernorm"),
-                routes,
+                ctx,
             )?,
         })
     }
@@ -2495,11 +2491,7 @@ pub struct Qwen35TextModel {
 }
 
 impl Qwen35TextModel {
-    pub fn new(
-        cfg: &TextConfig,
-        vb: VarBuilder,
-        routes: Arc<KernelRouteConfig>,
-    ) -> Result<Self> {
+    pub fn new(cfg: &TextConfig, vb: VarBuilder, ctx: &ModelCtx) -> Result<Self> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))?;
         let rotary = Arc::new(RotaryEmbedding::new(cfg, vb.dtype(), vb.device())?);
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
@@ -2510,7 +2502,7 @@ impl Qwen35TextModel {
                 cfg,
                 rotary.clone(),
                 vb_layers.pp(idx),
-                routes.clone(),
+                ctx,
             )?);
         }
         Ok(Self {
@@ -2521,7 +2513,7 @@ impl Qwen35TextModel {
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("norm"),
-                routes,
+                ctx,
             )?,
             device: vb.device().clone(),
             dtype: vb.dtype(),
@@ -2926,11 +2918,7 @@ impl MtpHead {
     /// base checkpoint is architecturally identical (verified: hidden 1024,
     /// 8 q / 2 kv heads x 256, mlp 3584) — and all norms load zero-centred
     /// (raw Qwen checkpoints store `w - 1`; Qwen35RmsNorm shifts at load).
-    pub fn new(
-        cfg: &crate::config::TextConfig,
-        vb: VarBuilder,
-        routes: Arc<KernelRouteConfig>,
-    ) -> Result<Self> {
+    pub fn new(cfg: &crate::config::TextConfig, vb: VarBuilder, ctx: &ModelCtx) -> Result<Self> {
         let vb = vb.pp("mtp");
         // Fresh rope table from the same cfg/dtype/device as the trunk's —
         // bit-identical construction, no need to thread the trunk's Arc.
@@ -2943,32 +2931,32 @@ impl MtpHead {
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("pre_fc_norm_embedding"),
-                routes.clone(),
+                ctx,
             )?,
             pre_fc_norm_hidden: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("pre_fc_norm_hidden"),
-                routes.clone(),
+                ctx,
             )?,
             norm: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("norm"),
-                routes.clone(),
+                ctx,
             )?,
             layer: DecoderLayer::new(
                 crate::config::LayerType::FullAttention,
                 cfg,
                 rotary,
                 vb.pp("layers").pp(0),
-                routes.clone(),
+                ctx,
             )?,
             device: vb.device().clone(),
             dtype: vb.dtype(),
-            routes,
+            routes: ctx.routes.clone(),
         })
     }
 
@@ -3057,7 +3045,7 @@ impl MtpHead {
         ggml: candle::quantized::GgmlDType,
         pack: Option<&crate::pack::PackStore>,
         key_prefix: &str,
-        mm2d_cfg: &std::sync::Arc<crate::mm2d::Mm2dConfig>,
+        ctx: &ModelCtx,
         only: Option<&str>,
     ) -> Result<()> {
         fn q(
@@ -3065,11 +3053,11 @@ impl MtpHead {
             ggml: candle::quantized::GgmlDType,
             pack: Option<&crate::pack::PackStore>,
             key: String,
-            mm2d_cfg: &std::sync::Arc<crate::mm2d::Mm2dConfig>,
+            ctx: &ModelCtx,
         ) -> Result<()> {
             if let Some(pack) = pack {
                 if let Some(qt) = pack.take(&key) {
-                    *lin = MixedLinear::from_qtensor(qt, mm2d_cfg.clone())?;
+                    *lin = ctx.quantized_linear(qt)?;
                     return Ok(());
                 }
             }
@@ -3091,7 +3079,7 @@ impl MtpHead {
                     None => candle::quantized::QTensor::quantize_onto(&cpu, ggml, &device)?,
                 }
             };
-            *lin = MixedLinear::from_qtensor(qt, mm2d_cfg.clone())?;
+            *lin = ctx.quantized_linear(qt)?;
             Ok(())
         }
         // Bisection hook (diagnostics): `only` = fc|qkv|o|gate_up|down
@@ -3100,15 +3088,15 @@ impl MtpHead {
         // (LMBRRR_MTP_Q_ONLY), threaded as a param.
         let want = |name: &str| only.is_none_or(|o| o == name);
         if want("fc") {
-            q(&mut self.fc, ggml, pack, format!("{key_prefix}fc"), mm2d_cfg)?;
+            q(&mut self.fc, ggml, pack, format!("{key_prefix}fc"), ctx)?;
         }
         match &mut self.layer.mixer {
             TokenMixer::Full(attn) => {
                 if want("qkv") {
-                    q(&mut attn.qkv_proj, ggml, pack, format!("{key_prefix}qkv"), mm2d_cfg)?;
+                    q(&mut attn.qkv_proj, ggml, pack, format!("{key_prefix}qkv"), ctx)?;
                 }
                 if want("o") {
-                    q(&mut attn.o_proj, ggml, pack, format!("{key_prefix}o"), mm2d_cfg)?;
+                    q(&mut attn.o_proj, ggml, pack, format!("{key_prefix}o"), ctx)?;
                 }
             }
             TokenMixer::Linear(_) => unreachable!("MTP layer is full attention"),
@@ -3119,7 +3107,7 @@ impl MtpHead {
                 ggml,
                 pack,
                 format!("{key_prefix}gate_up"),
-                mm2d_cfg,
+                ctx,
             )?;
         }
         if want("down") {
@@ -3128,7 +3116,7 @@ impl MtpHead {
                 ggml,
                 pack,
                 format!("{key_prefix}down"),
-                mm2d_cfg,
+                ctx,
             )?;
         }
         Ok(())

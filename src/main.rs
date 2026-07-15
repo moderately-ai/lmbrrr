@@ -1062,12 +1062,13 @@ fn load_model_with_optional_quantization_and_mtp(
         manifest,
         quantize_lm_head.map(|t| t.ggml()),
         device,
+        runtime.pack.enabled,
     )?);
     if let Some(tier) = quantize_lm_head {
         model.quantize_lm_head_with_pack(tier.ggml(), Some(&pack))?;
     }
     let mut artifact =
-        QuantizedTextArtifact::from_manifest(manifest, device, dtype, runtime.mm2d.clone())?;
+        QuantizedTextArtifact::from_manifest(manifest, device, dtype, runtime.model.clone())?;
     artifact.set_pack(pack.clone());
     let quantized_tensors = artifact.quantized_tensor_count();
     let backend = artifact.backend().to_string();
@@ -1369,12 +1370,7 @@ fn load_model(
     let load_start = Instant::now();
     let vb =
         unsafe { VarBuilder::from_mmaped_safetensors(&bundle.artifacts.weights, dtype, device)? };
-    let model = MiniCpmForConditionalGeneration::new(
-        &bundle.config,
-        vb,
-        runtime.mm2d.clone(),
-        runtime.routes.clone(),
-    )?;
+    let model = MiniCpmForConditionalGeneration::new(&bundle.config, vb, runtime.model.clone())?;
     Ok((model, load_start.elapsed()))
 }
 

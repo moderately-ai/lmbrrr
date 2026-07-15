@@ -10,6 +10,7 @@ pub mod fused_norm;
 pub mod generate;
 pub mod image_processor;
 pub mod minicpm;
+pub mod model_ctx;
 pub mod mm2d;
 pub mod ngram_draft;
 pub mod pack;

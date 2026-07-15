@@ -269,13 +269,18 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
             Some(parsed.ids)
         }
     };
-    let mut drafter = DsparkDrafter::load_with_draft_vocab(
-        drafter_dir,
-        &device,
-        dtype,
-        args.drafter_quantize.map(DrafterQuantArg::ggml),
-        draft_vocab_ids.as_deref(),
-        runtime.mm2d.clone(),
+    let mut drafter = DsparkDrafter::load(
+        lmbrrr::dspark::DsparkDrafterRequest {
+            dir: drafter_dir,
+            device: &device,
+            dtype,
+            quantize_heads: args.drafter_quantize.map(DrafterQuantArg::ggml),
+            draft_vocab: draft_vocab_ids.as_deref(),
+            // Command-scope diagnostic (entrypoint env read); Slice 4 folds
+            // this into SpecRunConfig alongside the other spec-run knobs.
+            propose_timing: std::env::var("LMBRRR_PROPOSE_TIMING").is_ok_and(|v| v == "1"),
+        },
+        &runtime.model,
     )?;
     let gamma = args.gamma.min(drafter.config.block_size);
     let capture_layers = drafter.config.target_layer_ids.clone();
@@ -306,6 +311,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         None::<&ProcessedImages>,
         &args.model.downsample_mode,
         &eos_ids,
+        &runtime.decode,
         |_, _, _, _| Ok(()),
     )
     .context("dspark warmup generation")?;
@@ -320,6 +326,7 @@ fn dspark_drafter_run(args: &DsparkRunArgs, drafter_dir: &Path) -> Result<()> {
         None::<&ProcessedImages>,
         &args.model.downsample_mode,
         &eos_ids,
+        &runtime.decode,
         |_, _, _, _| Ok(()),
     )
     .context("dspark baseline generation")?;
@@ -1208,6 +1215,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut model, load_elapsed, quantized_load) =
         load_model_with_optional_quantization_and_mtp(
             &bundle,
@@ -1216,7 +1224,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             args.model.quantized_manifest.as_ref(),
             args.model.quantize_lm_head,
             Some((mtp_weights, args.mtp_quantize.map(|t| t.ggml()))),
-            &lmbrrr::runtime_config::RuntimeConfig::from_env(),
+            &runtime,
         )?;
     if let Some(n) = args.mtp_draft_vocab {
         #[derive(serde::Deserialize)]
@@ -1251,6 +1259,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         None::<&ProcessedImages>,
         &args.model.downsample_mode,
         &eos_ids,
+        &runtime.decode,
         |_, _, _, _| Ok(()),
     )?;
     let baseline_wall = secs(baseline_start.elapsed());
@@ -1663,13 +1672,14 @@ pub(crate) fn dspark_run(args: DsparkRunArgs) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&args.prompt, 0, args.enable_thinking);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
         args.model.quantize_lm_head,
-        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
+        &runtime,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let vocab_size = bundle.config.text_config.vocab_size;
@@ -1686,6 +1696,7 @@ pub(crate) fn dspark_run(args: DsparkRunArgs) -> Result<()> {
         None::<&ProcessedImages>,
         &args.model.downsample_mode,
         &eos_ids,
+        &runtime.decode,
         |_, _, _, _| Ok(()),
     )?;
     let baseline_wall = secs(baseline_start.elapsed());

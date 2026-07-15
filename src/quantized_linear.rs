@@ -176,9 +176,9 @@ pub struct QuantizedTextArtifact {
     device: Device,
     dtype: DType,
     pack: Option<Arc<crate::pack::PackStore>>,
-    /// Route config injected at construction; every MixedLinear this
-    /// artifact builds carries it (the entrypoint resolved it from env).
-    mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
+    /// Construction context injected at build; every MixedLinear this
+    /// artifact produces is built through its factory.
+    ctx: crate::model_ctx::ModelCtx,
 }
 
 impl QuantizedTextArtifact {
@@ -186,7 +186,7 @@ impl QuantizedTextArtifact {
         path: &Path,
         device: &Device,
         dtype: DType,
-        mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
+        ctx: crate::model_ctx::ModelCtx,
     ) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("open quantized manifest {}", path.display()))?;
@@ -242,7 +242,7 @@ impl QuantizedTextArtifact {
             device: device.clone(),
             dtype,
             pack: None,
-            mm2d_cfg,
+            ctx,
         })
     }
 
@@ -293,7 +293,7 @@ impl QuantizedTextArtifact {
         };
         if let Some(pack) = &self.pack {
             if let Some(qweight) = pack.take(name) {
-                return Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?));
+                return Ok(Some(self.ctx.quantized_linear(qweight)?));
             }
         }
         let values = self.load_values(name, tensor)?;
@@ -304,7 +304,7 @@ impl QuantizedTextArtifact {
         let qweight = self
             .quantize_for_device(name, &cpu_weight, dtype)
             .with_context(|| format!("requantize {name} into Candle {dtype:?} QTensor"))?;
-        Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?))
+        Ok(Some(self.ctx.quantized_linear(qweight)?))
     }
 
     /// Slow-path quantization, routed through the pack when attached so the
@@ -341,7 +341,7 @@ impl QuantizedTextArtifact {
         let key = names.join("+");
         if let Some(pack) = &self.pack {
             if let Some(qweight) = pack.take(&key) {
-                return Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?));
+                return Ok(Some(self.ctx.quantized_linear(qweight)?));
             }
         }
         let in_dim = tensors[0].1.shape[1];
@@ -374,7 +374,7 @@ impl QuantizedTextArtifact {
         let qweight = self
             .quantize_for_device(&key, &cpu_weight, dtype)
             .with_context(|| format!("requantize fused {names:?} into {dtype:?} QTensor"))?;
-        Ok(Some(MixedLinear::from_qtensor(qweight, self.mm2d_cfg.clone())?))
+        Ok(Some(self.ctx.quantized_linear(qweight)?))
     }
 
     fn load_values(&self, name: &str, tensor: &QuantizedTensor) -> Result<Vec<f32>> {
@@ -604,7 +604,7 @@ mod tests {
             &manifest_path,
             &Device::Cpu,
             DType::F32,
-            Arc::new(crate::mm2d::Mm2dConfig::default()),
+            crate::model_ctx::ModelCtx::default(),
         )
         .unwrap();
         let linear = artifact.load_linear("linear.weight").unwrap().unwrap();

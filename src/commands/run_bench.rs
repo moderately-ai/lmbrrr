@@ -111,13 +111,14 @@ pub(crate) fn multi_bench(args: MultiBenchArgs) -> Result<()> {
     let tokenizer = load_tokenizer(&bundle.artifacts)?;
     let prompt_text = chat_prompt(&args.prompt, 0, false);
     let prompt_tokens = tokenize_prompt(&tokenizer, prompt_text)?;
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
         head_loader_quant(&args.model),
-        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
+        &runtime,
     )?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
     let len = prompt_tokens.len();
@@ -134,6 +135,7 @@ pub(crate) fn multi_bench(args: MultiBenchArgs) -> Result<()> {
         None::<&ProcessedImages>,
         &args.model.downsample_mode,
         &eos_ids,
+        &runtime.decode,
         |_, _, _, _| Ok(()),
     )?;
 
@@ -251,13 +253,14 @@ pub(crate) fn bench(args: BenchArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
         head_loader_quant(&args.model),
-        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
+        &runtime,
     )?;
     maybe_restrict_head(&mut model, &args.model)?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
@@ -273,6 +276,7 @@ pub(crate) fn bench(args: BenchArgs) -> Result<()> {
                 None::<&ProcessedImages>,
                 &args.model.downsample_mode,
                 &eos_ids,
+                &runtime.decode,
                 |_, _, _, _| Ok(()),
             )?;
         }
@@ -286,6 +290,7 @@ pub(crate) fn bench(args: BenchArgs) -> Result<()> {
                 None::<&ProcessedImages>,
                 &args.model.downsample_mode,
                 &eos_ids,
+                &runtime.decode,
                 |_, _, _, _| Ok(()),
             )?;
             let raw_text = decode_tokens(&tokenizer, &stats.generated_token_ids)?;
@@ -418,13 +423,14 @@ pub(crate) fn run(args: RunArgs) -> Result<()> {
     let prompt_text = prepare_run_prompt(&args, preprocessor.as_ref(), processed_images.as_ref())?;
     let tokens = tokenize_prompt(&tokenizer, prompt_text)?;
 
+    let runtime = lmbrrr::runtime_config::RuntimeConfig::from_env();
     let (mut model, load_elapsed, quantized_load) = load_model_with_optional_quantization(
         &bundle,
         dtype,
         &device,
         args.model.quantized_manifest.as_ref(),
         head_loader_quant(&args.model),
-        &lmbrrr::runtime_config::RuntimeConfig::from_env(),
+        &runtime,
     )?;
     maybe_restrict_head(&mut model, &args.model)?;
     let eos_ids = bundle.config.eos_ids(bundle.generation_config.as_ref());
@@ -449,6 +455,7 @@ pub(crate) fn run(args: RunArgs) -> Result<()> {
             processed_images.as_ref(),
             &args.model.downsample_mode,
             &eos_ids,
+            &runtime.decode,
             |next_token, generated, elapsed, prefill_elapsed| {
                 if let Some(text) = stream.next_token(next_token)? {
                     renderer.write_chunk(&text, generated, elapsed, prefill_elapsed)?;
@@ -478,6 +485,7 @@ pub(crate) fn run(args: RunArgs) -> Result<()> {
             processed_images.as_ref(),
             &args.model.downsample_mode,
             &eos_ids,
+            &runtime.decode,
             |next_token, _, _, _| {
                 if let Some(text) = stream.next_token(next_token)? {
                     renderer.write_chunk(&text)?;

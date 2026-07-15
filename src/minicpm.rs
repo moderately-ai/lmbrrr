@@ -412,18 +412,10 @@ pub struct MiniCpmModel {
 }
 
 impl MiniCpmModel {
-    fn new(
-        cfg: &MiniCpmConfig,
-        vb: VarBuilder,
-        routes: std::sync::Arc<crate::runtime_config::KernelRouteConfig>,
-    ) -> Result<Self> {
+    fn new(cfg: &MiniCpmConfig, vb: VarBuilder, ctx: &crate::model_ctx::ModelCtx) -> Result<Self> {
         Ok(Self {
             vision_tower: VisionModel::new(&cfg.vision_config, vb.pp("vision_tower"))?,
-            language_model: Qwen35TextModel::new(
-                &cfg.text_config,
-                vb.pp("language_model"),
-                routes,
-            )?,
+            language_model: Qwen35TextModel::new(&cfg.text_config, vb.pp("language_model"), ctx)?,
             merger: MiniCpmMerger::new(cfg, vb.pp("merger"))?,
         })
     }
@@ -466,23 +458,19 @@ pub struct MiniCpmForConditionalGeneration {
     // verify-pass hiddens); loaded on demand from the base checkpoint's
     // mtp.* tensors via load_mtp_head.
     mtp: Option<crate::qwen35::MtpHead>,
-    /// Route config injected at construction (entrypoint-resolved); used by
-    /// every quantized-linear the model builds post-load (head slices, MTP
-    /// quantization) and the verify-head argmax route.
-    mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
-    /// Kernel-fusion route gates; kept so `load_mtp_head` (post-construction)
-    /// can inject them into the MTP head's layers.
-    routes: std::sync::Arc<crate::runtime_config::KernelRouteConfig>,
+    /// Construction context (entrypoint-resolved); the orchestrator holds the
+    /// whole ctx because it builds components post-load — head slices, MTP
+    /// head load + quantization, the verify-head argmax route.
+    ctx: crate::model_ctx::ModelCtx,
 }
 
 impl MiniCpmForConditionalGeneration {
     pub fn new(
         cfg: &MiniCpmConfig,
         vb: VarBuilder,
-        mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
-        routes: std::sync::Arc<crate::runtime_config::KernelRouteConfig>,
+        ctx: crate::model_ctx::ModelCtx,
     ) -> Result<Self> {
-        let model = MiniCpmModel::new(cfg, vb.pp("model"), routes.clone())?;
+        let model = MiniCpmModel::new(cfg, vb.pp("model"), &ctx)?;
         let lm_head = if vb.contains_tensor("lm_head.weight") {
             candle_nn::linear_no_bias(
                 cfg.text_config.hidden_size,
@@ -500,8 +488,7 @@ impl MiniCpmForConditionalGeneration {
             head_vocab_ids: None,
             mtp: None,
             mtp_draft_head: None,
-            mm2d_cfg,
-            routes,
+            ctx,
         })
     }
 
@@ -516,11 +503,7 @@ impl MiniCpmForConditionalGeneration {
                 &self.device,
             )?
         };
-        self.mtp = Some(crate::qwen35::MtpHead::new(
-            &cfg.text_config,
-            vb,
-            self.routes.clone(),
-        )?);
+        self.mtp = Some(crate::qwen35::MtpHead::new(&cfg.text_config, vb, &self.ctx)?);
         Ok(())
     }
 
@@ -538,9 +521,9 @@ impl MiniCpmForConditionalGeneration {
         key_prefix: &str,
         only: Option<&str>,
     ) -> Result<()> {
-        let cfg = self.mm2d_cfg.clone();
+        let ctx = self.ctx.clone();
         match self.mtp.as_mut() {
-            Some(m) => m.quantize_with_pack(ggml, pack, key_prefix, &cfg, only),
+            Some(m) => m.quantize_with_pack(ggml, pack, key_prefix, &ctx, only),
             None => Err(candle::Error::Msg("mtp head not loaded".to_string())),
         }
     }
@@ -589,7 +572,7 @@ impl MiniCpmForConditionalGeneration {
             Some(ggml) => {
                 let cpu_f32 = sliced.to_dtype(candle::DType::F32)?.to_device(&Device::Cpu)?;
                 let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
-                crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?
+                self.ctx.quantized_linear(q)?
             }
             None => crate::quantized_linear::MixedLinear::dense(Linear::new(sliced, None)),
         };
@@ -655,7 +638,7 @@ impl MiniCpmForConditionalGeneration {
         if let Some(pack) = pack {
             if let Some(q) = pack.take("lm_head") {
                 self.lm_head =
-                    crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?;
+                    self.ctx.quantized_linear(q)?;
                 return Ok(());
             }
         }
@@ -669,7 +652,7 @@ impl MiniCpmForConditionalGeneration {
                 .map_err(|e| candle::Error::Msg(format!("pack lm_head: {e:#}")))?,
             None => candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?,
         };
-        self.lm_head = crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?;
+        self.lm_head = self.ctx.quantized_linear(q)?;
         Ok(())
     }
 
@@ -692,7 +675,7 @@ impl MiniCpmForConditionalGeneration {
             Some(ggml) => {
                 let cpu_f32 = sliced.to_dtype(candle::DType::F32)?.to_device(&Device::Cpu)?;
                 let q = candle::quantized::QTensor::quantize_onto(&cpu_f32, ggml, &self.device)?;
-                crate::quantized_linear::MixedLinear::from_qtensor(q, self.mm2d_cfg.clone())?
+                self.ctx.quantized_linear(q)?
             }
             None => crate::quantized_linear::MixedLinear::dense(Linear::new(sliced, None)),
         };
@@ -872,7 +855,7 @@ impl MiniCpmForConditionalGeneration {
         offset: usize,
     ) -> Result<(Tensor, Tensor)> {
         let hidden = self.forward_hidden(input_ids, images, downsample_mode, offset)?;
-        if let Some(ids) = crate::mm2d::mm2d_head_argmax(&hidden, &self.lm_head, &self.mm2d_cfg)
+        if let Some(ids) = crate::mm2d::mm2d_head_argmax(&hidden, &self.lm_head, &self.ctx.mm2d)
             .map_err(|e| candle::Error::Msg(format!("fused verify argmax: {e:#}")))?
         {
             return Ok((ids, hidden));

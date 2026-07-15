@@ -68,12 +68,14 @@ impl std::fmt::Debug for PackStore {
 impl PackStore {
     /// Opens (or plans) the pack next to the manifest. A valid existing pack
     /// is eagerly loaded to the device here — that IS the fast start.
+    /// `enabled` comes from the entrypoint-resolved [`PackConfig`]; a
+    /// disabled store misses every lookup and records nothing.
     pub fn open(
         manifest_path: &Path,
         head_tier: Option<GgmlDType>,
         device: &Device,
+        enabled: bool,
     ) -> Result<Self> {
-        let enabled = std::env::var("LMBRRR_PACK").map_or(true, |v| v != "0");
         let manifest_dir = manifest_path
             .parent()
             .map(Path::to_path_buf)
