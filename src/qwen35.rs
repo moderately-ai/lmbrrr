@@ -2525,6 +2525,10 @@ impl Qwen35CausalLM {
     pub fn dtype(&self) -> DType {
         self.dtype
     }
+
+    pub fn set_profiler(&mut self, profiler: Option<Qwen35Profiler>) {
+        self.model.set_profiler(profiler);
+    }
 }
 
 impl CausalTextModel for Qwen35CausalLM {

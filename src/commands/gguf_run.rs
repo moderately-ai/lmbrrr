@@ -13,7 +13,7 @@ use clap::Parser;
 
 use lmbrrr::gguf::GgufFile;
 use lmbrrr::model_ctx::ModelCtx;
-use lmbrrr::qwen35::{CausalTextModel, Qwen35CausalLM};
+use lmbrrr::qwen35::{CausalTextModel, Qwen35CausalLM, Qwen35Profiler};
 
 #[derive(Parser, Debug)]
 pub(crate) struct GgufRunArgs {
@@ -35,6 +35,11 @@ pub(crate) struct GgufRunArgs {
     /// decoding — isolates kernel bandwidth from model overhead.
     #[arg(long)]
     pub bench_gemv: bool,
+
+    /// Attach the per-op profiler and dump the decode-step breakdown by
+    /// component (deltanet_recurrent_rule / mlp / attention / norms / ...).
+    #[arg(long)]
+    pub profile: bool,
 }
 
 fn bench_gemv(device: &Device) -> Result<()> {
@@ -75,6 +80,64 @@ fn bench_gemv(device: &Device) -> Result<()> {
     Ok(())
 }
 
+fn profile_decode(model: &mut Qwen35CausalLM, device: &Device, ids: &[u32]) -> Result<()> {
+    use candle::D;
+    use std::collections::HashMap;
+
+    let prof = Qwen35Profiler::new();
+    model.set_profiler(Some(prof.clone()));
+
+    // Prefill, then discard its events — we profile steady-state decode only.
+    let input = Tensor::from_slice(ids, (1, ids.len()), device)?;
+    let mut logits = model.forward(&input, 0)?;
+    device.synchronize()?;
+    prof.clear();
+
+    let steps = 24usize;
+    let mut offset = ids.len();
+    for _ in 0..steps {
+        let next = logits
+            .argmax(D::Minus1)?
+            .to_dtype(DType::U32)?
+            .flatten_all()?
+            .to_vec1::<u32>()?[0];
+        let step = Tensor::from_slice(&[next], (1, 1), device)?;
+        logits = model.forward(&step, offset)?;
+        device.synchronize()?;
+        offset += 1;
+    }
+
+    // Aggregate decode-step events (seq_len == 1) by component.
+    let mut agg: HashMap<String, (f64, usize)> = HashMap::new();
+    for e in prof.events() {
+        if e.seq_len != 1 {
+            continue;
+        }
+        let slot = agg.entry(e.component.clone()).or_default();
+        slot.0 += e.seconds;
+        slot.1 += 1;
+    }
+    let total: f64 = agg.values().map(|v| v.0).sum();
+    let mut rows: Vec<_> = agg.into_iter().collect();
+    rows.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+    println!(
+        "profiled {steps} decode steps; summed op-time {:.1} ms ({:.2} ms/token)",
+        total * 1000.0,
+        total * 1000.0 / steps as f64
+    );
+    println!("{:<40} {:>10} {:>8} {:>6}", "component", "ms/token", "calls", "pct");
+    for (name, (secs, calls)) in rows {
+        println!(
+            "{:<40} {:>10.3} {:>8} {:>6.1}",
+            name,
+            secs * 1000.0 / steps as f64,
+            calls,
+            100.0 * secs / total
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
     let dtype = DType::BF16;
@@ -111,6 +174,10 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
         .get_ids()
         .to_vec();
     let eos = gguf.eos_token_id().unwrap_or(248046);
+
+    if args.profile {
+        return profile_decode(&mut model, &device, &ids);
+    }
 
     let prefill = Instant::now();
     let input = Tensor::from_slice(&ids, (1, ids.len()), &device)?;
