@@ -43,6 +43,15 @@ nr=2 rows/simdgroup (align 4) vs N_DST=4: Q2_0 GEMV 93.3 → **98.6 GB/s**; E2E 
 
 **KEY: decode is now bandwidth-bound at the Q2_0 kernel's 98 GB/s** (fwd 74 ms ≈ 7.17 GB / 98 GB/s = 71 ms roofline). Everything else (deltanet 25%, attention, norms) reads weights at the same rate. So the SINGULAR lever to beat 13.7 is Q2_0 kernel bandwidth → Q4K's 142 (a 45% gap = real headroom). Candidates: FMA-form dot (unpack code→float + 1 FMA vs 2 conditional selects/element, byte read once); vectorized block loads (34 B block via uint chunks vs 4-B/thread scattered reads); simdgroup-matrix (the q4k k1 keystone).
 
+## STATUS: BAR BEATEN (2026-07-15) — 13.72 tok/s vs llama.cpp 13.7
+
+4.98 → **13.72 tok/s decode (64-tok), 13.59 steady** = **2.75×**, coherent, on the M3 — past the llama.cpp reference. Three wins, all evidence-led:
+1. **GQA-fused deltanet decode** (candle b79233c0): the recurrent_rule was 46% of decode, unfused because Bonsai's grouped DeltaNet (16 k / 48 v heads) fell off the fused kernel's `num_k_heads == heads` guard. GQA-aware decode kernel (kh = h % num_k_heads). 4.98 → 12.9. **[the big one]**
+2. **Q2_0 mv nr2 geometry** (b4940752): 93 → 98.6 GB/s; 12.9 → 13.5.
+3. **Drop redundant per-token synchronize** (argmax read-back forces exec): 13.5 → 13.72.
+
+Decode is now bandwidth-bound at the Q2_0 kernel's ~98 GB/s (fwd 74 ms ≈ 7.17 GB / 98). **DECISIVE-LEAD LEVER (open): Q2_0 kernel bandwidth 98 → Q4K's 142 GB/s** (45% headroom → ~18 tok/s). Candidates: FMA-form dot, vectorized 34 B block loads, simdgroup-matrix. Host path is negligible — do not touch it.
+
 ## EVIDENCE (measured, not assumed)
 
 1. **Host path is negligible.** fwd/head split: argmax + full-logits readback = **0.35 ms/token**; the entire 200 ms is the model forward. (So fused-argmax / async-readback / device-chain — the MiniCPM fast paths — buy ~nothing here. Do NOT start there.)
