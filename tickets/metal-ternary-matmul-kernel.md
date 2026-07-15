@@ -14,9 +14,13 @@ tags: [ternary-bonsai, model-compat, fork]
 
 The point of a ternary target is the byte diet: ~2 bpw weights vs q4k's ~4.5 → roughly half the decode bandwidth of our current MiniCPM stack, on a 27B model where bandwidth is the wall. Dequant-to-bf16-then-GEMV throws that away (materializes bf16, moves 8x the bytes). The win needs a kernel that consumes the packed ternary weights directly — a ternary GEMV/GEMM (weight ∈ {-1,0,+1} × bf16 activation, or int8-activation BitNet-style) — analogous to our existing `mm2d` uint4b tensor-op path, but for type 42.
 
+## REFERENCE (located 2026-07-15; see `docs/research/ternary-type42-format.md`)
+
+Port target: `~/workspace/github.com/PrismML-Eng/llama.cpp` (branch `prism`), `ggml/src/ggml-metal/ggml-metal.metal` — a Metal kernel for our exact GGUF format. Take `kernel_mul_mv_q2_0_f32_impl<nr0,nr1,tpb>` (l.3858): decode = nr1=1 (bit-decomposition, deterministic order via `q2_0_dot_y`), verify = nr1=2..4 (weights read ONCE, reused across draft columns — the bandwidth win). Arithmetic is just `d·(Σq·y − Σy)`, LSB-first unpack. `mul_mv_ext_q2_0` (l.4418) = the mlx qmv_wide wide-m fallback; `mul_mm_q2_0` (l.10758) = prefill GEMM (only for ne11≳32). This maps 1:1 onto our `mm2d` multi-column structure. (MLX fork = affine 2-bit, different scheme — reference only for the qmv_wide small-batch geometry.)
+
 ## WORK ITEMS
 
-1. Design the ternary GEMV: unpack trits in-kernel, accumulate `sum(sign * act)` per output with the per-block scale, threadgroup-staged like the mm2d/`mul_mv` path. Decide activation precision (bf16 direct vs int8-quantized activations for a true BitNet int matmul) — measure both.
+1. Design the ternary GEMV: unpack trits in-kernel, accumulate `sum(sign * act)` per output with the per-block scale, threadgroup-staged like the mm2d/`mul_mv` path. Decide activation precision (bf16 direct vs int8-quantized activations for a true BitNet int matmul) — measure both. Start from the prism `kernel_mul_mv_q2_0_f32_impl` template above.
 2. Route it at the decode shapes of the 27B (hidden 5120, ffn 17408, qkv/gate) — the body/head split like the existing routing table.
 3. Correctness gate: kernel output == the [[ternary-type42-dequant]] reference within the stub-oracle noise bound (reuse the mm2d oracle harness).
 4. Bench vs dequant-to-bf16-GEMV and vs q4k on the same shapes; confirm the bandwidth win is realized in-loop (not just isolated latency — the split-K/t32 lesson: in-loop-arbitrated).

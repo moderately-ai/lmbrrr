@@ -1,7 +1,7 @@
 ---
 id: spike-ternary-type42-block-format
 title: "SPIKE: reverse-engineer the prism-ml ternary ggml type-42 block layout"
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [ternary-bonsai-27b-support, ternary-type42-dequant]
@@ -28,3 +28,13 @@ Blocks the whole ternary track. `Ternary-Bonsai-27B-Q2_0.gguf` stores 498 weight
 ## DONE-WHEN
 
 We can dequantize an arbitrary type-42 tensor to bf16 and match the F16 reference within ternary rounding error, with the byte layout documented.
+
+## RESOLVED (2026-07-15) — format fully determined; see `docs/research/ternary-type42-format.md`
+
+Type 42 = **`Q2_0` at QK=128** (README "Q2_0_g128"). Ground truth from prism-ml's now-cloned llama.cpp fork (`~/workspace/github.com/PrismML-Eng/llama.cpp`, branch `prism`) + confirmed against the file's own byte arithmetic (every type-42 tensor is exactly 34.00 B/128 elements):
+- `block_q2_0 { ggml_half d; uint8_t qs[32]; }` = 34 B / 128 weights (2.125 bpw deployed, 1.71 ideal). `GGML_TYPE_Q2_0 = 42`.
+- Code→value `00→−1 01→0 10→+1 11→+2`, `w=(q−1)·d`, LSB-first (weight j at byte j/4, bit (j%4)*2). Python reference dequant written (in the doc).
+- Reference **Metal** kernel located: `ggml-metal.metal` `kernel_mul_mv_q2_0_f32_impl` (nr1 multi-column weight-reuse = the verify path) → the direct template for [[metal-ternary-matmul-kernel]]. MLX fork uses a *different* affine-2-bit scheme (weaker ref).
+- `PQ2_0`/`Q2_g64` characterized (g128 repack / group-64).
+
+REMAINING (optional belt-and-suspenders): numerical cross-check dequant vs the F16 reference for one tensor (range-fetch one tensor from both `Q2_0` and `F16` gguf and compare) — the format is already certain from authoritative source, so this is confirmation only. Unblocks [[ternary-type42-dequant]] + [[metal-ternary-matmul-kernel]].
