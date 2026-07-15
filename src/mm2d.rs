@@ -70,6 +70,18 @@ pub fn mm2d_splitk_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("LMBRRR_MM2D_SPLITK").map_or(true, |v| v != "0"))
 }
 
+/// Split-K grid target (threadgroups). 256 splits gate_up (N=7168) 2x,
+/// which the 128 target missed; in-loop arbitrated.
+pub fn mm2d_split_target_tgs() -> usize {
+    static TGS: OnceLock<usize> = OnceLock::new();
+    *TGS.get_or_init(|| {
+        std::env::var("LMBRRR_MM2D_SPLIT_TGS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256)
+    })
+}
+
 /// Process-wide kill switch, set on the first dispatch failure (pre-26.4 OS).
 static MM2D_BROKEN: AtomicBool = AtomicBool::new(false);
 
@@ -186,11 +198,14 @@ pub fn mm2d_q4k_forward(xs: &Tensor, planes: &Mm2dPlanes) -> Result<Tensor> {
         .with_label("mm2d_dst")
         .build()?;
 
-    // Split-K for body shapes (LMBRRR_MM2D_SPLITK=1, in-loop arbitrated):
-    // small-N grids under-occupy the GPU on a serial K loop; partition the
-    // K/32 slices so the grid reaches ~128 threadgroups.
+    // Split-K for body shapes (in-loop arbitrated): small-N grids
+    // under-occupy the GPU on a serial K loop; partition the K/32 slices so
+    // the grid reaches the target threadgroup count. The original 128
+    // target left gate_up (N=7168, 112 TGs) unsplit at 47 GB/s — 24 plain
+    // dispatches ~2ms/round in the labeled trace (2026-07-15); 256 splits
+    // it 2x. LMBRRR_MM2D_SPLIT_TGS overrides the target for A/B.
     let n_splits = if planes.n < HEAD_CLASS_MIN_N && mm2d_splitk_enabled() {
-        (128 / (planes.n_pad / 64)).clamp(1, planes.k / 32)
+        (mm2d_split_target_tgs() / (planes.n_pad / 64)).clamp(1, planes.k / 32)
     } else {
         1
     };
