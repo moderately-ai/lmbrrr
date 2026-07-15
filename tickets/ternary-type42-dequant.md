@@ -1,7 +1,7 @@
 ---
 id: ternary-type42-dequant
-title: "FEATURE: ternary type-42 dequantization in the candle fork (QTensor path)"
-status: todo
+title: "FEATURE: ternary type-42 (+ type-41) dequant/quant in the candle fork"
+status: in-progress
 priority: p2
 dependencies: [spike-ternary-type42-block-format]
 related: [ternary-bonsai-27b-support, metal-ternary-matmul-kernel, gguf-loader-qwen35-hybrid]
@@ -24,3 +24,15 @@ Once the type-42 block layout is known ([[spike-ternary-type42-block-format]]), 
 ## DONE-WHEN
 
 The fork loads a type-42 GGUF tensor and produces a bf16 tensor matching the F16 reference within ternary error; `cargo nextest` fixture + whole-tensor tests pass. Feeds [[gguf-loader-qwen35-hybrid]] (functional path) and [[metal-ternary-matmul-kernel]] (oracle).
+
+## IMPLEMENTED (2026-07-15) — candle fork `tomsanbear/candle` branch `ternary-q2_0` (commit e1197ca9)
+
+Added BOTH prism-ml types (Q2_0 type 42 ternary AND its sibling Q1_0 type 41 binary — the Bonsai 1-bit phone companion), full `GgmlType`, not a stub:
+- `BlockQ2_0 {f16 d; u8 qs[32]}` = 34 B/128 (2.125 bpw); `BlockQ1_0 {f16 d; u8 qs[16]}` = 18 B/128 (1.125 bpw).
+- `to_float` (dequant) — Q2_0 `w=(q-1)·d` codes 00→-1 01→0 10→+1 11→+2; Q1_0 sign→±d. Validated cosine 1.0 vs the real F16 weights (spike) + unit tests on exact bit patterns.
+- `from_float` (quantize) — faithfully mirrors the fork's `quantize_row_q2_0_ref` (d = max|w|, `q = clamp(round(w/d)+1, 0, 3)`) and `quantize_row_q1_0_ref` (d = mean|w|, sign bit). NOT stubbed — implemented + round-trip unit-tested. (It's a standard round-to-grid quantizer; prism's *training-aware* pipeline is a separate thing, but the quantize step itself is well-defined and now supported.)
+- `GgmlDType::{Q1_0,Q2_0}` variants + `from_u32(41/42)`/`to_u32`/`type_size`/`block_size`/`cpu_zeros`/`from_data` + Cpu/Metal/Cuda load arms + the Metal dequant read-back path.
+- Quantized-*matmul* dispatch panics with a clear message (no packed Metal kernel yet — that's [[metal-ternary-matmul-kernel]]); deployment path is dequant-to-bf16 first. 128-block types are excluded from `verify_block_sizes!` and the CPU matmul-error set (their 32-block Q8_0 VecDotType mismatch — not the deployment path).
+- `cargo check` (metal + non-metal + tests) clean; 4 new nextest tests pass (to_float bit-patterns + from_float round-trips, both types).
+
+REMAINING: repin lmbrrr `Cargo.toml` candle rev to this fork commit once the branch is pushed (integration), then a whole-tensor load test through lmbrrr's GGUF path ([[gguf-loader-qwen35-hybrid]]).
