@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use candle::op::BackpropOp;
 use candle::{DType, Device, Storage, Tensor};
 use candle_metal_kernels::kernels::{
-    call_gated_delta_chunk, call_gated_delta_decode, GatedDeltaParams,
+    call_gated_delta_chunk, call_gated_delta_decode, call_gated_delta_v2_reconstruct,
+    GatedDeltaParams,
 };
 
 /// Rollback-capture tensors emitted by the fused chunk kernel, matching the
@@ -810,4 +811,91 @@ pub fn gated_delta_v2_tree(
         gcs: mk(cap_gcs_buf, bh * l, DType::F32, vec![1, dims.heads, l]),
     };
     Ok((out, conv_out, state_out, state_mid, capture))
+}
+
+/// One-dispatch rollback state reconstruction (fork kernel
+/// gated_delta_v2_reconstruct_*): returns the recurrent state at `prefix`
+/// in the capture's own layout, cast to `out_dtype`. The fold is
+///   out = exp(gcs[j]) * s0 + sum_{i<=j} F_i * exp(gcs[j]-gcs[i]) x G_i
+/// with (F, G) = (kc, delta) in the v1 layout and (delta, kc) transposed —
+/// callers pass the UNTRIMMED capture tensors (the kernel strides by the
+/// full chunk length and reads only i < prefix). Errors (non-Metal,
+/// non-contiguous, unexpected dims) leave the caller on the reference chain.
+pub fn gated_delta_v2_reconstruct(
+    s0: &Tensor,
+    kc: &Tensor,
+    delta: &Tensor,
+    gcs: &Tensor,
+    prefix: usize,
+    transposed: bool,
+    out_dtype: DType,
+) -> Result<Tensor> {
+    let Device::Metal(device) = s0.device() else {
+        anyhow::bail!("reconstruct: not on Metal");
+    };
+    anyhow::ensure!(
+        matches!(out_dtype, DType::F32 | DType::BF16),
+        "reconstruct: unsupported out dtype {out_dtype:?}"
+    );
+    let (b, h, da, db) = s0.dims4()?;
+    let c_total = gcs.dim(2)?;
+    anyhow::ensure!(b == 1, "reconstruct: batch {b} != 1");
+    anyhow::ensure!(
+        (1..=c_total).contains(&prefix),
+        "reconstruct: prefix {prefix} outside 1..={c_total}"
+    );
+    let (fmat, gmat) = if transposed { (delta, kc) } else { (kc, delta) };
+    anyhow::ensure!(
+        fmat.dims4()? == (1, h, c_total, da) && gmat.dims4()? == (1, h, c_total, db),
+        "reconstruct: factor dims {:?}/{:?} vs state ({h},{da},{db}) c={c_total}",
+        fmat.dims4()?,
+        gmat.dims4()?,
+    );
+    for (name, t) in [("s0", s0), ("kc", kc), ("delta", delta), ("gcs", gcs)] {
+        anyhow::ensure!(t.dtype() == DType::F32, "reconstruct: {name} not F32");
+        anyhow::ensure!(t.is_contiguous(), "reconstruct: {name} not contiguous");
+    }
+
+    let guards = [s0, fmat, gmat, gcs]
+        .iter()
+        .map(|t| t.storage_and_layout().0)
+        .collect::<Vec<_>>();
+    let buffer = |i: usize| -> Result<_> {
+        match &*guards[i] {
+            Storage::Metal(ms) => Ok(ms.buffer().clone()),
+            _ => anyhow::bail!("reconstruct: input {i} not Metal-resident"),
+        }
+    };
+    let bufs: Vec<_> = (0..guards.len()).map(&buffer).collect::<Result<_>>()?;
+    let out_buf = device
+        .new_buffer_builder()
+        .with_size_for(h * da * db, out_dtype)
+        .with_label("gdn_reconstruct_out")
+        .build()?;
+
+    let encoder = device.command_encoder()?;
+    call_gated_delta_v2_reconstruct(
+        device.metal_device(),
+        &encoder,
+        device.kernels(),
+        (h, da, db, prefix, c_total),
+        out_dtype == DType::BF16,
+        &bufs[0],
+        &bufs[1],
+        &bufs[2],
+        &bufs[3],
+        &out_buf,
+    )
+    .map_err(candle::Error::wrap)
+    .context("fused reconstruct dispatch")?;
+    drop(encoder);
+    drop(guards);
+
+    let storage = candle::MetalStorage::new(out_buf, device.clone(), h * da * db, out_dtype);
+    Ok(Tensor::from_storage(
+        Storage::Metal(storage),
+        vec![1, h, da, db],
+        BackpropOp::none(),
+        false,
+    ))
 }

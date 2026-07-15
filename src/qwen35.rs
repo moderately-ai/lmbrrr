@@ -160,6 +160,11 @@ fn unfused_sdpa() -> bool {
     *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_SDPA").is_ok_and(|v| v == "1"))
 }
 
+fn unfused_reconstruct() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_RECONSTRUCT").is_ok_and(|v| v == "1"))
+}
+
 fn unfused_deltanet() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_DELTANET").is_ok_and(|v| v == "1"))
@@ -1075,6 +1080,45 @@ impl GatedDeltaNet {
         if prefix_len == 0 || prefix_len > chunk_len {
             candle::bail!("verify-state prefix {prefix_len} outside 1..={chunk_len}");
         }
+        // Fused single-dispatch reconstruction (fork kernel): the tensor-op
+        // chain below (8-10 dispatches of f32 broadcast/exp/GEMM per layer,
+        // measured ~20% of a spec round) is kept as the reference path —
+        // LMBRRR_UNFUSED_RECONSTRUCT=1 or any precondition miss routes there.
+        // Margin-class: f32 accumulation order differs from the matmul.
+        let recurrent = if !unfused_reconstruct() {
+            crate::fused_deltanet::gated_delta_v2_reconstruct(
+                &cap.s0,
+                &cap.kc,
+                &cap.delta,
+                &cap.gcs,
+                prefix_len,
+                cap.transposed,
+                cap.dtype,
+            )
+            .ok()
+        } else {
+            None
+        };
+        let recurrent = match recurrent {
+            Some(t) => t,
+            None => Self::reconstruct_state_reference(cap, prefix_len)?,
+        };
+
+        let window_len = cap.prev_conv_len + prefix_len;
+        let conv = if window_len >= ksz {
+            cap.conv_full.narrow(2, window_len - ksz, ksz)?.copy()?
+        } else {
+            cap.conv_full
+                .narrow(2, 0, window_len)?
+                .pad_with_zeros(2, ksz - window_len, 0)?
+                .copy()?
+        };
+        Ok((recurrent, conv))
+    }
+
+    /// Reference reconstruction (tensor-op chain) — the fused kernel's
+    /// fallback and its drift-attribution baseline.
+    fn reconstruct_state_reference(cap: &DeltaVerifyCapture, prefix_len: usize) -> Result<Tensor> {
         let j = prefix_len - 1;
         let gcs_j = cap.gcs.narrow(2, j, 1)?; // (b, h, 1)
         let rel = gcs_j
@@ -1101,18 +1145,7 @@ impl GatedDeltaNet {
         };
         // Match the dtype the chunked store (and thus a re-advance) would
         // have produced at this boundary.
-        let recurrent = state.to_dtype(cap.dtype)?;
-
-        let window_len = cap.prev_conv_len + prefix_len;
-        let conv = if window_len >= ksz {
-            cap.conv_full.narrow(2, window_len - ksz, ksz)?.copy()?
-        } else {
-            cap.conv_full
-                .narrow(2, 0, window_len)?
-                .pad_with_zeros(2, ksz - window_len, 0)?
-                .copy()?
-        };
-        Ok((recurrent, conv))
+        state.to_dtype(cap.dtype)
     }
 
     /// Reconstructs and installs the recurrent + conv state as of the first
