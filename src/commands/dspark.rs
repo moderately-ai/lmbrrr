@@ -1474,14 +1474,17 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             let bonus = targets[accepted];
             // Next round's anchor stays on device (a slice of this verdict).
             anchor_dev = targets_dev.narrow(0, accepted, 1)?.reshape((1, 1))?;
-            // Hysteresis evidence: the round is low-value when its committed
-            // tokens cost more than the greedy rate would have charged. The
-            // verdict readback above bounds the wall.
+            // Hysteresis evidence: a STRIKE is a zero-accept round (drafting
+            // bought nothing — mirrors the drafter loop's zero-width
+            // counter); the RESET requires the round to actually beat the
+            // greedy rate. Counting merely-sub-greedy rounds as strikes
+            // over-parked the strong classes (suite: math -2.4%, coding
+            // -3.7% for +3-6% on weak ones).
             let round_ms = secs(round_start.elapsed()) * 1000.0;
-            if (accepted + 1) as f64 * greedy_step_ms >= round_ms {
-                consecutive_low = 0;
-            } else {
+            if accepted == 0 {
                 consecutive_low += 1;
+            } else if (accepted + 1) as f64 * greedy_step_ms >= round_ms {
+                consecutive_low = 0;
             }
 
             if accepted < drafts.len() {
