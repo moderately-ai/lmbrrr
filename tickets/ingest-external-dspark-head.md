@@ -29,6 +29,21 @@ tags: [ternary-bonsai, model-compat, dspark]
 2. **Gap analysis vs our DsparkDrafter**: does ours support (a) **5-layer feature fusion** (fc 25600 = 5×hidden — our MTP fc is 2×hidden; DsparkDrafter's target_layer_ids suggests yes, verify), (b) **log-SNR conditioning**, (c) **masked-block diffusion** drafting? Enumerate present vs missing; missing pieces become follow-up tickets.
 3. Requires the target running to produce the 5 target-layer hiddens the fc consumes ([[qwen35-27b-config-scaleup]]) — can validate the head forward against a synthetic hidden stack first.
 
+## OPEN QUESTION RESOLVED (2026-07-15) — full read of `src/dspark.rs` + the prism fork's `src/models/dspark.cpp`
+
+**Our `DsparkDrafter` is a faithful DSpark port minus exactly ONE mechanism.** Structural match is near-exact (verified dim-for-dim):
+- `fc = Linear(h, target_layer_ids.len()*h)` (dspark.rs:383) → for 5 taps = (5120, 25600) = Bonsai `dspark.fc.weight` exactly. **5-layer fusion already implemented.**
+- `markov_w1/w2 = (vocab, markov_rank)` = `markov_head_a/b [256,248320]`; `confidence = (1, h+markov_rank)` = `[5376->1]`; block bidirectional (unmasked) attention over fused target-context K/V + mask-seeded draft block — all present and matching the fork's `dspark.cpp` (which calls itself "EAGLE-style block-diffusion drafter", single-pass forward + separate markov-resample loop, same as ours).
+
+**THE gap = log-SNR conditioning only.** Bonsai has `log_snr_fc1/fc2` (`dspark_log_snr_conditioning=true`, min/max ±9). Per the fork (`llama-graph.h:184`, `dspark.cpp:136`): it's **single-pass, not a denoising loop** — a `LogSnrEmbed`: a *fixed* per-position SNR (known rows `max_log_snr`, mask rows `min_log_snr`), sinusoidally featurized (`n_freq`), → `fc1` → SiLU → `fc2`, **added to the draft-block embedding** before the trunk. Precomputable at build time. Our loader neither loads `log_snr_fc1/fc2` nor applies it, and (config parses via serde, unknown fields ignored) would **silently ignore SNR → degraded drafts**.
+
+**Bounded remaining work to ingest Bonsai:**
+1. Add `LogSnrEmbed` to our drafter forward: precompute the sinusoidal SNR feature + `fc1/SiLU/fc2` MLP, add to the block embedding. One additive mechanism; reference = fork `src/models/dspark.cpp` + `src/llama-graph.cpp` (`llm_graph_input_dspark_logsnr::set_input`).
+2. Add a **loud guard**: reject `log_snr_conditioning=true` checkpoints until (1) lands (mirror the existing `markov_head_type != vanilla` bail at dspark.rs:322), so we never silently drop SNR.
+3. GGUF → our naming/format: `blk.N.attn_q/…`, `dspark.fc`, `dspark.markov_head_a/b`, `dspark.confidence_head`, `dspark.log_snr_fc*` → our safetensors names + `config.json`. Shares the [[gguf-loader-qwen35-hybrid]] machinery.
+
+Reference impl for all of the above (cloned): `~/workspace/github.com/PrismML-Eng/llama.cpp` — `src/models/dspark.cpp` (forward), `common/dspark-markov.cu` (markov resample), `common/speculative.cpp` (drafter loop), `common/dspark-markov.h`.
+
 ## DONE-WHEN
 
-The external head loads into our drafter (or a documented list of missing mechanisms is filed as follow-ups), and a forward on target hiddens produces sane draft logits. Confirms/extends the faithful-DSpark posture with an external witness.
+The external head loads into our drafter (or a documented list of missing mechanisms is filed as follow-ups), and a forward on target hiddens produces sane draft logits. Confirms/extends the faithful-DSpark posture with an external witness. **Now scoped: implement `LogSnrEmbed` + the guard + GGUF name map; everything else already maps.**
