@@ -31,6 +31,8 @@ def dequant_q2_0(block: bytes) -> np.ndarray:      # 34 bytes -> 128 floats
     return (q - 1).astype(np.float32) * d
 ```
 
+**Validated (2026-07-15):** dequant of `blk.0.ssm_alpha.weight` range-fetched from the real `Q2_0` gguf vs the same tensor from `F16` → **cosine 1.00000**, value-for-value ({−0.0137,0,+0.0137}). The reference dequant is exact. (The F16 tensor is itself perfectly ternary — Bonsai is ternary-native; F16 is just a wide container, so "true 1.71 bpw" holds.)
+
 Sibling packs: `Q2_g64` (7.59 GB) = same scheme at group-64 (36 B/128, scale repeated per 64); `PQ2_0` (7.17 GB) = a repacked g128 variant (confirm same type-42 dot; likely a permuted qs layout for a wider load). `Bonsai-27B` (non-ternary repo) ships a 1-bit `Q1_0` companion.
 
 ## Reference Metal kernel (the one to base ours on)
