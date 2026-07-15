@@ -30,11 +30,58 @@ pub(crate) struct GgufRunArgs {
     /// Feed the prompt verbatim instead of wrapping it in the ChatML template.
     #[arg(long)]
     pub raw: bool,
+
+    /// Micro-bench the decode GEMV (Q2_0 vs Q4K) on the ffn shape instead of
+    /// decoding — isolates kernel bandwidth from model overhead.
+    #[arg(long)]
+    pub bench_gemv: bool,
+}
+
+fn bench_gemv(device: &Device) -> Result<()> {
+    use candle::quantized::{GgmlDType, QTensor};
+    use lmbrrr::quantized_linear::MixedLinear;
+    let ctx = ModelCtx::default();
+    // ffn_up shape (the bulk of the per-layer weight traffic).
+    for (n, k) in [(17408usize, 5120usize), (5120, 5120)] {
+        let w = Tensor::randn(0f32, 1f32, (n, k), device)?;
+        let x = Tensor::randn(0f32, 1f32, (1, 1, k), device)?.to_dtype(DType::BF16)?;
+        for dt in [GgmlDType::Q2_0, GgmlDType::Q4K] {
+            if k % dt.block_size() != 0 {
+                continue;
+            }
+            let qt = QTensor::quantize(&w, dt)?;
+            let bytes = qt.storage_size_in_bytes();
+            let lin = MixedLinear::from_qtensor(qt, ctx.mm2d.clone())?;
+            for _ in 0..8 {
+                let _ = lin.forward(&x)?;
+            }
+            device.synchronize()?;
+            let iters = 200;
+            let t = Instant::now();
+            for _ in 0..iters {
+                let _ = lin.forward(&x)?;
+            }
+            device.synchronize()?;
+            let s = t.elapsed().as_secs_f64();
+            let gbps = (bytes as f64 * iters as f64) / s / 1e9;
+            println!(
+                "{dt:?} GEMV {n}x{k}: {:.3} ms/call, {:.1} GB/s ({} MB)",
+                1000.0 * s / iters as f64,
+                gbps,
+                bytes / 1_000_000
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
     let dtype = DType::BF16;
+
+    if args.bench_gemv {
+        return bench_gemv(&device);
+    }
 
     let load = Instant::now();
     let gguf = GgufFile::open(&args.gguf)?;
@@ -74,21 +121,27 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
     let mut offset = ids.len();
     let mut out = Vec::new();
     let mut gaps = Vec::new();
+    let mut head_seconds = 0f64; // argmax + logits readback (host round-trip)
+    let mut fwd_seconds = 0f64; // model forward (embed + trunk + lm_head GEMV)
     let decode = Instant::now();
     for _ in 0..args.max_new_tokens {
         let t0 = Instant::now();
+        let a0 = Instant::now();
         let next = logits
             .argmax(D::Minus1)?
             .to_dtype(DType::U32)?
             .flatten_all()?
             .to_vec1::<u32>()?[0];
+        head_seconds += a0.elapsed().as_secs_f64();
         if next == eos {
             break;
         }
         out.push(next);
         let step = Tensor::from_slice(&[next], (1, 1), &device)?;
+        let f0 = Instant::now();
         logits = model.forward(&step, offset)?;
         device.synchronize()?;
+        fwd_seconds += f0.elapsed().as_secs_f64();
         offset += 1;
         gaps.push(t0.elapsed().as_secs_f64());
     }
@@ -119,6 +172,10 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
             "decode_seconds": decode_seconds,
             "decode_tokens_per_second": out.len() as f64 / decode_seconds.max(f64::EPSILON),
             "steady_state_tokens_per_second": steady_tps,
+            "fwd_seconds": fwd_seconds,
+            "fwd_ms_per_token": 1000.0 * fwd_seconds / out.len().max(1) as f64,
+            "head_argmax_readback_seconds": head_seconds,
+            "head_ms_per_token": 1000.0 * head_seconds / out.len().max(1) as f64,
             "device": format!("{device:?}"),
             "dtype": "BF16",
         })
