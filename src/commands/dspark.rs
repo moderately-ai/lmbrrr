@@ -1267,6 +1267,16 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let prefill_seconds = secs(prefill_start.elapsed());
     let last_logits = prompt_logits.narrow(1, n - 1, 1)?;
     let (anchor0, _) = argmax_token(&last_logits.squeeze(1)?, &device)?;
+    // The device twin of the anchor: verify chunks are assembled on device,
+    // so the anchor never needs a host->device upload per round.
+    let mut anchor_dev = last_logits
+        .squeeze(1)?
+        .argmax(D::Minus1)?
+        .reshape((1, 1))?;
+    // Instrumentation syncs (per-bucket verify/draft walls) are opt-in:
+    // LMBRRR_SPEC_FENCED_TIMING=1. Unfenced (default), the round pipelines
+    // freely and the buckets measure enqueue + the single verdict drain.
+    let fenced_timing = std::env::var("LMBRRR_SPEC_FENCED_TIMING").is_ok_and(|v| v == "1");
     // Divergence-margin diagnostics read the full verify logits back every
     // round — opt-in only (--mtp-margin-oracle), never on the measured path.
     let margin_oracle = args.mtp_margin_oracle;
@@ -1295,7 +1305,6 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     draft_seconds += secs(draft_start.elapsed());
 
     let mut committed = vec![anchor0];
-    let mut anchor = anchor0;
     let mut anchor_pos = n;
     let mut offset = n;
     let mut rounds = 0usize;
@@ -1321,11 +1330,10 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             }
             // Draft: draft_1 came from the previous catch-up; chain the rest
             // on the head's own post-norm hidden. Zero per-step host syncs:
-            // the device argmax (identical semantics to argmax_token's
-            // kernel, readback deferred) feeds the next step's embedding
-            // lookup directly; the drafted ids come back in one readback
-            // that also bounds the draft timing bucket. Device-side chunk
-            // assembly (killing this last readback) is the one-sync ticket.
+            // the device argmax feeds the next step's embedding lookup
+            // directly and the ids never leave the GPU pre-verify — the
+            // verify chunk is assembled on device, so the ROUND has exactly
+            // one structural readback (the verdict, below).
             let round_draft_start = Instant::now();
             let mut draft_ids_dev = vec![next_first_draft_dev.clone()];
             for _ in 1..depth {
@@ -1338,19 +1346,17 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 );
                 post_last = post_j;
             }
-            let drafts = Tensor::cat(&draft_ids_dev.iter().collect::<Vec<_>>(), 1)?
-                .flatten_all()?
-                .to_vec1::<u32>()?;
             draft_seconds += secs(round_draft_start.elapsed());
             // Recursion pairs are approximations — drop them before verify;
             // the cache goes back to true-hidden committed pairs only.
             model.mtp_truncate(anchor_pos)?;
 
             let snapshot = model.snapshot_decode_state();
-            let mut chunk = Vec::with_capacity(depth + 1);
-            chunk.push(anchor);
-            chunk.extend_from_slice(&drafts);
-            let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), &device)?;
+            // Device-side chunk assembly: [anchor | d_1..d_k], no host ids.
+            let mut chunk_parts = Vec::with_capacity(depth + 1);
+            chunk_parts.push(&anchor_dev);
+            chunk_parts.extend(draft_ids_dev.iter());
+            let chunk_input = Tensor::cat(&chunk_parts, 1)?;
             let verify_start = Instant::now();
             let (logits, hidden) = model.forward_all_logits_and_hidden(
                 &chunk_input,
@@ -1358,15 +1364,27 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 &args.model.downsample_mode,
                 offset,
             )?;
-            device.synchronize()?;
+            if fenced_timing {
+                device.synchronize()?;
+            }
+            // THE round's one structural sync: targets and drafted ids come
+            // back in a single packed readback; everything the host does
+            // with them (accept/commit/EOS) is trivial CPU work.
+            let targets_dev = logits.squeeze(0)?.argmax(D::Minus1)?;
+            let drafts_dev = Tensor::cat(&draft_ids_dev.iter().collect::<Vec<_>>(), 1)?
+                .flatten_all()?;
+            let packed = Tensor::cat(&[&targets_dev, &drafts_dev], 0)?.to_vec1::<u32>()?;
             verify_seconds += secs(verify_start.elapsed());
-            let (targets, _) = argmax_tokens(&logits, &device)?;
+            let chunk_len = depth + 1;
+            let (targets, drafts) = packed.split_at(chunk_len);
             let accepted = drafts
                 .iter()
                 .zip(targets.iter())
                 .take_while(|(draft, target)| draft == target)
                 .count();
             let bonus = targets[accepted];
+            // Next round's anchor stays on device (a slice of this verdict).
+            anchor_dev = targets_dev.narrow(0, accepted, 1)?.reshape((1, 1))?;
 
             if accepted < drafts.len() {
                 rollbacks += 1;
@@ -1406,7 +1424,9 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 )?
                 .reshape((1, 1))?;
             post_last = cu_post.narrow(1, accepted, 1)?;
-            device.synchronize()?;
+            if fenced_timing {
+                device.synchronize()?;
+            }
             draft_seconds += secs(cu_draft_start.elapsed());
             if capture_this {
                 if let Device::Metal(md) = &device {
@@ -1414,7 +1434,6 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 }
                 println!("gpu capture written: {}", capture_path.display());
             }
-            anchor = bonus;
             anchor_pos += accepted + 1;
         }
     }
@@ -1463,6 +1482,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let report = serde_json::json!({
         "kind": "lmbrrr_mtp_draft_run",
         "schema_version": 1,
+        "fenced_timing": fenced_timing,
         "mtp_weights": mtp_weights,
         "mtp_depth": depth,
         "prompt_tokens": prompt_tokens.len(),
