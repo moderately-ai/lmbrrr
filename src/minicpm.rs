@@ -516,23 +516,34 @@ impl MiniCpmForConditionalGeneration {
         }
     }
 
-    /// One MTP step over S (hidden, successor-token) pairs; returns
-    /// (logits [1, S, V], post-norm hidden [1, S, H]). See MtpHead::step for
-    /// the pairing contract.
-    pub fn mtp_step(&mut self, hidden: &Tensor, tokens: &Tensor) -> Result<(Tensor, Tensor)> {
+    /// One MTP step over S (hidden, successor-token) pairs; returns the
+    /// post-norm hidden [1, S, H]. The draft head runs separately via
+    /// [`Self::mtp_draft_next`] on ONLY the rows a caller consumes — the
+    /// old step ran the head over every row while both the chain and the
+    /// catch-up read a single row's argmax (the m-row head pass was ~75%
+    /// wasted at catch-up).
+    pub fn mtp_step(&mut self, hidden: &Tensor, tokens: &Tensor) -> Result<Tensor> {
         let embeds = self.model.language_model.embed(tokens)?;
         let mtp = self
             .mtp
             .as_mut()
             .ok_or_else(|| candle::Error::Msg("mtp head not loaded".to_string()))?;
-        let post = mtp.step(hidden, &embeds)?;
-        // Draft logits come from the FR-Spec slice when configured; callers
-        // remap argmaxes via [`Self::remap_mtp_draft_id`].
+        mtp.step(hidden, &embeds)
+    }
+
+    /// Draft prediction for one post-norm row [1, 1, H]: sliced (or full)
+    /// head forward + device argmax + global-id remap. Returns a device
+    /// U32 [1, 1] token — no readback.
+    pub fn mtp_draft_next(&mut self, post_row: &Tensor) -> Result<Tensor> {
         let logits = match &self.mtp_draft_head {
-            Some((head, _)) => head.forward(&post)?,
-            None => self.lm_head.forward(&post)?,
+            Some((head, _)) => head.forward(post_row)?,
+            None => self.lm_head.forward(post_row)?,
         };
-        Ok((logits, post))
+        // Identical op chain to the pre-restructure path (byte-identity
+        // gate depends on it): squeeze(1) -> [1, V] -> argmax -> [1].
+        let local = logits.squeeze(1)?.argmax(candle::D::Minus1)?;
+        let global = self.remap_mtp_draft_id(&local)?;
+        global.reshape((1, 1))
     }
 
     /// FR-Spec slice for MTP drafting (mirror of restrict_lm_head_vocab, but

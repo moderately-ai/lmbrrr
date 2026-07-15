@@ -1295,13 +1295,12 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let catchup_input = Tensor::from_slice(&catchup_tokens, (1, n), &device)?;
     let mut draft_seconds = 0.0f64;
     let draft_start = Instant::now();
-    let (cu_logits, cu_post) = model.mtp_step(&prompt_hidden, &catchup_input)?;
+    let cu_post = model.mtp_step(&prompt_hidden, &catchup_input)?;
     // draft_1 stays on device: the chain consumes it as the next step's
-    // token tensor and the ids come back in ONE readback per round.
-    let mut next_first_draft_dev = model
-        .remap_mtp_draft_id(&cu_logits.narrow(1, n - 1, 1)?.squeeze(1)?.argmax(D::Minus1)?)?
-        .reshape((1, 1))?;
+    // token tensor and the ids come back in ONE readback per round. The
+    // draft head runs on ONLY the last row (mtp_draft_next).
     let mut post_last = cu_post.narrow(1, n - 1, 1)?;
+    let mut next_first_draft_dev = model.mtp_draft_next(&post_last)?;
     device.synchronize()?;
     draft_seconds += secs(draft_start.elapsed());
 
@@ -1408,13 +1407,9 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 let hidden_cat = Tensor::cat(&hiddens, 1)?.contiguous()?;
                 let successors = pending_catchup.iter().map(|(_, t)| *t).collect::<Vec<u32>>();
                 let tokens = Tensor::from_slice(&successors, (1, w), &device)?;
-                let (cu_logits, cu_post) = model.mtp_step(&hidden_cat, &tokens)?;
-                next_first_draft_dev = model
-                    .remap_mtp_draft_id(
-                        &cu_logits.narrow(1, w - 1, 1)?.squeeze(1)?.argmax(D::Minus1)?,
-                    )?
-                    .reshape((1, 1))?;
+                let cu_post = model.mtp_step(&hidden_cat, &tokens)?;
                 post_last = cu_post.narrow(1, w - 1, 1)?;
+                next_first_draft_dev = model.mtp_draft_next(&post_last)?;
                 pending_catchup.clear();
             }
             // Draft: draft_1 came from the previous catch-up; chain the rest
@@ -1428,12 +1423,8 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             let mut draft_ids_dev = vec![next_first_draft_dev.clone()];
             for _ in 1..depth {
                 let tok = draft_ids_dev.last().expect("drafts is non-empty").clone();
-                let (logits_j, post_j) = model.mtp_step(&post_last.contiguous()?, &tok)?;
-                draft_ids_dev.push(
-                    model
-                        .remap_mtp_draft_id(&logits_j.squeeze(1)?.argmax(D::Minus1)?)?
-                        .reshape((1, 1))?,
-                );
+                let post_j = model.mtp_step(&post_last.contiguous()?, &tok)?;
+                draft_ids_dev.push(model.mtp_draft_next(&post_j)?);
                 post_last = post_j;
             }
             draft_seconds += secs(round_draft_start.elapsed());
@@ -1519,13 +1510,9 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             successors.push(bonus);
             let cu_hidden = hidden.narrow(1, 0, accepted + 1)?.contiguous()?;
             let cu_tokens = Tensor::from_slice(&successors, (1, accepted + 1), &device)?;
-            let (cu_logits, cu_post) = model.mtp_step(&cu_hidden, &cu_tokens)?;
-            next_first_draft_dev = model
-                .remap_mtp_draft_id(
-                    &cu_logits.narrow(1, accepted, 1)?.squeeze(1)?.argmax(D::Minus1)?,
-                )?
-                .reshape((1, 1))?;
+            let cu_post = model.mtp_step(&cu_hidden, &cu_tokens)?;
             post_last = cu_post.narrow(1, accepted, 1)?;
+            next_first_draft_dev = model.mtp_draft_next(&post_last)?;
             if fenced_timing {
                 device.synchronize()?;
             }
