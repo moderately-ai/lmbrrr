@@ -225,8 +225,10 @@ fn reconstruct_capture_state_matches_sequential_recurrence() {
                 dtype: DType::F32,
                 transposed,
             };
+            // fused_reconstruct = true exercises the production kernel path
+            // (matches the default KernelRouteConfig).
             let (rec, conv) =
-                GatedDeltaNet::reconstruct_capture_state(&cap, prefix, ksz).unwrap();
+                GatedDeltaNet::reconstruct_capture_state(&cap, prefix, ksz, true).unwrap();
             let rec = if transposed {
                 rec.transpose(2, 3).unwrap().contiguous().unwrap()
             } else {

@@ -1369,8 +1369,12 @@ fn load_model(
     let load_start = Instant::now();
     let vb =
         unsafe { VarBuilder::from_mmaped_safetensors(&bundle.artifacts.weights, dtype, device)? };
-    let model =
-        MiniCpmForConditionalGeneration::new(&bundle.config, vb, runtime.mm2d.clone())?;
+    let model = MiniCpmForConditionalGeneration::new(
+        &bundle.config,
+        vb,
+        runtime.mm2d.clone(),
+        runtime.routes.clone(),
+    )?;
     Ok((model, load_start.elapsed()))
 }
 

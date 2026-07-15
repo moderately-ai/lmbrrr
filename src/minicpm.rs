@@ -412,10 +412,18 @@ pub struct MiniCpmModel {
 }
 
 impl MiniCpmModel {
-    fn new(cfg: &MiniCpmConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        cfg: &MiniCpmConfig,
+        vb: VarBuilder,
+        routes: std::sync::Arc<crate::runtime_config::KernelRouteConfig>,
+    ) -> Result<Self> {
         Ok(Self {
             vision_tower: VisionModel::new(&cfg.vision_config, vb.pp("vision_tower"))?,
-            language_model: Qwen35TextModel::new(&cfg.text_config, vb.pp("language_model"))?,
+            language_model: Qwen35TextModel::new(
+                &cfg.text_config,
+                vb.pp("language_model"),
+                routes,
+            )?,
             merger: MiniCpmMerger::new(cfg, vb.pp("merger"))?,
         })
     }
@@ -462,6 +470,9 @@ pub struct MiniCpmForConditionalGeneration {
     /// every quantized-linear the model builds post-load (head slices, MTP
     /// quantization) and the verify-head argmax route.
     mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
+    /// Kernel-fusion route gates; kept so `load_mtp_head` (post-construction)
+    /// can inject them into the MTP head's layers.
+    routes: std::sync::Arc<crate::runtime_config::KernelRouteConfig>,
 }
 
 impl MiniCpmForConditionalGeneration {
@@ -469,8 +480,9 @@ impl MiniCpmForConditionalGeneration {
         cfg: &MiniCpmConfig,
         vb: VarBuilder,
         mm2d_cfg: std::sync::Arc<crate::mm2d::Mm2dConfig>,
+        routes: std::sync::Arc<crate::runtime_config::KernelRouteConfig>,
     ) -> Result<Self> {
-        let model = MiniCpmModel::new(cfg, vb.pp("model"))?;
+        let model = MiniCpmModel::new(cfg, vb.pp("model"), routes.clone())?;
         let lm_head = if vb.contains_tensor("lm_head.weight") {
             candle_nn::linear_no_bias(
                 cfg.text_config.hidden_size,
@@ -489,6 +501,7 @@ impl MiniCpmForConditionalGeneration {
             mtp: None,
             mtp_draft_head: None,
             mm2d_cfg,
+            routes,
         })
     }
 
@@ -503,7 +516,11 @@ impl MiniCpmForConditionalGeneration {
                 &self.device,
             )?
         };
-        self.mtp = Some(crate::qwen35::MtpHead::new(&cfg.text_config, vb)?);
+        self.mtp = Some(crate::qwen35::MtpHead::new(
+            &cfg.text_config,
+            vb,
+            self.routes.clone(),
+        )?);
         Ok(())
     }
 

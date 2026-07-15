@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::config::{LayerType, TextConfig};
 use crate::quantized_linear::{MixedLinear, QuantizedTextArtifact};
+use crate::runtime_config::KernelRouteConfig;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Qwen35ProfileEvent {
@@ -150,50 +151,6 @@ impl Qwen35TraceRecorder {
     }
 }
 
-fn unfused_rmsnorm() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_RMSNORM").is_ok_and(|v| v == "1"))
-}
-
-fn unfused_sdpa() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_SDPA").is_ok_and(|v| v == "1"))
-}
-
-fn unfused_reconstruct() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_RECONSTRUCT").is_ok_and(|v| v == "1"))
-}
-
-fn unfused_deltanet() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("LMBRRR_UNFUSED_DELTANET").is_ok_and(|v| v == "1"))
-}
-
-/// Fused q/k head-norm + partial rope + direct KV-cache write for the
-/// full-attention layers (bit-identical to the unfused chain; see
-/// fused_attn). Opt-out: default on; LMBRRR_FUSED_ATTN_PREP=0 restores the
-/// unfused chain for A/B.
-fn fused_attn_prep() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| !std::env::var("LMBRRR_FUSED_ATTN_PREP").is_ok_and(|v| v == "0"))
-}
-
-/// Fused MTP pre-fc chain (2x rmsnorm + concat + fc GEMV in one dispatch;
-/// bit-identical to the unfused chain at m == 1 — see fused_mtp). Opt-out:
-/// default on; LMBRRR_FUSED_MTP_FC=0 restores the unfused chain for A/B.
-fn fused_mtp_fc() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| !std::env::var("LMBRRR_FUSED_MTP_FC").is_ok_and(|v| v == "0"))
-}
-
-/// v2 fused DeltaNet (re-gridded decode/chunk kernels, transposed state
-/// layout). Opt-out: default on; LMBRRR_DELTANET_V2=0 restores the v1
-/// kernels for A/B and drift attribution.
-fn deltanet_v2() -> bool {
-    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| !std::env::var("LMBRRR_DELTANET_V2").is_ok_and(|v| v == "0"))
-}
 
 #[derive(Clone, Debug)]
 struct Qwen35RmsNorm {
@@ -203,10 +160,17 @@ struct Qwen35RmsNorm {
     weight_f32: Tensor,
     weight_native: Tensor,
     eps: f64,
+    routes: Arc<KernelRouteConfig>,
 }
 
 impl Qwen35RmsNorm {
-    fn new(size: usize, eps: f64, zero_centered: bool, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        size: usize,
+        eps: f64,
+        zero_centered: bool,
+        vb: VarBuilder,
+        routes: Arc<KernelRouteConfig>,
+    ) -> Result<Self> {
         let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
         let weight_f32 = if zero_centered { (weight + 1.0)? } else { weight };
         let weight_native = weight_f32.to_dtype(vb.dtype())?;
@@ -214,11 +178,12 @@ impl Qwen35RmsNorm {
             weight_f32,
             weight_native,
             eps,
+            routes,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        if unfused_rmsnorm() {
+        if !self.routes.fused_rmsnorm {
             return self.forward_unfused(xs);
         }
         // Fused kernel: 1 dispatch instead of 9, F32 accumulation inside.
@@ -243,7 +208,7 @@ impl Qwen35RmsNorm {
     /// hot path or under `LMBRRR_UNFUSED_RMSNORM=1`. Not bit-preserving (see
     /// fused_norm) — gated by the model oracle, not bitwise.
     fn forward_add(&self, a: &Tensor, b: &Tensor) -> Result<(Tensor, Tensor)> {
-        if !unfused_rmsnorm()
+        if self.routes.fused_rmsnorm
             && matches!(a.device(), Device::Metal(_))
             && a.dtype() == DType::BF16
             && b.dtype() == DType::BF16
@@ -613,10 +578,16 @@ struct FullAttention {
     num_kv_groups: usize,
     rotary: Arc<RotaryEmbedding>,
     kv_cache: Arc<Mutex<TruncatableKvCache>>,
+    routes: Arc<KernelRouteConfig>,
 }
 
 impl FullAttention {
-    fn new(cfg: &TextConfig, rotary: Arc<RotaryEmbedding>, vb: VarBuilder) -> Result<Self> {
+    fn new(
+        cfg: &TextConfig,
+        rotary: Arc<RotaryEmbedding>,
+        vb: VarBuilder,
+        routes: Arc<KernelRouteConfig>,
+    ) -> Result<Self> {
         let q_out = cfg.num_attention_heads * cfg.head_dim * 2;
         let kv_out = cfg.num_key_value_heads * cfg.head_dim;
         let qw = vb.get((q_out, cfg.hidden_size), "q_proj.weight")?;
@@ -639,8 +610,20 @@ impl FullAttention {
                 cfg.attention_bias,
                 vb.pp("o_proj"),
             )?),
-            q_norm: Qwen35RmsNorm::new(cfg.head_dim, cfg.rms_norm_eps, true, vb.pp("q_norm"))?,
-            k_norm: Qwen35RmsNorm::new(cfg.head_dim, cfg.rms_norm_eps, true, vb.pp("k_norm"))?,
+            q_norm: Qwen35RmsNorm::new(
+                cfg.head_dim,
+                cfg.rms_norm_eps,
+                true,
+                vb.pp("q_norm"),
+                routes.clone(),
+            )?,
+            k_norm: Qwen35RmsNorm::new(
+                cfg.head_dim,
+                cfg.rms_norm_eps,
+                true,
+                vb.pp("k_norm"),
+                routes.clone(),
+            )?,
             num_heads: cfg.num_attention_heads,
             num_kv_heads: cfg.num_key_value_heads,
             head_dim: cfg.head_dim,
@@ -648,6 +631,7 @@ impl FullAttention {
             num_kv_groups: cfg.num_attention_heads / cfg.num_key_value_heads,
             rotary,
             kv_cache: Arc::new(Mutex::new(TruncatableKvCache::new())),
+            routes,
         })
     }
 
@@ -718,12 +702,12 @@ impl FullAttention {
         // restores both reference paths.
         let use_sdpa =
             (l == 1 && mask.is_none() || (2..=16).contains(&l) && mask.is_some())
-                && !unfused_sdpa();
+                && self.routes.fused_sdpa;
         // Contiguous-position forwards take the fused prep path: q/k
         // head-norm + partial rope + direct cache write in two dispatches,
         // bit-identical to the chain below (see fused_attn). Tree
         // verification passes explicit rope_positions and stays unfused.
-        let fused_prep = fused_attn_prep()
+        let fused_prep = self.routes.fused_attn_prep
             && b == 1
             && rope_positions.is_none()
             && qkv.dtype() == DType::BF16
@@ -1061,10 +1045,11 @@ struct GatedDeltaNet {
     key_dim: usize,
     value_dim: usize,
     conv_dim: usize,
+    routes: Arc<KernelRouteConfig>,
 }
 
 impl GatedDeltaNet {
-    fn new(cfg: &TextConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &TextConfig, vb: VarBuilder, routes: Arc<KernelRouteConfig>) -> Result<Self> {
         let key_dim = cfg.linear_key_head_dim * cfg.linear_num_key_heads;
         let value_dim = cfg.linear_value_head_dim * cfg.linear_num_value_heads;
         let conv_dim = key_dim * 2 + value_dim;
@@ -1114,6 +1099,7 @@ impl GatedDeltaNet {
                 cfg.rms_norm_eps,
                 false,
                 vb.pp("norm"),
+                routes.clone(),
             )?,
             conv_state: None,
             recurrent_state: None,
@@ -1130,6 +1116,7 @@ impl GatedDeltaNet {
             key_dim,
             value_dim,
             conv_dim,
+            routes,
         })
     }
 
@@ -1146,10 +1133,14 @@ impl GatedDeltaNet {
     /// positions of a captured chunk:
     /// S_j = exp(G_j)·S0 + Σ_{i≤j} exp(G_j−G_i)·k_i ⊗ δ_i.
     /// Returns (recurrent in capture dtype, conv window).
+    /// `fused_reconstruct` is the route gate (from the owning layer's
+    /// KernelRouteConfig); this is a static helper so callers pass it
+    /// explicitly (the equivalence test drives both paths).
     fn reconstruct_capture_state(
         cap: &DeltaVerifyCapture,
         prefix_len: usize,
         ksz: usize,
+        fused_reconstruct: bool,
     ) -> Result<(Tensor, Tensor)> {
         let chunk_len = cap.gcs.dim(2)?;
         if prefix_len == 0 || prefix_len > chunk_len {
@@ -1158,9 +1149,9 @@ impl GatedDeltaNet {
         // Fused single-dispatch reconstruction (fork kernel): the tensor-op
         // chain below (8-10 dispatches of f32 broadcast/exp/GEMM per layer,
         // measured ~20% of a spec round) is kept as the reference path —
-        // LMBRRR_UNFUSED_RECONSTRUCT=1 or any precondition miss routes there.
+        // fused_reconstruct == false or any precondition miss routes there.
         // Margin-class: f32 accumulation order differs from the matmul.
-        let recurrent = if !unfused_reconstruct() {
+        let recurrent = if fused_reconstruct {
             crate::fused_deltanet::gated_delta_v2_reconstruct(
                 &cap.s0,
                 &cap.kc,
@@ -1223,8 +1214,12 @@ impl GatedDeltaNet {
             candle::bail!("select_verify_state without a captured verify chunk");
         };
         let transposed = cap.transposed;
-        let (recurrent, conv) =
-            Self::reconstruct_capture_state(&cap, prefix_len, self.conv_kernel_size)?;
+        let (recurrent, conv) = Self::reconstruct_capture_state(
+            &cap,
+            prefix_len,
+            self.conv_kernel_size,
+            self.routes.fused_reconstruct,
+        )?;
         self.recurrent_state = Some(recurrent);
         self.state_transposed = transposed;
         self.conv_state = Some(conv);
@@ -1241,8 +1236,12 @@ impl GatedDeltaNet {
         };
         let cap = if on_alt { cap_alt } else { cap_main };
         let transposed = cap.transposed;
-        let (recurrent, conv) =
-            Self::reconstruct_capture_state(&cap, prefix_in_segment, self.conv_kernel_size)?;
+        let (recurrent, conv) = Self::reconstruct_capture_state(
+            &cap,
+            prefix_in_segment,
+            self.conv_kernel_size,
+            self.routes.fused_reconstruct,
+        )?;
         self.recurrent_state = Some(recurrent);
         self.state_transposed = transposed;
         self.conv_state = Some(conv);
@@ -1310,7 +1309,8 @@ impl GatedDeltaNet {
         let (b_sz, _, _) = xs.dims3()?;
         // v2 decode keeps the transposed layout end-to-end (no per-round
         // v1<->v2 state transposes between decode and chunk rounds).
-        let use_v2 = deltanet_v2() && self.head_k_dim == 128 && self.head_v_dim == 128;
+        let use_v2 =
+            self.routes.deltanet_v2 && self.head_k_dim == 128 && self.head_v_dim == 128;
         if !use_v2 {
             self.ensure_v1_state_layout()?;
         }
@@ -1389,7 +1389,7 @@ impl GatedDeltaNet {
     fn fused_decode_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
         (1..=32).contains(&b)
             && l == 1
-            && !unfused_deltanet()
+            && self.routes.fused_deltanet
             && matches!(xs.device(), Device::Metal(_))
             && xs.dtype() == DType::BF16
             && self.conv_state.is_some()
@@ -1402,7 +1402,7 @@ impl GatedDeltaNet {
     fn fused_chunk_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
         b == 1
             && (2..=12).contains(&l)
-            && !unfused_deltanet()
+            && self.routes.fused_deltanet
             && matches!(xs.device(), Device::Metal(_))
             && xs.dtype() == DType::BF16
             && self.conv_state.is_some()
@@ -1518,8 +1518,8 @@ impl GatedDeltaNet {
         // (measured -7%/-8% at l=8/12), but the three-dispatch structure
         // costs ~0.8 ms on a single-token step where the v1 whole-layer
         // kernel is ~0.9 ms total — decode stays on v1.
-        deltanet_v2()
-            && !unfused_deltanet()
+        self.routes.deltanet_v2
+            && self.routes.fused_deltanet
             && b == 1
             && (2..=12).contains(&l)
             && matches!(xs.device(), Device::Metal(_))
@@ -1613,7 +1613,7 @@ impl GatedDeltaNet {
         // The tree runs on the same kernel generation as chain verifies so
         // the tree-check equivalence gate compares like with like: v2 chunk
         // kernels (transposed state) when active, else v1.
-        let use_v2 = deltanet_v2();
+        let use_v2 = self.routes.deltanet_v2;
         let qkvz = self.in_proj_qkvz.forward(xs)?;
         let ba = self.in_proj_ba.forward(xs)?;
         let conv_state = self
@@ -1754,8 +1754,12 @@ impl GatedDeltaNet {
             run_segment(&proj_main, seg1, &conv_state, &s0)?;
         // Branch-point (post-anchor) state from the main segment's own
         // capture — the same closed form the partial-accept rollback uses.
-        let (branch_rec, branch_conv) =
-            Self::reconstruct_capture_state(&cap_main, 1, self.conv_kernel_size)?;
+        let (branch_rec, branch_conv) = Self::reconstruct_capture_state(
+            &cap_main,
+            1,
+            self.conv_kernel_size,
+            self.routes.fused_reconstruct,
+        )?;
         let branch_rec_f32 = if branch_rec.dtype() == DType::F32 {
             branch_rec
         } else {
@@ -1969,7 +1973,7 @@ impl GatedDeltaNet {
         if l == 1 {
             return self.recurrent_delta_rule_decode(query, key, value, g, beta);
         }
-        if deltanet_sequential_fallback() {
+        if self.routes.deltanet_sequential_fallback {
             return self.recurrent_delta_rule_sequential(query, key, value, g, beta);
         }
         self.recurrent_delta_rule_chunked(query, key, value, g, beta)
@@ -2247,13 +2251,6 @@ fn profiled<T>(
     }
 }
 
-/// Escape hatch for oracle comparisons: LMBRRR_DELTANET_SEQUENTIAL=1 restores
-/// the original per-token seq>1 recurrence.
-fn deltanet_sequential_fallback() -> bool {
-    static FALLBACK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FALLBACK.get_or_init(|| std::env::var("LMBRRR_DELTANET_SEQUENTIAL").is_ok())
-}
-
 fn l2norm(xs: &Tensor) -> Result<Tensor> {
     let denom = (xs.sqr()?.sum_keepdim(D::Minus1)? + 1e-6)?.powf(-0.5)?;
     xs.broadcast_mul(&denom)
@@ -2330,14 +2327,20 @@ impl DecoderLayer {
         cfg: &TextConfig,
         rotary: Arc<RotaryEmbedding>,
         vb: VarBuilder,
+        routes: Arc<KernelRouteConfig>,
     ) -> Result<Self> {
         let mixer = match layer_type {
-            LayerType::FullAttention => {
-                TokenMixer::Full(FullAttention::new(cfg, rotary, vb.pp("self_attn"))?)
-            }
-            LayerType::LinearAttention => {
-                TokenMixer::Linear(Box::new(GatedDeltaNet::new(cfg, vb.pp("linear_attn"))?))
-            }
+            LayerType::FullAttention => TokenMixer::Full(FullAttention::new(
+                cfg,
+                rotary,
+                vb.pp("self_attn"),
+                routes.clone(),
+            )?),
+            LayerType::LinearAttention => TokenMixer::Linear(Box::new(GatedDeltaNet::new(
+                cfg,
+                vb.pp("linear_attn"),
+                routes.clone(),
+            )?)),
         };
         Ok(Self {
             mixer,
@@ -2347,12 +2350,14 @@ impl DecoderLayer {
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("input_layernorm"),
+                routes.clone(),
             )?,
             post_attention_layernorm: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("post_attention_layernorm"),
+                routes,
             )?,
         })
     }
@@ -2490,7 +2495,11 @@ pub struct Qwen35TextModel {
 }
 
 impl Qwen35TextModel {
-    pub fn new(cfg: &TextConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        cfg: &TextConfig,
+        vb: VarBuilder,
+        routes: Arc<KernelRouteConfig>,
+    ) -> Result<Self> {
         let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))?;
         let rotary = Arc::new(RotaryEmbedding::new(cfg, vb.dtype(), vb.device())?);
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
@@ -2501,12 +2510,19 @@ impl Qwen35TextModel {
                 cfg,
                 rotary.clone(),
                 vb_layers.pp(idx),
+                routes.clone(),
             )?);
         }
         Ok(Self {
             embed_tokens,
             layers,
-            norm: Qwen35RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, true, vb.pp("norm"))?,
+            norm: Qwen35RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                true,
+                vb.pp("norm"),
+                routes,
+            )?,
             device: vb.device().clone(),
             dtype: vb.dtype(),
             profiler: None,
@@ -2898,6 +2914,7 @@ pub struct MtpHead {
     layer: DecoderLayer,
     device: Device,
     dtype: DType,
+    routes: Arc<KernelRouteConfig>,
 }
 
 /// Profiler label slot for the MTP layer (out of the trunk's 0..24 range).
@@ -2909,7 +2926,11 @@ impl MtpHead {
     /// base checkpoint is architecturally identical (verified: hidden 1024,
     /// 8 q / 2 kv heads x 256, mlp 3584) — and all norms load zero-centred
     /// (raw Qwen checkpoints store `w - 1`; Qwen35RmsNorm shifts at load).
-    pub fn new(cfg: &crate::config::TextConfig, vb: VarBuilder) -> Result<Self> {
+    pub fn new(
+        cfg: &crate::config::TextConfig,
+        vb: VarBuilder,
+        routes: Arc<KernelRouteConfig>,
+    ) -> Result<Self> {
         let vb = vb.pp("mtp");
         // Fresh rope table from the same cfg/dtype/device as the trunk's —
         // bit-identical construction, no need to thread the trunk's Arc.
@@ -2922,22 +2943,32 @@ impl MtpHead {
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("pre_fc_norm_embedding"),
+                routes.clone(),
             )?,
             pre_fc_norm_hidden: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
                 vb.pp("pre_fc_norm_hidden"),
+                routes.clone(),
             )?,
-            norm: Qwen35RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, true, vb.pp("norm"))?,
+            norm: Qwen35RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                true,
+                vb.pp("norm"),
+                routes.clone(),
+            )?,
             layer: DecoderLayer::new(
                 crate::config::LayerType::FullAttention,
                 cfg,
                 rotary,
                 vb.pp("layers").pp(0),
+                routes.clone(),
             )?,
             device: vb.device().clone(),
             dtype: vb.dtype(),
+            routes,
         })
     }
 
@@ -2981,7 +3012,7 @@ impl MtpHead {
     /// reproducible in the fused GEMV shape, and it runs once per round.
     fn fc_prep(&self, hidden: &Tensor, embeds: &Tensor, m: usize) -> Result<Tensor> {
         if m == 1
-            && fused_mtp_fc()
+            && self.routes.fused_mtp_fc
             && matches!(hidden.device(), Device::Metal(_))
             && hidden.dtype() == DType::BF16
             && embeds.dtype() == DType::BF16
