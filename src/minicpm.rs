@@ -415,7 +415,11 @@ impl MiniCpmModel {
     fn new(cfg: &MiniCpmConfig, vb: VarBuilder, ctx: &crate::model_ctx::ModelCtx) -> Result<Self> {
         Ok(Self {
             vision_tower: VisionModel::new(&cfg.vision_config, vb.pp("vision_tower"))?,
-            language_model: Qwen35TextModel::new(&cfg.text_config, vb.pp("language_model"), ctx)?,
+            language_model: Qwen35TextModel::new(
+                &cfg.text_config,
+                &crate::linear_source::VarBuilderSource::new(vb.pp("language_model")),
+                ctx,
+            )?,
             merger: MiniCpmMerger::new(cfg, vb.pp("merger"))?,
         })
     }
@@ -503,7 +507,11 @@ impl MiniCpmForConditionalGeneration {
                 &self.device,
             )?
         };
-        self.mtp = Some(crate::qwen35::MtpHead::new(&cfg.text_config, vb, &self.ctx)?);
+        self.mtp = Some(crate::qwen35::MtpHead::new(
+            &cfg.text_config,
+            &crate::linear_source::VarBuilderSource::new(vb),
+            &self.ctx,
+        )?);
         Ok(())
     }
 

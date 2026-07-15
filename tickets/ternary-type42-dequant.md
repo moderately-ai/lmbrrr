@@ -1,7 +1,7 @@
 ---
 id: ternary-type42-dequant
 title: "FEATURE: ternary type-42 (+ type-41) dequant/quant in the candle fork"
-status: in-progress
+status: done
 priority: p2
 dependencies: [spike-ternary-type42-block-format]
 related: [ternary-bonsai-27b-support, metal-ternary-matmul-kernel, gguf-loader-qwen35-hybrid]
@@ -36,3 +36,5 @@ Added BOTH prism-ml types (Q2_0 type 42 ternary AND its sibling Q1_0 type 41 bin
 - `cargo check` (metal + non-metal + tests) clean; 4 new nextest tests pass (to_float bit-patterns + from_float round-trips, both types).
 
 REMAINING: repin lmbrrr `Cargo.toml` candle rev to this fork commit once the branch is pushed (integration), then a whole-tensor load test through lmbrrr's GGUF path ([[gguf-loader-qwen35-hybrid]]).
+
+DONE (2026-07-15): dequant validated end-to-end on Metal — `test_matmul_q2_0_accuracy` uses `QTensor::dequantize` (the Q2_0 `to_float` read-back) as the GEMV oracle and passes (f32 ~1e-6). The remaining repin + whole-tensor load test are integration steps tracked on [[gguf-loader-qwen35-hybrid]]; the dequant/quant primitive itself is complete.

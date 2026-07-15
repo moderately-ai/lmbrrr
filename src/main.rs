@@ -58,6 +58,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Run(RunArgs),
+    GgufRun(commands::gguf_run::GgufRunArgs),
     Bench(BenchArgs),
     Logits(LogitsArgs),
     Profile(ProfileArgs),
@@ -965,6 +966,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => commands::run_bench::run(args),
+        Command::GgufRun(args) => commands::gguf_run::gguf_run(args),
         Command::Bench(args) => commands::run_bench::bench(args),
         Command::Logits(args) => commands::diag::logits(args),
         Command::Profile(args) => commands::diag::profile_decode(args),

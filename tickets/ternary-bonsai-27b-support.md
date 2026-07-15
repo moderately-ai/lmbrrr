@@ -4,7 +4,7 @@ title: "EPIC: Run prism-ml Ternary-Bonsai-27B (ternary qwen35-hybrid VLM + exter
 status: todo
 priority: p2
 dependencies: []
-related: [spike-ternary-type42-block-format, ternary-type42-dequant, metal-ternary-matmul-kernel, gguf-loader-qwen35-hybrid, qwen35-27b-config-scaleup, ingest-external-dspark-head, design-ternary-bonsai-e2e-bringup]
+related: [spike-ternary-type42-block-format, ternary-type42-dequant, metal-ternary-matmul-kernel, linear-source-seam, gguf-loader-qwen35-hybrid, causal-text-model-generic-decode, qwen35-27b-config-scaleup, ingest-external-dspark-head, design-ternary-bonsai-e2e-bringup]
 scopes: [candle-fork, runtime/candle, evals]
 shared_scopes: []
 paths: []
@@ -25,9 +25,24 @@ DSpark head `Ternary-Bonsai-27B-dspark-bf16.gguf` (7.29 GB, **bf16 — ternary i
 ## GAP (what running this requires)
 
 1. NOT a gap — the qwen35-hybrid architecture (config scale-up + GGUF name mapping): see [[gguf-loader-qwen35-hybrid]], [[qwen35-27b-config-scaleup]].
-2. THE gap — custom ternary type 42: format spike [[spike-ternary-type42-block-format]] → dequant [[ternary-type42-dequant]] → Metal kernel [[metal-ternary-matmul-kernel]].
-3. External full-DSpark head reconciliation vs our DsparkDrafter: [[ingest-external-dspark-head]].
+2. ~~THE gap~~ — custom ternary type 42: format spike [[spike-ternary-type42-block-format]] (done) → dequant [[ternary-type42-dequant]] (done) → Metal kernel [[metal-ternary-matmul-kernel]] (**decode GEMV LANDED + correctness-gated 2026-07-15**; the feasibility gate is cleared — a 27B matmuls packed at 7 GB instead of ~54 GB dequantized). Remaining kernel work: verify-width nr1>1 + prefill mm routing (deferred, decode is m=1).
+3. External full-DSpark head reconciliation vs our DsparkDrafter: [[ingest-external-dspark-head]] — a LATER layer (target-first scope, see plan).
 4. End-to-end bring-up + eval: [[design-ternary-bonsai-e2e-bringup]].
+
+## PLAN (approved 2026-07-15 — plan file `rippling-wobbling-dijkstra.md`)
+
+SOTA text-decode engine, **target-first** (DSpark head is a later optional layer). Five layered seams, nothing Bonsai-specific:
+- **L1** ternary quant + Metal GEMV in the candle fork — [[metal-ternary-matmul-kernel]] (GEMV done).
+- **L2** `LinearSource` trait (weight-source seam; `VarBuilderSource` + `GgufSource`) — [[linear-source-seam]]. Folds `apply_quantized_text_artifact` away.
+- **L3** `src/gguf.rs` (config-from-metadata + `GgufSource` + tokenizer) — [[gguf-loader-qwen35-hybrid]].
+- **L4** `CausalTextModel` trait + generic `generate_tokens` + lean `Qwen35CausalLM` — [[causal-text-model-generic-decode]].
+- **L5** `--gguf` flag + `ModelSource` at the root — folded into [[gguf-loader-qwen35-hybrid]].
+
+Verified premise: `QMatMul::from_qtensor` keeps Q2_0 **packed** (never sets `DEQUANTIZE_ALL`), so `MixedLinear`/`ModelCtx` need no change.
+
+## MILESTONE (2026-07-15): the 27B RUNS on-device
+
+L1–L4 done + verified. `bonsai_27b_forward` builds the full Ternary-Bonsai-27B (all 64 hybrid layers, ~7 GB packed) via `GgufSource`+`Qwen35CausalLM` in ~18s and runs a prefill forward → finite logits, valid argmax. The feasibility question is answered YES: a 27B ternary model does a forward on-device at ~7 GB (not 54 GB). candle fork @ ea3dc446 (kernel + GGUF ingestion + Q1_0/Q2_0 prefill routing), pin bumped. REMAINING = the E2E text stretch: `tokenizer_from_gguf` (gpt2 BPE from the embedded vocab/merges), greedy decode loop, `--gguf` CLI, byte-match vs the llama.cpp golden (13.7 tok/s) — see [[design-ternary-bonsai-e2e-bringup]].
 
 ## DONE-WHEN
 

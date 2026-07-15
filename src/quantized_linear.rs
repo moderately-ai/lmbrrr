@@ -45,7 +45,7 @@ impl MixedLinear {
         use candle::quantized::GgmlDType;
         let bf16_direct = matches!(
             weight.dtype(),
-            GgmlDType::Q8_0 | GgmlDType::Q4K | GgmlDType::Q6K
+            GgmlDType::Q8_0 | GgmlDType::Q4K | GgmlDType::Q6K | GgmlDType::Q2_0
         );
         // Tensor-op planes build EAGERLY at load when the route is enabled:
         // the CPU repack must never land inside the decode window (it

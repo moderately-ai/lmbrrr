@@ -4,11 +4,12 @@ use std::{
 };
 
 use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{embedding, linear_b, linear_no_bias, Activation, Embedding, VarBuilder};
+use candle_nn::{Activation, Embedding};
 use candle_transformers::utils::repeat_kv;
 use serde::Serialize;
 
 use crate::config::{LayerType, TextConfig};
+use crate::linear_source::{LinearPart, LinearSource};
 use crate::model_ctx::ModelCtx;
 use crate::quantized_linear::{MixedLinear, QuantizedTextArtifact};
 use crate::runtime_config::KernelRouteConfig;
@@ -165,16 +166,19 @@ struct Qwen35RmsNorm {
 }
 
 impl Qwen35RmsNorm {
-    fn new(
+    fn new<S: LinearSource>(
         size: usize,
         eps: f64,
         zero_centered: bool,
-        vb: VarBuilder,
+        source: &S,
         ctx: &ModelCtx,
     ) -> Result<Self> {
-        let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
+        // GGUF folds the +1 zero-centring shift into the stored weight; raw
+        // Qwen safetensors store w-1 and need it applied here.
+        let zero_centered = zero_centered && !source.norms_pre_shifted();
+        let weight = source.tensor(size.into(), "weight")?.to_dtype(DType::F32)?;
         let weight_f32 = if zero_centered { (weight + 1.0)? } else { weight };
-        let weight_native = weight_f32.to_dtype(vb.dtype())?;
+        let weight_native = weight_f32.to_dtype(source.dtype())?;
         Ok(Self {
             weight_f32,
             weight_native,
@@ -500,20 +504,21 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(cfg: &TextConfig, vb: VarBuilder) -> Result<Self> {
-        let gate = vb.get(
-            (cfg.intermediate_size, cfg.hidden_size),
-            "gate_proj.weight",
-        )?;
-        let up = vb.get((cfg.intermediate_size, cfg.hidden_size), "up_proj.weight")?;
-        let gate_up = Tensor::cat(&[&gate, &up], 0)?;
+    fn new<S: LinearSource>(cfg: &TextConfig, source: &S) -> Result<Self> {
         Ok(Self {
-            gate_up_proj: MixedLinear::dense(candle_nn::Linear::new(gate_up, None)),
-            down_proj: MixedLinear::dense(linear_no_bias(
-                cfg.intermediate_size,
+            gate_up_proj: source.linear(
+                &[
+                    LinearPart::new("gate_proj.weight", cfg.intermediate_size),
+                    LinearPart::new("up_proj.weight", cfg.intermediate_size),
+                ],
                 cfg.hidden_size,
-                vb.pp("down_proj"),
-            )?),
+                false,
+            )?,
+            down_proj: source.linear(
+                &[LinearPart::new("down_proj.weight", cfg.hidden_size)],
+                cfg.intermediate_size,
+                false,
+            )?,
             intermediate_size: cfg.intermediate_size,
             act: cfg.hidden_act,
         })
@@ -583,46 +588,41 @@ struct FullAttention {
 }
 
 impl FullAttention {
-    fn new(
+    fn new<S: LinearSource>(
         cfg: &TextConfig,
         rotary: Arc<RotaryEmbedding>,
-        vb: VarBuilder,
+        source: &S,
         ctx: &ModelCtx,
     ) -> Result<Self> {
         let q_out = cfg.num_attention_heads * cfg.head_dim * 2;
         let kv_out = cfg.num_key_value_heads * cfg.head_dim;
-        let qw = vb.get((q_out, cfg.hidden_size), "q_proj.weight")?;
-        let kw = vb.get((kv_out, cfg.hidden_size), "k_proj.weight")?;
-        let vw = vb.get((kv_out, cfg.hidden_size), "v_proj.weight")?;
-        let qkv_w = Tensor::cat(&[&qw, &kw, &vw], 0)?;
-        let qkv_b = if cfg.attention_bias {
-            let qb = vb.get(q_out, "q_proj.bias")?;
-            let kb = vb.get(kv_out, "k_proj.bias")?;
-            let vbias = vb.get(kv_out, "v_proj.bias")?;
-            Some(Tensor::cat(&[&qb, &kb, &vbias], 0)?)
-        } else {
-            None
-        };
         Ok(Self {
-            qkv_proj: MixedLinear::dense(candle_nn::Linear::new(qkv_w, qkv_b)),
-            o_proj: MixedLinear::dense(linear_b(
-                cfg.num_attention_heads * cfg.head_dim,
+            qkv_proj: source.linear(
+                &[
+                    LinearPart::new("q_proj.weight", q_out),
+                    LinearPart::new("k_proj.weight", kv_out),
+                    LinearPart::new("v_proj.weight", kv_out),
+                ],
                 cfg.hidden_size,
                 cfg.attention_bias,
-                vb.pp("o_proj"),
-            )?),
+            )?,
+            o_proj: source.linear(
+                &[LinearPart::new("o_proj.weight", cfg.hidden_size)],
+                cfg.num_attention_heads * cfg.head_dim,
+                cfg.attention_bias,
+            )?,
             q_norm: Qwen35RmsNorm::new(
                 cfg.head_dim,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("q_norm"),
+                &source.sub("q_norm"),
                 ctx,
             )?,
             k_norm: Qwen35RmsNorm::new(
                 cfg.head_dim,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("k_norm"),
+                &source.sub("k_norm"),
                 ctx,
             )?,
             num_heads: cfg.num_attention_heads,
@@ -1050,47 +1050,52 @@ struct GatedDeltaNet {
 }
 
 impl GatedDeltaNet {
-    fn new(cfg: &TextConfig, vb: VarBuilder, ctx: &ModelCtx) -> Result<Self> {
+    fn new<S: LinearSource>(cfg: &TextConfig, source: &S, ctx: &ModelCtx) -> Result<Self> {
         let key_dim = cfg.linear_key_head_dim * cfg.linear_num_key_heads;
         let value_dim = cfg.linear_value_head_dim * cfg.linear_num_value_heads;
         let conv_dim = key_dim * 2 + value_dim;
-        let dt_bias = vb.get(cfg.linear_num_value_heads, "dt_bias")?;
+        let dt_bias = source.tensor(cfg.linear_num_value_heads.into(), "dt_bias")?;
         let dt_bias_f32 =
             dt_bias
                 .to_dtype(DType::F32)?
                 .reshape((1, 1, cfg.linear_num_value_heads))?;
-        let conv_weight = vb.get((conv_dim, 1, cfg.linear_conv_kernel_dim), "conv1d.weight")?;
+        let conv_weight = source.tensor(
+            (conv_dim, 1, cfg.linear_conv_kernel_dim).into(),
+            "conv1d.weight",
+        )?;
         let conv_weight = conv_weight.squeeze(1)?;
         let conv_taps = (0..cfg.linear_conv_kernel_dim)
             .map(|k| conv_weight.narrow(1, k, 1)?.reshape((1, conv_dim, 1)))
             .collect::<candle::Result<Vec<_>>>()?;
         let conv_weight_full = conv_weight.contiguous()?;
-        let a_log = vb.get(cfg.linear_num_value_heads, "A_log")?;
+        let a_log = source.tensor(cfg.linear_num_value_heads.into(), "A_log")?;
         let a_log_exp_f32 =
             a_log
                 .to_dtype(DType::F32)?
                 .exp()?
                 .reshape((1, 1, cfg.linear_num_value_heads))?;
-        let qkv_w = vb.get((conv_dim, cfg.hidden_size), "in_proj_qkv.weight")?;
-        let z_w = vb.get((value_dim, cfg.hidden_size), "in_proj_z.weight")?;
-        let qkvz_w = Tensor::cat(&[&qkv_w, &z_w], 0)?;
-        let b_w = vb.get(
-            (cfg.linear_num_value_heads, cfg.hidden_size),
-            "in_proj_b.weight",
-        )?;
-        let a_w = vb.get(
-            (cfg.linear_num_value_heads, cfg.hidden_size),
-            "in_proj_a.weight",
-        )?;
-        let ba_w = Tensor::cat(&[&b_w, &a_w], 0)?;
         Ok(Self {
-            in_proj_qkvz: MixedLinear::dense(candle_nn::Linear::new(qkvz_w, None)),
-            in_proj_ba: MixedLinear::dense(candle_nn::Linear::new(ba_w, None)),
-            out_proj: MixedLinear::dense(linear_no_bias(
-                value_dim,
+            in_proj_qkvz: source.linear(
+                &[
+                    LinearPart::new("in_proj_qkv.weight", conv_dim),
+                    LinearPart::new("in_proj_z.weight", value_dim),
+                ],
                 cfg.hidden_size,
-                vb.pp("out_proj"),
-            )?),
+                false,
+            )?,
+            in_proj_ba: source.linear(
+                &[
+                    LinearPart::new("in_proj_b.weight", cfg.linear_num_value_heads),
+                    LinearPart::new("in_proj_a.weight", cfg.linear_num_value_heads),
+                ],
+                cfg.hidden_size,
+                false,
+            )?,
+            out_proj: source.linear(
+                &[LinearPart::new("out_proj.weight", cfg.hidden_size)],
+                value_dim,
+                false,
+            )?,
             conv_taps,
             conv_weight_full,
             dt_bias_f32,
@@ -1099,7 +1104,7 @@ impl GatedDeltaNet {
                 cfg.linear_value_head_dim,
                 cfg.rms_norm_eps,
                 false,
-                vb.pp("norm"),
+                &source.sub("norm"),
                 ctx,
             )?,
             conv_state: None,
@@ -2323,36 +2328,38 @@ struct DecoderLayer {
 }
 
 impl DecoderLayer {
-    fn new(
+    fn new<S: LinearSource>(
         layer_type: LayerType,
         cfg: &TextConfig,
         rotary: Arc<RotaryEmbedding>,
-        vb: VarBuilder,
+        source: &S,
         ctx: &ModelCtx,
     ) -> Result<Self> {
         let mixer = match layer_type {
             LayerType::FullAttention => {
-                TokenMixer::Full(FullAttention::new(cfg, rotary, vb.pp("self_attn"), ctx)?)
+                TokenMixer::Full(FullAttention::new(cfg, rotary, &source.sub("self_attn"), ctx)?)
             }
-            LayerType::LinearAttention => {
-                TokenMixer::Linear(Box::new(GatedDeltaNet::new(cfg, vb.pp("linear_attn"), ctx)?))
-            }
+            LayerType::LinearAttention => TokenMixer::Linear(Box::new(GatedDeltaNet::new(
+                cfg,
+                &source.sub("linear_attn"),
+                ctx,
+            )?)),
         };
         Ok(Self {
             mixer,
-            mlp: Mlp::new(cfg, vb.pp("mlp"))?,
+            mlp: Mlp::new(cfg, &source.sub("mlp"))?,
             input_layernorm: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("input_layernorm"),
+                &source.sub("input_layernorm"),
                 ctx,
             )?,
             post_attention_layernorm: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("post_attention_layernorm"),
+                &source.sub("post_attention_layernorm"),
                 ctx,
             )?,
         })
@@ -2475,6 +2482,67 @@ fn replace_quantized_linear(
     }
 }
 
+/// The surface the decode loop needs from a causal text model. Static-dispatch
+/// (`generate` is generic over it) so the hot loop stays monomorphized.
+pub trait CausalTextModel {
+    fn clear_cache(&mut self);
+    /// Forward `input_ids` [1, seq] at `offset`; returns last-position logits
+    /// [1, vocab].
+    fn forward(&mut self, input_ids: &Tensor, offset: usize) -> Result<Tensor>;
+}
+
+/// Text-only causal LM over [`Qwen35TextModel`] (the ternary GGUF path). Wraps
+/// the shared trunk with the `output`-weight head that `MiniCpm` owns for the
+/// vision model — no vision prefill.
+#[derive(Clone, Debug)]
+pub struct Qwen35CausalLM {
+    model: Qwen35TextModel,
+    lm_head: MixedLinear,
+    device: Device,
+    dtype: DType,
+}
+
+impl Qwen35CausalLM {
+    pub fn new<S: LinearSource>(cfg: &TextConfig, source: &S, ctx: &ModelCtx) -> Result<Self> {
+        let model = Qwen35TextModel::new(cfg, source, ctx)?;
+        let lm_head = source.linear(
+            &[LinearPart::new("lm_head.weight", cfg.vocab_size)],
+            cfg.hidden_size,
+            false,
+        )?;
+        Ok(Self {
+            model,
+            lm_head,
+            device: source.device().clone(),
+            dtype: source.dtype(),
+        })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+}
+
+impl CausalTextModel for Qwen35CausalLM {
+    fn clear_cache(&mut self) {
+        self.model.clear_cache();
+    }
+
+    fn forward(&mut self, input_ids: &Tensor, offset: usize) -> Result<Tensor> {
+        let (_, seq_len) = input_ids.dims2()?;
+        let hidden = self
+            .model
+            .forward_ids(input_ids, offset)?
+            .narrow(1, seq_len - 1, 1)?
+            .contiguous()?;
+        self.lm_head.forward(&hidden)?.squeeze(1)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Qwen35TextModel {
     embed_tokens: Embedding,
@@ -2491,17 +2559,21 @@ pub struct Qwen35TextModel {
 }
 
 impl Qwen35TextModel {
-    pub fn new(cfg: &TextConfig, vb: VarBuilder, ctx: &ModelCtx) -> Result<Self> {
-        let embed_tokens = embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("embed_tokens"))?;
-        let rotary = Arc::new(RotaryEmbedding::new(cfg, vb.dtype(), vb.device())?);
+    pub fn new<S: LinearSource>(cfg: &TextConfig, source: &S, ctx: &ModelCtx) -> Result<Self> {
+        let embed_w = source.tensor(
+            (cfg.vocab_size, cfg.hidden_size).into(),
+            "embed_tokens.weight",
+        )?;
+        let embed_tokens = Embedding::new(embed_w, cfg.hidden_size);
+        let rotary = Arc::new(RotaryEmbedding::new(cfg, source.dtype(), source.device())?);
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
-        let vb_layers = vb.pp("layers");
+        let layers_src = source.sub("layers");
         for idx in 0..cfg.num_hidden_layers {
             layers.push(DecoderLayer::new(
                 cfg.layer_types[idx],
                 cfg,
                 rotary.clone(),
-                vb_layers.pp(idx),
+                &layers_src.sub(&idx.to_string()),
                 ctx,
             )?);
         }
@@ -2512,11 +2584,11 @@ impl Qwen35TextModel {
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("norm"),
+                &source.sub("norm"),
                 ctx,
             )?,
-            device: vb.device().clone(),
-            dtype: vb.dtype(),
+            device: source.device().clone(),
+            dtype: source.dtype(),
             profiler: None,
             trace_recorder: None,
             device_capture_layers: None,
@@ -2918,44 +2990,52 @@ impl MtpHead {
     /// base checkpoint is architecturally identical (verified: hidden 1024,
     /// 8 q / 2 kv heads x 256, mlp 3584) — and all norms load zero-centred
     /// (raw Qwen checkpoints store `w - 1`; Qwen35RmsNorm shifts at load).
-    pub fn new(cfg: &crate::config::TextConfig, vb: VarBuilder, ctx: &ModelCtx) -> Result<Self> {
-        let vb = vb.pp("mtp");
+    pub fn new<S: LinearSource>(
+        cfg: &crate::config::TextConfig,
+        source: &S,
+        ctx: &ModelCtx,
+    ) -> Result<Self> {
+        let source = source.sub("mtp");
         // Fresh rope table from the same cfg/dtype/device as the trunk's —
         // bit-identical construction, no need to thread the trunk's Arc.
-        let rotary = Arc::new(RotaryEmbedding::new(cfg, vb.dtype(), vb.device())?);
-        let fc_w = vb.get((cfg.hidden_size, 2 * cfg.hidden_size), "fc.weight")?;
+        let rotary = Arc::new(RotaryEmbedding::new(cfg, source.dtype(), source.device())?);
+        let layers_src = source.sub("layers");
         Ok(Self {
-            fc: MixedLinear::dense(candle_nn::Linear::new(fc_w, None)),
+            fc: source.linear(
+                &[LinearPart::new("fc.weight", cfg.hidden_size)],
+                2 * cfg.hidden_size,
+                false,
+            )?,
             pre_fc_norm_embedding: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("pre_fc_norm_embedding"),
+                &source.sub("pre_fc_norm_embedding"),
                 ctx,
             )?,
             pre_fc_norm_hidden: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("pre_fc_norm_hidden"),
+                &source.sub("pre_fc_norm_hidden"),
                 ctx,
             )?,
             norm: Qwen35RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
                 true,
-                vb.pp("norm"),
+                &source.sub("norm"),
                 ctx,
             )?,
             layer: DecoderLayer::new(
                 crate::config::LayerType::FullAttention,
                 cfg,
                 rotary,
-                vb.pp("layers").pp(0),
+                &layers_src.sub("0"),
                 ctx,
             )?,
-            device: vb.device().clone(),
-            dtype: vb.dtype(),
+            device: source.device().clone(),
+            dtype: source.dtype(),
             routes: ctx.routes.clone(),
         })
     }
