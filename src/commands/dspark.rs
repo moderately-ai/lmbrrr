@@ -1338,10 +1338,11 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
     let mut skipped_rounds = 0usize;
     let mut probe_interval = probe_every;
     let mut next_probe_round = 0usize;
-    // (hidden, successor) pairs accumulated during skip rounds; flushed as
-    // ONE batched mtp_step before the next drafted round so the MTP cache
-    // stays a contiguous committed-pair history.
-    let mut pending_catchup: Vec<(Tensor, u32)> = Vec::new();
+    // (hidden, successor-token) DEVICE tensor pairs accumulated during skip
+    // rounds; flushed as ONE batched mtp_step before the next drafted round
+    // so the MTP cache stays a contiguous committed-pair history. Tokens
+    // stay device-resident (slices of the skip verdicts).
+    let mut pending_catchup: Vec<(Tensor, Tensor)> = Vec::new();
     let adaptive_depth =
         std::env::var("LMBRRR_MTP_ADAPTIVE_DEPTH").is_ok_and(|v| v == "1");
     let mut prev_accepted = depth; // first round drafts at full depth
@@ -1394,7 +1395,7 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 let bonus = targets_dev.to_vec1::<u32>()?[0];
                 anchor_dev = targets_dev.narrow(0, 0, 1)?.reshape((1, 1))?;
                 verify_seconds += secs(round_start.elapsed());
-                pending_catchup.push((hidden.narrow(1, 0, 1)?, bonus));
+                pending_catchup.push((hidden.narrow(1, 0, 1)?, anchor_dev.clone()));
                 committed.push(bonus);
                 offset += 1;
                 anchor_pos += 1;
@@ -1411,8 +1412,8 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
                 let w = pending_catchup.len();
                 let hiddens = pending_catchup.iter().map(|(h, _)| h).collect::<Vec<_>>();
                 let hidden_cat = Tensor::cat(&hiddens, 1)?.contiguous()?;
-                let successors = pending_catchup.iter().map(|(_, t)| *t).collect::<Vec<u32>>();
-                let tokens = Tensor::from_slice(&successors, (1, w), &device)?;
+                let toks = pending_catchup.iter().map(|(_, t)| t).collect::<Vec<_>>();
+                let tokens = Tensor::cat(&toks, 1)?;
                 let cu_post = model.mtp_step(&hidden_cat, &tokens)?;
                 post_last = cu_post.narrow(1, w - 1, 1)?;
                 next_first_draft_dev = model.mtp_draft_next(&post_last)?;
@@ -1533,10 +1534,12 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
             // their committed successors (accepted drafts + the bonus); the
             // last row's logits are the next round's draft_1.
             let cu_draft_start = Instant::now();
-            let mut successors: Vec<u32> = drafts[..accepted].to_vec();
-            successors.push(bonus);
+            // successors == targets[0..=accepted] by the definition of
+            // acceptance (accepted drafts equal their targets; the bonus IS
+            // targets[accepted]) — the tokens are already device-resident
+            // in the verdict buffer, so no host->device upload.
             let cu_hidden = hidden.narrow(1, 0, accepted + 1)?.contiguous()?;
-            let cu_tokens = Tensor::from_slice(&successors, (1, accepted + 1), &device)?;
+            let cu_tokens = targets_dev.narrow(0, 0, accepted + 1)?.reshape((1, accepted + 1))?;
             let cu_post = model.mtp_step(&cu_hidden, &cu_tokens)?;
             post_last = cu_post.narrow(1, accepted, 1)?;
             next_first_draft_dev = model.mtp_draft_next(&post_last)?;
