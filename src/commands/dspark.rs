@@ -1622,6 +1622,10 @@ fn mtp_drafter_run(args: &DsparkRunArgs, mtp_weights: &Path) -> Result<()> {
         "wall_seconds": wall_seconds,
         "tokens_per_second": committed.len() as f64 / decode_seconds.max(1e-9),
         "baseline_wall_seconds": baseline_wall,
+        // Decode-only greedy floor: baseline_wall includes prefill and load
+        // transients, so ratios against the spec tokens_per_second (which is
+        // decode-only) need THIS field, not the wall.
+        "baseline_decode_tokens_per_second": baseline.decode_tokens_per_second(),
         "baseline_generated_tokens": baseline.generated_token_ids.len(),
         "baseline_exact_prefix": exact_prefix,
         "divergence": divergence,
