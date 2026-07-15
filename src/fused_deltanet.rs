@@ -815,7 +815,11 @@ pub fn gated_delta_v2_tree(
 
 /// One-dispatch rollback state reconstruction (fork kernel
 /// gated_delta_v2_reconstruct_*): returns the recurrent state at `prefix`
-/// in the capture's own layout, cast to `out_dtype`. The fold is
+/// in the capture's own layout. `out_dtype` selects the ROUNDING GRID, not
+/// the storage: the returned tensor is always F32 (BF16 requests store
+/// bf16-rounded values — bit-equal to a bf16 store + upcast — so the next
+/// chunk forward's F32 guard is a no-op instead of a per-layer cast). The
+/// fold is
 ///   out = exp(gcs[j]) * s0 + sum_{i<=j} F_i * exp(gcs[j]-gcs[i]) x G_i
 /// with (F, G) = (kc, delta) in the v1 layout and (delta, kc) transposed —
 /// callers pass the UNTRIMMED capture tensors (the kernel strides by the
@@ -867,9 +871,17 @@ pub fn gated_delta_v2_reconstruct(
         }
     };
     let bufs: Vec<_> = (0..guards.len()).map(&buffer).collect::<Result<_>>()?;
+    // BF16 grid requests store bf16-ROUNDED values into an F32 buffer:
+    // value-identical to a bf16 store + the per-layer cast_bf16_f32 the
+    // next chunk forward would otherwise dispatch (~1MB read + 1MB write
+    // per GDN layer per rolled-back round), which this makes a no-op.
+    let out_mode = match out_dtype {
+        DType::BF16 => candle_metal_kernels::kernels::GdnReconstructOut::Bf16RoundedF32,
+        _ => candle_metal_kernels::kernels::GdnReconstructOut::F32,
+    };
     let out_buf = device
         .new_buffer_builder()
-        .with_size_for(h * da * db, out_dtype)
+        .with_size_for(h * da * db, DType::F32)
         .with_label("gdn_reconstruct_out")
         .build()?;
 
@@ -879,7 +891,7 @@ pub fn gated_delta_v2_reconstruct(
         &encoder,
         device.kernels(),
         (h, da, db, prefix, c_total),
-        out_dtype == DType::BF16,
+        out_mode,
         &bufs[0],
         &bufs[1],
         &bufs[2],
@@ -891,7 +903,7 @@ pub fn gated_delta_v2_reconstruct(
     drop(encoder);
     drop(guards);
 
-    let storage = candle::MetalStorage::new(out_buf, device.clone(), h * da * db, out_dtype);
+    let storage = candle::MetalStorage::new(out_buf, device.clone(), h * da * db, DType::F32);
     Ok(Tensor::from_storage(
         Storage::Metal(storage),
         vec![1, h, da, db],
