@@ -100,11 +100,35 @@ pub struct Mm2dPlanes {
     k: usize,
 }
 
+/// Plane layout version — bump whenever the fork's q4k_mm2d_planes layout
+/// changes; encoded in cache filenames so stale entries miss.
+const PLANE_CACHE_VERSION: u32 = 1;
+
+/// Content-addressed plane cache (default on; LMBRRR_MM2D_PLANE_CACHE=0
+/// disables). The CPU repack of the resident blocks costs seconds per
+/// process (lm_head dominated) and its output is a pure function of the
+/// block bytes, so it is cached by their sha256 under
+/// $LMBRRR_MM2D_CACHE_DIR (default ~/.cache/lmbrrr/mm2d).
+fn plane_cache_dir() -> Option<std::path::PathBuf> {
+    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        if std::env::var("LMBRRR_MM2D_PLANE_CACHE").is_ok_and(|v| v == "0") {
+            return None;
+        }
+        let dir = match std::env::var("LMBRRR_MM2D_CACHE_DIR") {
+            Ok(d) => std::path::PathBuf::from(d),
+            Err(_) => std::path::PathBuf::from(std::env::var("HOME").ok()?)
+                .join(".cache/lmbrrr/mm2d"),
+        };
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    })
+    .clone()
+}
+
 impl Mm2dPlanes {
-    /// CPU repack of the tensor's ggml blocks + upload. One-time per tensor
-    /// (the wrapper caches it); the blit readback + nibble transpose costs
-    /// seconds on the lm_head — acceptable as a first-verify warmup cost for
-    /// the eval; pack-sidecar caching is the production follow-up.
+    /// Repacked planes for a q4_K weight: cache read, or CPU repack of the
+    /// resident ggml blocks (cached for the next process), then upload.
     pub fn from_qtensor(weight: &QTensor, device: &MetalDevice) -> Result<Self> {
         anyhow::ensure!(
             weight.dtype() == GgmlDType::Q4K,
@@ -120,13 +144,26 @@ impl Mm2dPlanes {
             "q4_K data length {} is not block-aligned",
             data.len()
         );
-        let blocks = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr() as *const BlockQ4K,
-                data.len() / std::mem::size_of::<BlockQ4K>(),
-            )
-        };
-        let planes = candle::quantized::metal::q4k_mm2d_planes(blocks, n, k)?;
+
+        // Plane sizes are a pure function of (n, k): nibble plane [K, Npad]
+        // at one nibble each; dsc/dmm [Npad, K/32] fp16.
+        let n_pad = n.div_ceil(64) * 64;
+        let nib_len = k * n_pad / 2;
+        let scale_len = n_pad * (k / 32) * 2;
+        let total_len = nib_len + 2 * scale_len;
+
+        let cache_path = plane_cache_dir().map(|dir| {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&*data);
+            let digest = hasher.finalize();
+            let short = digest[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            dir.join(format!("{short}-{n}x{k}.v{PLANE_CACHE_VERSION}.bin"))
+        });
+
         let upload = |bytes: &[u8], label: &str| -> Result<Arc<Buffer>> {
             device
                 .new_buffer_builder()
@@ -135,17 +172,60 @@ impl Mm2dPlanes {
                 .build()
                 .with_context(|| format!("upload {label}"))
         };
+
+        if let Some(path) = &cache_path {
+            if let Ok(bytes) = std::fs::read(path) {
+                if bytes.len() == total_len {
+                    return Ok(Self {
+                        nibbles: upload(&bytes[..nib_len], "mm2d_nibbles")?,
+                        dsc: upload(&bytes[nib_len..nib_len + scale_len], "mm2d_dsc")?,
+                        dmm: upload(&bytes[nib_len + scale_len..], "mm2d_dmm")?,
+                        n,
+                        n_pad,
+                        k,
+                    });
+                }
+                // Wrong size = stale layout for this version tag; rebuild.
+            }
+        }
+
+        let blocks = unsafe {
+            std::slice::from_raw_parts(
+                data.as_ptr() as *const BlockQ4K,
+                data.len() / std::mem::size_of::<BlockQ4K>(),
+            )
+        };
+        let planes = candle::quantized::metal::q4k_mm2d_planes(blocks, n, k)?;
+        anyhow::ensure!(
+            planes.n_pad == n_pad && planes.nibbles.len() == nib_len,
+            "plane layout drifted from the cache's size model — bump PLANE_CACHE_VERSION"
+        );
         let as_bytes = |p: *const u8, len: usize| unsafe { std::slice::from_raw_parts(p, len) };
+        let dsc_bytes = as_bytes(planes.dsc.as_ptr() as *const u8, planes.dsc.len() * 2);
+        let dmm_bytes = as_bytes(planes.dmm.as_ptr() as *const u8, planes.dmm.len() * 2);
+
+        if let Some(path) = &cache_path {
+            // Atomic publish; concurrent writers produce identical bytes.
+            let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+            let write = || -> std::io::Result<()> {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&tmp)?;
+                f.write_all(&planes.nibbles)?;
+                f.write_all(dsc_bytes)?;
+                f.write_all(dmm_bytes)?;
+                f.flush()?;
+                std::fs::rename(&tmp, path)
+            };
+            if let Err(err) = write() {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!("warning: mm2d plane cache write failed ({err})");
+            }
+        }
+
         Ok(Self {
             nibbles: upload(&planes.nibbles, "mm2d_nibbles")?,
-            dsc: upload(
-                as_bytes(planes.dsc.as_ptr() as *const u8, planes.dsc.len() * 2),
-                "mm2d_dsc",
-            )?,
-            dmm: upload(
-                as_bytes(planes.dmm.as_ptr() as *const u8, planes.dmm.len() * 2),
-                "mm2d_dmm",
-            )?,
+            dsc: upload(dsc_bytes, "mm2d_dsc")?,
+            dmm: upload(dmm_bytes, "mm2d_dmm")?,
             n: planes.n,
             n_pad: planes.n_pad,
             k: planes.k,
