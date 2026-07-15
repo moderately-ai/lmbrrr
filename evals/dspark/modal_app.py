@@ -1078,8 +1078,8 @@ def vllm_regenerate(
         # first-token readiness past the old 1200s deadline on the hybrid model.
         # Fix is PATIENCE, not --enforce-eager (which disables CUDA graphs and
         # cut regen throughput ~8x: 817 vs round-4's ~6600 tok/s). Keep graphs;
-        # just wait out the one-time startup.
-        deadline = time.monotonic() + 2700
+        # just wait out the one-time cold start (max wait; breaks when healthy).
+        deadline = time.monotonic() + 3600
         while True:
             if server.poll() is not None:
                 raise RuntimeError(f"vllm server exited early: {server.returncode}")
