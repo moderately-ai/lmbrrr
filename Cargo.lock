@@ -221,7 +221,7 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=26fd20ae#26fd20ae5ac8365e54c547525b15165b2e3bdd8f"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2ba503f0#2ba503f04dc90741bdb348304e6d2f91dbdb238d"
 dependencies = [
  "byteorder",
  "candle-metal-kernels",
@@ -250,7 +250,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=26fd20ae#26fd20ae5ac8365e54c547525b15165b2e3bdd8f"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2ba503f0#2ba503f04dc90741bdb348304e6d2f91dbdb238d"
 dependencies = [
  "block2",
  "dispatch2",
@@ -266,7 +266,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=26fd20ae#26fd20ae5ac8365e54c547525b15165b2e3bdd8f"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2ba503f0#2ba503f04dc90741bdb348304e6d2f91dbdb238d"
 dependencies = [
  "candle-core",
  "candle-metal-kernels",
@@ -283,7 +283,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=26fd20ae#26fd20ae5ac8365e54c547525b15165b2e3bdd8f"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2ba503f0#2ba503f04dc90741bdb348304e6d2f91dbdb238d"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -301,7 +301,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.0"
-source = "git+https://github.com/tomsanbear/candle.git?rev=26fd20ae#26fd20ae5ac8365e54c547525b15165b2e3bdd8f"
+source = "git+https://github.com/tomsanbear/candle.git?rev=2ba503f0#2ba503f04dc90741bdb348304e6d2f91dbdb238d"
 dependencies = [
  "ug",
  "ug-metal",

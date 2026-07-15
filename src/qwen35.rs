@@ -179,6 +179,14 @@ fn fused_attn_prep() -> bool {
     *FLAG.get_or_init(|| !std::env::var("LMBRRR_FUSED_ATTN_PREP").is_ok_and(|v| v == "0"))
 }
 
+/// Fused MTP pre-fc chain (2x rmsnorm + concat + fc GEMV in one dispatch;
+/// bit-identical to the unfused chain at m == 1 — see fused_mtp). Opt-out:
+/// default on; LMBRRR_FUSED_MTP_FC=0 restores the unfused chain for A/B.
+fn fused_mtp_fc() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| !std::env::var("LMBRRR_FUSED_MTP_FC").is_ok_and(|v| v == "0"))
+}
+
 /// v2 fused DeltaNet (re-gridded decode/chunk kernels, transposed state
 /// layout). Opt-out: default on; LMBRRR_DELTANET_V2=0 restores the v1
 /// kernels for A/B and drift attribution.
@@ -2889,9 +2897,7 @@ impl MtpHead {
     /// caller's lm_head.
     pub fn step(&mut self, hidden: &Tensor, embeds: &Tensor) -> Result<Tensor> {
         let (b, s, _) = hidden.dims3()?;
-        let e = self.pre_fc_norm_embedding.forward(embeds)?;
-        let h = self.pre_fc_norm_hidden.forward(hidden)?;
-        let x = self.fc.forward(&Tensor::cat(&[&e, &h], D::Minus1)?)?;
+        let x = self.fc_prep(hidden, embeds, b * s)?;
         let offset = self.kv_len();
         let mask = if s > 1 {
             Some(causal_mask(b, s, offset, self.dtype, &self.device)?)
@@ -2912,6 +2918,44 @@ impl MtpHead {
             None,
         )?;
         Ok(post)
+    }
+
+    /// The pre-fc prologue: `fc(cat(norm_e(embeds), norm_h(hidden)))`. At
+    /// m == 1 (every chain-step draft) the fused one-dispatch kernel replaces
+    /// the 4-dispatch chain bit-identically; m > 1 (catch-up flush, priming)
+    /// keeps the unfused chain — its GEMM accumulation order is not
+    /// reproducible in the fused GEMV shape, and it runs once per round.
+    fn fc_prep(&self, hidden: &Tensor, embeds: &Tensor, m: usize) -> Result<Tensor> {
+        if m == 1
+            && fused_mtp_fc()
+            && matches!(hidden.device(), Device::Metal(_))
+            && hidden.dtype() == DType::BF16
+            && embeds.dtype() == DType::BF16
+            && crate::fused_mtp::eligible_h_dim(hidden.dim(D::Minus1)?)
+        {
+            if let MixedLinear::Dense(lin) = &self.fc {
+                let w = lin.weight();
+                let (out_dim, k_dim) = w.dims2()?;
+                if lin.bias().is_none()
+                    && w.dtype() == DType::BF16
+                    && k_dim == 2 * hidden.dim(D::Minus1)?
+                    && out_dim.is_multiple_of(16)
+                {
+                    return crate::fused_mtp::fused_mtp_fc_prep(
+                        embeds,
+                        hidden,
+                        &self.pre_fc_norm_embedding.weight_native,
+                        &self.pre_fc_norm_hidden.weight_native,
+                        w,
+                        self.pre_fc_norm_embedding.eps as f32,
+                    )
+                    .map_err(|e| candle::Error::Msg(format!("fused mtp_fc_prep: {e:#}")));
+                }
+            }
+        }
+        let e = self.pre_fc_norm_embedding.forward(embeds)?;
+        let h = self.pre_fc_norm_hidden.forward(hidden)?;
+        self.fc.forward(&Tensor::cat(&[&e, &h], D::Minus1)?)
     }
 
     /// Quantizes the head's dense linears in place (fc, qkv, o_proj,

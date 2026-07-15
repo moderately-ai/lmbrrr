@@ -5,6 +5,7 @@ pub mod fused_attn;
 pub mod fused_deltanet;
 pub mod fused_gate;
 pub mod fused_head;
+pub mod fused_mtp;
 pub mod fused_norm;
 pub mod generate;
 pub mod image_processor;
