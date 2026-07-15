@@ -108,8 +108,9 @@ def main() -> int:
                 continue
             # All reps' texts, not just rep 1: kernel-noise tie-flips can
             # diverge reps of the SAME arm, silently averaging different
-            # generations into one mean.
-            texts[name] = {r.get("committed_text") for r in reports}
+            # generations into one mean. The report field is "text";
+            # r.get() (not r[...]) keeps old reports without it readable.
+            texts[name] = {r.get("text") for r in reports}
             tps = [r["tokens_per_second"] for r in reports]
             tau = st.mean(r["mean_accepted_length"] for r in reports)
             spread = st.stdev(tps) if len(tps) > 1 else float("nan")
