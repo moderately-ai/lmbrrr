@@ -1071,10 +1071,17 @@ def vllm_regenerate(
             "0.85",
             "--limit-mm-per-prompt",
             '{"image": 0, "video": 0}',
+            # Batch regen: prioritize reliable, fast startup over peak decode.
+            # vLLM 0.24's full CUDA-graph capture (50+ sizes) + FlashInfer GDN
+            # JIT on the hybrid model blew past the health deadline; eager +
+            # triton GDN prefill skip both long startups.
+            "--enforce-eager",
+            "--gdn-prefill-backend",
+            "triton",
         ]
     )
     try:
-        deadline = time.monotonic() + 1200
+        deadline = time.monotonic() + 2700
         while True:
             if server.poll() is not None:
                 raise RuntimeError(f"vllm server exited early: {server.returncode}")
