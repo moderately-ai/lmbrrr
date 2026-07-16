@@ -214,22 +214,7 @@ fn spec_decode(
     let width = drafter.config.block_size;
     let drafter_load_s = load.elapsed().as_secs_f64();
 
-    if std::env::var("LMBRRR_SPEC_DEBUG").is_ok() {
-        // Sanity: propose with a random context BEFORE the target ever runs a
-        // forward. Non-zero here => the drafter loaded fine and the target's
-        // forward corrupts it; zero => the load-with-target-resident is corrupt.
-        let cap = layers.len() * drafter.config.hidden_size;
-        let rc = Tensor::randn(0f32, 1f32, (1, 4, cap), device)?.to_dtype(DType::BF16)?;
-        drafter.append_context(&rc, 0)?;
-        let p = drafter.propose_with_diagnostics(9419, 4, width)?;
-        let bh = p.block_hidden.as_ref().unwrap().to_dtype(DType::F32)?;
-        eprintln!(
-            "SANITY (pre-target-forward): block_hidden absmean {:.3} tokens {:?}",
-            bh.abs()?.mean_all()?.to_scalar::<f32>()?,
-            p.tokens
-        );
-        drafter.clear_context();
-    }
+    let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
 
     // Prefill with tap-layer capture, seed the drafter context.
     model.clear_cache();
@@ -239,29 +224,16 @@ fn spec_decode(
     let logits = model.forward_all_logits(&input, 0)?;
     device.synchronize()?;
     let caps = model.take_device_captures();
-    let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
-    if dbg {
-        let stats: Vec<String> = caps
-            .iter()
-            .map(|c| {
-                let f = c.to_dtype(DType::F32).unwrap();
-                format!(
-                    "{:?} absmean {:.3} maxabs {:.1}",
-                    c.dims(),
-                    f.abs().unwrap().mean_all().unwrap().to_scalar::<f32>().unwrap(),
-                    f.abs().unwrap().max(D::Minus1).unwrap().max(D::Minus1).unwrap()
-                        .max(D::Minus1).unwrap().to_scalar::<f32>().unwrap()
-                )
-            })
-            .collect();
-        eprintln!("captures ({}): {:?}", caps.len(), stats);
-    }
     let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
-    if dbg {
-        // Dump the real context so the isolated smoke test can reproduce the
-        // exact failing input (random can't).
-        let _ = ctx_feat.save_safetensors("ctx_feat", "/tmp/dspark_ctx_feat.safetensors");
-    }
+    drop(caps);
+    // The captured hidden states alias the target's live forward buffers; a
+    // save+reload fully detaches them onto a fresh host->device round-trip so
+    // the drafter reads stable values (a direct append_context read the buffers
+    // after the target reused them -> collapsed the drafter's residual to 0).
+    ctx_feat.save_safetensors("ctx_feat", "/tmp/dspark_ctx_feat.safetensors")?;
+    let ctx_feat = candle::safetensors::load("/tmp/dspark_ctx_feat.safetensors", device)?
+        ["ctx_feat"]
+        .to_dtype(DType::BF16)?;
     drafter.append_context(&ctx_feat, 0)?;
     if dbg {
         eprintln!("drafter loaded ({drafter_load_s:.1}s), prefill done, offset={}", ids.len());
