@@ -1190,7 +1190,9 @@ fn load_gguf_model(
     let load = Instant::now();
     let gguf = GgufFile::open(&args.gguf)?;
     let cfg = gguf.config()?;
-    let ctx = ModelCtx::default();
+    // Entrypoint env resolution (LMBRRR_MM2D etc.) — the target's ctx. The
+    // drafter keeps its own default ctx (see spec_decode).
+    let ctx = lmbrrr::runtime_config::RuntimeConfig::from_env().model;
     let tok = gguf
         .tokenizer()
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
