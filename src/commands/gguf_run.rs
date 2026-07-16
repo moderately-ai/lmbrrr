@@ -118,6 +118,85 @@ fn bench_gemv(device: &Device) -> Result<()> {
             rel
         );
     }
+
+    // Planar coalesced verify GEMM (q2_0_mm2d): reads a [k][n_pad] repack so the
+    // cross-row weight read coalesces (the [row][block] kernels were capped ~21
+    // GB/s). This is the DSpark-verify weight-bound lever.
+    {
+        use candle::quantized::k_quants::BlockQ2_0;
+        use candle::quantized::metal::q2_0_mm2d_planes;
+        use candle_metal_kernels::call_quantized_matmul_mm2d_q2_0_smallm;
+        let qtp = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+        let data = qtp.data()?;
+        let blocks = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const BlockQ2_0, data.len() / 34)
+        };
+        let planes = q2_0_mm2d_planes(blocks, n, k)?;
+        let mdev = match device {
+            Device::Metal(d) => d.clone(),
+            _ => anyhow::bail!("planar bench needs metal"),
+        };
+        let codes_buf = mdev
+            .new_buffer_builder()
+            .with_data(&planes.codes)
+            .with_label("q2p_codes")
+            .build()?;
+        let d_bytes =
+            unsafe { std::slice::from_raw_parts(planes.d.as_ptr() as *const u8, planes.d.len() * 2) };
+        let d_buf = mdev.new_buffer_builder().with_data(d_bytes).with_label("q2p_d").build()?;
+        for m in [1usize, 2, 4, 8] {
+            let x = Tensor::randn(0f32, 1f32, (m, k), device)?;
+            let refr = x.matmul(&wdeq.t()?)?;
+            let run = |mdev: &candle::MetalDevice| -> Result<candle::MetalStorage> {
+                let (xs, xl) = x.storage_and_layout();
+                let xbuf = match &*xs {
+                    candle::Storage::Metal(ms) => ms.buffer().clone(),
+                    _ => anyhow::bail!("x not metal"),
+                };
+                let dst = mdev.new_buffer_builder().with_size(m * n * 4).with_label("q2p_dst").build()?;
+                let enc = mdev.command_encoder()?;
+                call_quantized_matmul_mm2d_q2_0_smallm(
+                    mdev.metal_device(),
+                    &enc,
+                    mdev.kernels(),
+                    (m, n, k, planes.n_pad),
+                    &codes_buf,
+                    &d_buf,
+                    &xbuf,
+                    xl.start_offset() * 4,
+                    0,
+                    &dst,
+                )?;
+                Ok(candle::MetalStorage::new(dst, mdev.clone(), m * n, DType::F32))
+            };
+            for _ in 0..8 {
+                let _ = run(&mdev)?;
+            }
+            device.synchronize()?;
+            let iters = 200;
+            let t = Instant::now();
+            for _ in 0..iters {
+                let _ = run(&mdev)?;
+            }
+            device.synchronize()?;
+            let s = t.elapsed().as_secs_f64();
+            let out = run(&mdev)?;
+            let got = Tensor::from_storage(
+                candle::Storage::Metal(out),
+                (m, n),
+                candle::op::BackpropOp::none(),
+                false,
+            );
+            let denom = refr.abs()?.mean_all()?.to_scalar::<f32>()?.max(1e-6);
+            let rel = got.sub(&refr)?.abs()?.mean_all()?.to_scalar::<f32>()? / denom;
+            println!(
+                "Q2_0 PLANAR {n}x{k} m={m}: {:.3} ms/call ({:.1} GB/s), rel_err {:.4}",
+                1000.0 * s / iters as f64,
+                (bytes as f64 * iters as f64) / s / 1e9,
+                rel
+            );
+        }
+    }
     Ok(())
 }
 
