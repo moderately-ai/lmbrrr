@@ -236,6 +236,11 @@ fn spec_decode(
         eprintln!("captures ({}): {:?}", caps.len(), stats);
     }
     let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
+    if dbg {
+        // Dump the real context so the isolated smoke test can reproduce the
+        // exact failing input (random can't).
+        let _ = ctx_feat.save_safetensors("ctx_feat", "/tmp/dspark_ctx_feat.safetensors");
+    }
     drafter.append_context(&ctx_feat, 0)?;
     if dbg {
         eprintln!("drafter loaded ({drafter_load_s:.1}s), prefill done, offset={}", ids.len());
@@ -265,6 +270,15 @@ fn spec_decode(
         };
         let drafts = proposal.tokens.clone();
         if dbg {
+            if let Some(bh) = &proposal.block_hidden {
+                let bh = bh.to_dtype(DType::F32)?;
+                eprintln!(
+                    "round {}: block_hidden absmean {:.3} finite={}",
+                    rounds + 1,
+                    bh.abs()?.mean_all()?.to_scalar::<f32>()?,
+                    bh.sum_all()?.to_scalar::<f32>()?.is_finite()
+                );
+            }
             if let Some(bl) = &proposal.base_logits {
                 let bl = bl.to_dtype(DType::F32)?;
                 let am = bl.argmax(D::Minus1)?.flatten_all()?.to_vec1::<u32>()?;
