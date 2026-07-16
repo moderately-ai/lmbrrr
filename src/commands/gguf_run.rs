@@ -268,7 +268,10 @@ fn bench_gemv(device: &Device) -> Result<()> {
             _ => anyhow::bail!("x not metal"),
         };
         let xoff = xl.start_offset() * 2;
-        let variants: [(&'static str, usize, usize, usize); 8] = [
+        let variants: [(&'static str, usize, usize, usize); 9] = [
+            // Control: the ACTUAL mc kernel via THIS harness (same geometry).
+            // If == mcx_2_8_2 -> harness/position, not the mcx codegen.
+            ("kernel_mul_mv_q2_0_bf16_mc", 2, 8, 2),
             ("kernel_mul_mv_q2_0_bf16_mcx_2_8_2", 2, 8, 2),
             ("kernel_mul_mv_q2_0_bf16_mcx_4_8_2", 4, 8, 2),
             ("kernel_mul_mv_q2_0_bf16_mcx_8_8_2", 8, 8, 2),
