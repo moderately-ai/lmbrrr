@@ -164,6 +164,19 @@ fn score(model: &mut Qwen35CausalLM, device: &Device, prompt_ids: &[u32], gen: &
         .to_vec1::<f32>()?;
     let mean_lp: f64 = lps.iter().map(|&x| x as f64).sum::<f64>() / lps.len() as f64;
     let min_lp = lps.iter().cloned().fold(f32::INFINITY, f32::min);
+    // Worst positions, for attributing WHERE a margin run diverges from the
+    // reference (round boundaries? the prefill anchor? rollback drift?).
+    let mut ranked: Vec<(usize, u32, f32)> = lps
+        .iter()
+        .enumerate()
+        .map(|(i, &lp)| (i, gen[i], lp))
+        .collect();
+    ranked.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    let worst: Vec<String> = ranked
+        .iter()
+        .take(5)
+        .map(|(i, id, lp)| format!("pos {i} id {id} lp {lp:.2}"))
+        .collect();
     println!(
         "{}",
         serde_json::json!({
@@ -171,6 +184,7 @@ fn score(model: &mut Qwen35CausalLM, device: &Device, prompt_ids: &[u32], gen: &
             "mean_logprob": mean_lp,
             "ppl": (-mean_lp).exp(),
             "min_logprob": min_lp,
+            "worst": worst,
         })
     );
     Ok(())
