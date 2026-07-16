@@ -32,6 +32,10 @@ enum GgufCmd {
     /// Attach the per-op profiler and dump the decode-step breakdown by
     /// component (deltanet_recurrent_rule / mlp / attention / norms / ...).
     Profile(ProfileArgs),
+    /// Teacher-force a token continuation under the target and report its
+    /// mean log-prob / perplexity — the margin-acceptance quality gate
+    /// (compare a spec run's committed ids against the greedy ids).
+    Score(ScoreArgs),
     /// Requantize a GGUF's 2D float tensors to a new ggml dtype (arch-agnostic
     /// — works on the dspark drafter, which stock llama.cpp cannot quantize).
     /// 1D and non-divisible tensors pass through unchanged; metadata is copied.
@@ -126,6 +130,50 @@ struct ProfileArgs {
     /// by component under whatever route env is set (LMBRRR_MM2D etc.).
     #[arg(long, default_value_t = 1)]
     verify_width: usize,
+}
+
+#[derive(Args, Debug)]
+struct ScoreArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+    /// Comma-separated committed token ids to score as the continuation of
+    /// the (templated) prompt.
+    #[arg(long)]
+    ids: String,
+}
+
+/// Teacher-forced continuation score: one forward over prompt+ids, then the
+/// mean log-prob of each id given its prefix (and its exp, perplexity). The
+/// greedy ids' score is the reference; a margin-acceptance run passes the
+/// quality gate when its score is within a small delta of greedy's.
+fn score(model: &mut Qwen35CausalLM, device: &Device, prompt_ids: &[u32], gen: &[u32]) -> Result<()> {
+    anyhow::ensure!(!gen.is_empty(), "no ids to score");
+    let full: Vec<u32> = prompt_ids.iter().chain(gen.iter()).copied().collect();
+    model.clear_cache();
+    let input = Tensor::from_slice(&full, (1, full.len()), device)?;
+    let logits = model.forward_all_logits(&input, 0)?;
+    // Positions prompt_len-1 .. full_len-2 predict exactly the gen tokens.
+    let rows = logits
+        .narrow(1, prompt_ids.len() - 1, gen.len())?
+        .to_dtype(DType::F32)?;
+    let logsm = candle_nn::ops::log_softmax(&rows, D::Minus1)?;
+    let idx = Tensor::from_slice(gen, (1, gen.len(), 1), device)?;
+    let lps = logsm
+        .gather(&idx, D::Minus1)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let mean_lp: f64 = lps.iter().map(|&x| x as f64).sum::<f64>() / lps.len() as f64;
+    let min_lp = lps.iter().cloned().fold(f32::INFINITY, f32::min);
+    println!(
+        "{}",
+        serde_json::json!({
+            "tokens": gen.len(),
+            "mean_logprob": mean_lp,
+            "ppl": (-mean_lp).exp(),
+            "min_logprob": min_lp,
+        })
+    );
+    Ok(())
 }
 
 #[derive(Args, Debug)]
@@ -1618,6 +1666,7 @@ fn spec_decode(
         serde_json::json!({
             "drafter_load_seconds": drafter_load_s,
             "generated_tokens": committed.len(),
+            "ids": committed.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
             "decode_seconds": decode_seconds,
             "decode_tokens_per_second": committed.len() as f64 / decode_seconds.max(f64::EPSILON),
             "rounds": rounds,
@@ -1638,6 +1687,17 @@ fn spec_decode(
 pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
     match args.cmd {
+        GgufCmd::Score(a) => {
+            let gen: Vec<u32> = a
+                .ids
+                .split(',')
+                .map(|s| s.trim().parse::<u32>())
+                .collect::<Result<_, _>>()
+                .map_err(|e| anyhow::anyhow!("bad --ids: {e}"))?;
+            let (mut model, prompt_ids, _eos, _ctx, _tok, _load) =
+                load_gguf_model(&a.model, &device)?;
+            score(&mut model, &device, &prompt_ids, &gen)
+        }
         GgufCmd::Requant(a) => requant(&a),
         GgufCmd::Repack(a) => repack(&device, &a),
         GgufCmd::BenchGemv => bench_gemv(&device),
@@ -1776,6 +1836,7 @@ fn decode(
             "prefill_seconds": prefill_seconds,
             "prefill_tokens_per_second": ids.len() as f64 / prefill_seconds,
             "generated_tokens": out.len(),
+            "ids": out.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
             "decode_seconds": decode_seconds,
             "decode_tokens_per_second": out.len() as f64 / decode_seconds.max(f64::EPSILON),
             "steady_state_tokens_per_second": steady_tps,
