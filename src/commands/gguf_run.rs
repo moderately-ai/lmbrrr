@@ -97,6 +97,13 @@ struct SpecArgs {
 
     #[arg(long, default_value_t = 128)]
     max_new_tokens: usize,
+
+    /// Typical acceptance: a draft survives while its target logit is within
+    /// this margin of the top logit (port of the MiniCPM loop's flag).
+    /// Committed tokens remain the drafts, so output may legitimately differ
+    /// from greedy. Unset = exact argmax match (lossless).
+    #[arg(long)]
+    accept_margin: Option<f32>,
 }
 
 #[derive(Args, Debug)]
@@ -1284,6 +1291,7 @@ fn spec_decode(
     ctx: &ModelCtx,
     tok: &tokenizers::Tokenizer,
     readvance_rollback: bool,
+    accept_margin: Option<f32>,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -1400,17 +1408,44 @@ fn spec_decode(
             .to_dtype(DType::U32)?
             .flatten_all()?
             .to_vec1::<u32>()?;
+        // Acceptance rule (port of the MiniCPM loop's --accept-margin):
+        // exact argmax match (lossless greedy), or typical acceptance — the
+        // draft survives while its target logit is within `margin` of the
+        // top logit. Computed before the logits drop below.
+        let accepted = match accept_margin {
+            None => drafts
+                .iter()
+                .zip(targets.iter())
+                .take_while(|(d, t)| d == t)
+                .count(),
+            Some(margin) if width > 0 => {
+                let verify_logits = logits.narrow(1, 0, width)?;
+                let max_vals = verify_logits
+                    .max(D::Minus1)?
+                    .to_dtype(DType::F32)?
+                    .squeeze(0)?
+                    .to_vec1::<f32>()?;
+                let idx = Tensor::from_slice(&drafts[..width], (1, width, 1), device)?;
+                let draft_vals = verify_logits
+                    .gather(&idx, D::Minus1)?
+                    .to_dtype(DType::F32)?
+                    .squeeze(2)?
+                    .squeeze(0)?
+                    .to_vec1::<f32>()?;
+                draft_vals
+                    .iter()
+                    .zip(max_vals.iter())
+                    .take_while(|(draft, top)| **draft >= **top - margin)
+                    .count()
+            }
+            Some(_) => 0,
+        };
         verify_s += tv.elapsed().as_secs_f64();
         drop(logits); // free the [1, chunk, 248k] verify logits before any re-forward
         let caps = model.take_device_captures();
         let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
         drop(caps);
 
-        let accepted = drafts
-            .iter()
-            .zip(targets.iter())
-            .take_while(|(d, t)| d == t)
-            .count();
         let bonus = targets[accepted];
 
         // Extend the drafter context with the committed captures (anchor +
@@ -1497,6 +1532,7 @@ fn spec_decode(
             "propose_seconds": propose_s,
             "verify_seconds": verify_s,
             "rollback_seconds": rollback_s,
+            "accept_margin": accept_margin,
             "overhead_seconds": decode_seconds - propose_s - verify_s,
         })
     );
@@ -1527,6 +1563,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 &ctx,
                 &tok,
                 spec_run.readvance_rollback,
+                a.accept_margin,
             )
         }
         GgufCmd::Profile(a) => {
