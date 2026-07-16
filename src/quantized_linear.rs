@@ -78,19 +78,27 @@ impl MixedLinear {
                             let _ = mm2d.set(None);
                         }
                     },
-                    GgmlDType::Q2_0 => match crate::mm2d::Mm2dQ2Planes::from_qtensor(
-                        &weight,
-                        &dev,
-                        mm2d_cfg.plane_cache_dir.as_deref(),
-                    ) {
-                        Ok(p) => {
-                            let _ = mm2d_q2.set(Some(p));
+                    // Ineligible weights (ffn_down: k=17408 > the kernel's
+                    // 8192 limit) stay on the GEMV route by design — a silent
+                    // skip, not a failure. The warning is reserved for real
+                    // build errors on eligible weights.
+                    GgmlDType::Q2_0 if crate::mm2d::mm2d_q2_plane_eligible(&weight) => {
+                        match crate::mm2d::Mm2dQ2Planes::from_qtensor(
+                            &weight,
+                            &dev,
+                            mm2d_cfg.plane_cache_dir.as_deref(),
+                        ) {
+                            Ok(p) => {
+                                let _ = mm2d_q2.set(Some(p));
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "warning: mm2d q2 repack failed, wide route stays ({err})"
+                                );
+                                let _ = mm2d_q2.set(None);
+                            }
                         }
-                        Err(err) => {
-                            eprintln!("warning: mm2d q2 repack failed, wide route stays ({err})");
-                            let _ = mm2d_q2.set(None);
-                        }
-                    },
+                    }
                     _ => {}
                 }
             }

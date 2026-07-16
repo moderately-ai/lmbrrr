@@ -103,6 +103,16 @@ impl GgufFile {
             .and_then(|v| v.to_u32().ok())
     }
 
+    /// (name, dims, ggml dtype) for every tensor in the file — used by the
+    /// repack command's eligibility report.
+    pub fn tensor_infos(&self) -> Vec<(String, Vec<usize>, candle::quantized::GgmlDType)> {
+        self.content
+            .tensor_infos
+            .iter()
+            .map(|(name, info)| (name.clone(), info.shape.dims().to_vec(), info.ggml_dtype))
+            .collect()
+    }
+
     pub(crate) fn read_qtensor(&self, gguf_name: &str, device: &Device) -> Result<QTensor> {
         let mut reader = self.reader.borrow_mut();
         self.content.tensor(&mut *reader, gguf_name, device)

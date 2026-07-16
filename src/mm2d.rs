@@ -267,6 +267,18 @@ pub struct Mm2dQ2Planes {
     k: usize,
 }
 
+/// Whether a Q2_0 weight can ride the mm2d kernel at all: 2D, k a multiple of
+/// 128 (the block size) and k <= 8192 (the kernel's threadgroup row-sum
+/// staging). Ineligible weights (this model: ffn_down, k=17408) stay on the
+/// GEMV route BY DESIGN — callers skip the plane build without warning.
+pub fn mm2d_q2_plane_eligible(weight: &QTensor) -> bool {
+    let dims = weight.shape().dims();
+    weight.dtype() == GgmlDType::Q2_0
+        && dims.len() == 2
+        && dims[1] % 128 == 0
+        && dims[1] <= 8192
+}
+
 impl Mm2dQ2Planes {
     /// Repack + upload a Q2_0 weight's mm2d planes (cache read, else CPU repack
     /// of the resident ggml blocks then upload). k must be a multiple of 128.

@@ -32,6 +32,11 @@ enum GgufCmd {
     /// Attach the per-op profiler and dump the decode-step breakdown by
     /// component (deltanet_recurrent_rule / mlp / attention / norms / ...).
     Profile(ProfileArgs),
+    /// Build the mm2d (tensor-op verify) plane artifact for a Q2_0 GGUF: repack
+    /// every eligible weight into the planar layout and write the plane files
+    /// next to the model. One-time; runs point at the artifact via
+    /// LMBRRR_MM2D_CACHE_DIR (no load-time repacking).
+    Repack(RepackArgs),
     /// Micro-bench the ternary Q2_0 verify/decode GEMV kernels on the ffn shape
     /// (random weights; no model load) — isolates kernel bandwidth.
     BenchGemv,
@@ -95,6 +100,81 @@ struct SpecArgs {
 struct ProfileArgs {
     #[command(flatten)]
     model: ModelArgs,
+}
+
+#[derive(Args, Debug)]
+struct RepackArgs {
+    /// Path to the qwen35-hybrid Q2_0 GGUF to repack.
+    #[arg(long)]
+    gguf: PathBuf,
+    /// Plane-artifact directory (default: `mm2d-planes` next to the GGUF).
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+/// Build the mm2d plane artifact: construct the model exactly as a run would
+/// (same fused weights, so the sha256 cache keys match byte-exactly) with the
+/// plane build enabled and pointed at the artifact dir, then report what was
+/// written. Runs consume it via LMBRRR_MM2D_CACHE_DIR=<dir> with zero repack
+/// work at load.
+fn repack(device: &Device, args: &RepackArgs) -> Result<()> {
+    let out = args.out.clone().unwrap_or_else(|| {
+        args.gguf
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("mm2d-planes")
+    });
+    std::fs::create_dir_all(&out)?;
+    let started = Instant::now();
+    let gguf = GgufFile::open(&args.gguf)?;
+    let cfg = gguf.config()?;
+    let ctx = ModelCtx {
+        mm2d: std::sync::Arc::new(lmbrrr::mm2d::Mm2dConfig {
+            enabled: true,
+            plane_cache_dir: Some(out.clone()),
+            ..Default::default()
+        }),
+        routes: Default::default(),
+    };
+    let model = {
+        let src = gguf.source(&ctx, DType::BF16, device.clone());
+        Qwen35CausalLM::new(&cfg, &src, &ctx)?
+    };
+    drop(model);
+    let (mut files, mut bytes) = (0usize, 0u64);
+    for entry in std::fs::read_dir(&out)? {
+        let entry = entry?;
+        if entry.path().extension().is_some_and(|e| e == "bin") {
+            files += 1;
+            bytes += entry.metadata()?.len();
+        }
+    }
+    println!(
+        "repacked {files} plane files, {:.2} GB, in {:.1}s -> {}",
+        bytes as f64 / 1e9,
+        started.elapsed().as_secs_f64(),
+        out.display()
+    );
+    // Kernel-ineligible weights stay on the GEMV route by design; report the
+    // classes once instead of a per-weight warning wall.
+    {
+        use candle::quantized::GgmlDType;
+        let mut skipped = std::collections::BTreeMap::<(usize, usize), usize>::new();
+        for (_name, dims, dtype) in gguf.tensor_infos() {
+            if matches!(dtype, GgmlDType::Q2_0)
+                && dims.len() == 2
+                && !(dims[1] % 128 == 0 && dims[1] <= 8192)
+            {
+                *skipped.entry((dims[0], dims[1])).or_default() += 1;
+            }
+        }
+        for ((n, k), count) in &skipped {
+            println!(
+                "skipped {count} x [{n}, {k}]: k={k} exceeds the kernel's 8192 limit; these stay on the GEMV route"
+            );
+        }
+    }
+    Ok(())
 }
 
 fn bench_gemv(device: &Device) -> Result<()> {
@@ -1166,6 +1246,7 @@ fn spec_decode(
 pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
     match args.cmd {
+        GgufCmd::Repack(a) => repack(&device, &a),
         GgufCmd::BenchGemv => bench_gemv(&device),
         GgufCmd::ProfileKernel(a) => profile_kernel(&device, &a.which, a.iters, a.m),
         GgufCmd::Decode(a) => {
