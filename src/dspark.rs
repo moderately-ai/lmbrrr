@@ -232,13 +232,13 @@ struct DraftLayer {
     /// Width-fused [q; k; v] projection: one gemv per layer instead of three
     /// skinny ones — the backbone is dispatch-execution-bound (propose-ladder
     /// 2026-07-14: ~45 tiny dispatches x ~0.15 ms M3 floor).
-    qkv_proj: Linear,
-    o_proj: Linear,
+    qkv_proj: MixedLinear,
+    o_proj: MixedLinear,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
     /// Width-fused [gate; up]; the forward applies the fused swiglu kernel.
-    gate_up_proj: Linear,
-    down_proj: Linear,
+    gate_up_proj: MixedLinear,
+    down_proj: MixedLinear,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
     // Projected fused-context K/V at their absolute positions (roped), in a
@@ -468,12 +468,18 @@ impl DsparkDrafter {
                 0,
             )?;
             layers.push(DraftLayer {
-                qkv_proj: Linear::new(qkv, None),
-                o_proj: Linear::new(vb.get((h, heads * head_dim), &format!("{p}.self_attn.o_proj.weight"))?, None),
+                qkv_proj: MixedLinear::dense(Linear::new(qkv, None)),
+                o_proj: MixedLinear::dense(Linear::new(
+                    vb.get((h, heads * head_dim), &format!("{p}.self_attn.o_proj.weight"))?,
+                    None,
+                )),
                 q_norm: RmsNorm::load(&vb, &format!("{p}.self_attn.q_norm.weight"), head_dim, eps)?,
                 k_norm: RmsNorm::load(&vb, &format!("{p}.self_attn.k_norm.weight"), head_dim, eps)?,
-                gate_up_proj: Linear::new(gate_up, None),
-                down_proj: Linear::new(vb.get((h, config.intermediate_size), &format!("{p}.mlp.down_proj.weight"))?, None),
+                gate_up_proj: MixedLinear::dense(Linear::new(gate_up, None)),
+                down_proj: MixedLinear::dense(Linear::new(
+                    vb.get((h, config.intermediate_size), &format!("{p}.mlp.down_proj.weight"))?,
+                    None,
+                )),
                 input_layernorm: RmsNorm::load(&vb, &format!("{p}.input_layernorm.weight"), h, eps)?,
                 post_attention_layernorm: RmsNorm::load(&vb, &format!("{p}.post_attention_layernorm.weight"), h, eps)?,
                 ctx: TruncatableKvCache::new(),
@@ -538,39 +544,64 @@ impl DsparkDrafter {
         propose_timing: bool,
     ) -> Result<Self> {
         let config = DsparkConfig::from_gguf(gguf)?;
+        let h = config.hidden_size;
+        let heads = config.num_attention_heads;
+        let kv_heads = config.num_key_value_heads;
         let head_dim = config.head_dim;
         let eps = config.rms_norm_eps;
         let rd = |name: &str| read_dense(gguf, name, device, dtype);
-        // Keep the 248k-row lm_head packed (Q4_1) rather than expanding to
-        // dense bf16 — a ~1.8 GB save so the drafter fits alongside the target.
-        let lm_head = ctx.quantized_linear(gguf.read_qtensor("output.weight", device)?)?;
+        // Keep backbone projections + the 248k-row lm_head PACKED (never expand
+        // to dense bf16) so the drafter fits in memory alongside the target.
+        // `single` wraps one quantized weight; `fuse` byte-cats packed blocks
+        // along output rows (bit-exact — Q4_1 blocks run along the input dim,
+        // so a row-cat never splits a block).
+        let single = |name: &str| -> Result<MixedLinear> {
+            Ok(ctx.quantized_linear(gguf.read_qtensor(name, device)?)?)
+        };
+        let fuse = |names: &[String], out_total: usize, in_dim: usize| -> Result<MixedLinear> {
+            use candle::quantized::ggml_file::qtensor_from_ggml;
+            let qts = names
+                .iter()
+                .map(|n| gguf.read_qtensor(n, device))
+                .collect::<candle::Result<Vec<_>>>()?;
+            let qdtype = qts[0].dtype();
+            let mut bytes = Vec::new();
+            for qt in &qts {
+                anyhow::ensure!(qt.dtype() == qdtype, "fused drafter parts differ in ggml dtype");
+                bytes.extend_from_slice(&qt.data()?);
+            }
+            let fused = qtensor_from_ggml(qdtype, &bytes, vec![out_total, in_dim], device)?;
+            Ok(ctx.quantized_linear(fused)?)
+        };
+        let lm_head = single("output.weight")?;
         let norm = |name: &str| -> Result<RmsNorm> {
             Ok(RmsNorm { weight: rd(name)?, eps })
         };
 
+        let qkv_out = (heads + 2 * kv_heads) * head_dim;
+        let gate_up_out = 2 * config.intermediate_size;
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
             let p = format!("blk.{i}");
-            // Width-fuse [q;k;v] and [gate;up] (row-cat of dense [out,in]).
-            let qkv = Tensor::cat(
-                &[
-                    &rd(&format!("{p}.attn_q.weight"))?,
-                    &rd(&format!("{p}.attn_k.weight"))?,
-                    &rd(&format!("{p}.attn_v.weight"))?,
-                ],
-                0,
-            )?;
-            let gate_up = Tensor::cat(
-                &[&rd(&format!("{p}.ffn_gate.weight"))?, &rd(&format!("{p}.ffn_up.weight"))?],
-                0,
-            )?;
             layers.push(DraftLayer {
-                qkv_proj: Linear::new(qkv, None),
-                o_proj: Linear::new(rd(&format!("{p}.attn_output.weight"))?, None),
+                qkv_proj: fuse(
+                    &[
+                        format!("{p}.attn_q.weight"),
+                        format!("{p}.attn_k.weight"),
+                        format!("{p}.attn_v.weight"),
+                    ],
+                    qkv_out,
+                    h,
+                )?,
+                o_proj: single(&format!("{p}.attn_output.weight"))?,
                 q_norm: norm(&format!("{p}.attn_q_norm.weight"))?,
                 k_norm: norm(&format!("{p}.attn_k_norm.weight"))?,
-                gate_up_proj: Linear::new(gate_up, None),
-                down_proj: Linear::new(rd(&format!("{p}.ffn_down.weight"))?, None),
+                gate_up_proj: fuse(
+                    &[format!("{p}.ffn_gate.weight"), format!("{p}.ffn_up.weight")],
+                    gate_up_out,
+                    h,
+                )?,
+                down_proj: single(&format!("{p}.ffn_down.weight"))?,
                 input_layernorm: norm(&format!("{p}.attn_norm.weight"))?,
                 post_attention_layernorm: norm(&format!("{p}.ffn_norm.weight"))?,
                 ctx: TruncatableKvCache::new(),
