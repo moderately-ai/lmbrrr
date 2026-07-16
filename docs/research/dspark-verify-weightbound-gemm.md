@@ -1,6 +1,6 @@
 # DSpark verify: the weight-bound small-m ternary GEMM, and the Metal 4.1 gate
 
-Deliverable of [[dspark-bonsai-integration]] (ticket `dspark-bonsai-integration`), work-item 5 (the verify GEMM). Records why DSpark on Ternary-Bonsai-27B runs at **parity** on the M3 today, the exact structural cause (proven across five kernel variants + the Metal spec), and the concrete path to the 2–3× multiplier. Env: M3 Pro, macOS 27.0 beta (build 26A5378n), Metal toolchain `32023.883` (MetalToolchain-v17.6.109), SDK MacOSX26.5.
+Deliverable of [[dspark-bonsai-integration]] (ticket `dspark-bonsai-integration`), work-item 5 (the verify GEMM). Records why DSpark on Ternary-Bonsai-27B runs at **parity** on the M3 today, the exact structural cause (proven across five kernel variants + the Metal spec), and the concrete path to the 2–3× multiplier. Env: M3 Pro, macOS 27.0 beta (build 26A5378n). Toolchain timeline: the parity analysis below was measured on Xcode 26.6 / Metal `32023.883` (SDK MacOSX26.5), where 2-bit `matmul2d` did not compile; **2026-07-16 the gate cleared** by installing Xcode 27.0 beta 3 / Metal `metalfe-32023.918.1` (see "The Metal 4.1 root cause" → the gate is now CLOSED).
 
 ## The problem
 
@@ -46,9 +46,13 @@ Two research passes (M3 header inspection + test-compile; MSL spec `Metal-Shadin
 
 - **`matmul2d` weight (B) operand types:** `uint8`, `int8`, `uint4b_format`, `int4b_format` — and, **in Metal 4.1**, `uint2b_format`/`int2b_format` (2-bit). Whitelist: `MPPTensorOpsMatMul2dImpl.h:2502-2528`. The packed operand is **always B (the weight)** — no A=sub-byte row exists. That is *exactly* a weight-bound layout: activations in half/bfloat (A), ternary weights in `int2b_format` (B), accumulate to float. Ternary {−1,0,+1} encodes into `int2b_format` (2-bit signed, uses 3 of 4 codes). Constraints (MSL §2.21–2.22, §7.2): K axis in dimension 0, K a multiple of 32 (Fblock), each weight row padded to a **128-byte stride**, per-128-block scales via `tensor_blockwise<tensor_plane_scales>`, tile via `matmul2d_descriptor(M,N,K)` scoped `execution_simdgroups<simdgroups_per_threadgroup>`, C as a `cooperative_tensor` (no device barrier), apply `d·(P − rowsum)` ternary fold in the epilogue via `get_multidimensional_index`.
 
-- **BUT 2-bit is not in the M3's shipped toolchain.** `int2b_format`/`uint2b_format` are **Metal 4.1**; the M3's toolchain `32023.883` only defines the 4-bit types in `metal_packed_numeric` (lines 15/20). A `-std=metal4.0` compile of `uint2b_format` fails ("unknown type name; did you mean 'uint4b_format'"); `uint4b_format` compiles cleanly. So the 2-bit hardware path is **spec'd (June 2026) but not landed in this toolchain build**.
+- **The gate was a toolchain-version gap — and it is now CLOSED on the M3 (2026-07-16).** `int2b_format`/`uint2b_format` are **Metal 4.1**. They were absent from the M3's *then-shipped* toolchain `32023.883` (Xcode 26.6): under `-std=metal4.0` a `uint2b_format` compile failed ("unknown type name; did you mean 'uint4b_format'") and `-std=metal4.1` was rejected outright ("invalid value 'metal4.1' in '-std='"). Installing **Xcode 27.0 beta 3** (build `27A5218g`) + its Metal Toolchain component (`27A5218h`, compiler **`metalfe-32023.918.1`**, target `air64-apple-darwin27.0.0`) flipped all three checks: `-std=metal4.1` is a valid language mode, `uint2b_format` compiles, and — decisively — `tensor_ops::matmul2d` **accepts `uint2b_format` as its B operand**: a minimal kernel mirroring `mm2d_q4k.metal` with a 2-bit B tensor compiled *and* linked to an 11 KB `.metallib` on the M3. That is the MPP whitelist accepting 2-bit (a `static_assert` would have fired otherwise, as it does for unsupported operands). No M5 / Neural-Accelerator hardware needed — it built for the M3's air64 target.
 
-**Conclusion: the 2–3× is a Metal-4.1-toolchain gate, not a design failure or a hardware wall.** When the M3 gets the Metal 4.1 toolchain, the fix is a near-mechanical mirror of the q4_K mm2d (below).
+**Conclusion: the 2–3× was a Metal-4.1-toolchain-version gap, not a design failure or a hardware wall — and it is now unblocked engineering.** The Metal Toolchain is a separately-downloaded component (decoupled from Xcode since 26), so the fix was: install the current Xcode *beta* (27.x, not the 26.6 stable — the stable line's toolchain still lacks 4.1) and `xcodebuild -downloadComponent MetalToolchain` under it. The remaining work is the near-mechanical mirror of the q4_K mm2d (below).
+
+### Meta-lesson: a toolchain "wall" is a dated fact, not a dead end
+
+This is worth recording because the earlier passes concluded "blocked" and that conclusion was *correct on the day it was written* — yet the path was open a few weeks later with no change to our design. Two things turned a plausible dead end into a shipped unblock: (1) **reconfirming the key facts against the newest toolchain, not the installed one** — the spec (`Metal-Shading-Language-Specification` v4.1, dated 2026-06-04) already listed 2-bit; the only question was *which compiler build implements it*, and that answer changes with every Xcode beta. The `-downloadComponent`-gives-same-version check on Xcode 26.6 was a real result but a *local* one — it did not test a newer Xcode. (2) **Distinguishing "spec'd" from "landed" from "installed."** The gate was never the hardware or the language design; it was purely which toolchain was on the machine. When a capability is spec-confirmed but compile-blocked, the correct posture is "gated on toolchain version, re-test on the next beta," not "impossible." The one-line re-test (`xcrun metal -std=metal4.1 -c` a `uint2b_format` matmul2d kernel) is cheap; run it on every toolchain bump before treating a platform limit as permanent.
 
 ### Why not 4-bit today
 
@@ -56,13 +60,13 @@ Two research passes (M3 header inspection + test-compile; MSL spec `Metal-Shadin
 
 ## Paths to the multiplier (ranked)
 
-1. **Newer M3 Metal toolchain (Metal 4.1).** Most actionable — the types are spec'd; a newer macOS 27 / Xcode beta may already ship them. Check `xcodebuild -downloadComponent MetalToolchain` / a newer Xcode, then test-compile `uint2b_format` with `-std=metal4.1`. If it compiles → build `mm2d_q2_0.metallib` and wire (below) → 7 GB, ~142 GB/s → the multiplier. Zero waste.
-2. **CUDA (Modal).** Drafter + spec loop are model-agnostic; on a GPU with headroom the 4-bit up-convert fits and the layout fight disappears — the whitepaper's 1.34×+ lives there.
-3. **Larger-block-size drafter (retrain).** block_size=4 caps amortization at 5 tok/round; block_size 8–16 raises the ceiling more than any verify kernel can on the M3. Modal training.
+1. **Newer M3 Metal toolchain (Metal 4.1). — DONE (2026-07-16).** Xcode 27.0 beta 3 + its Metal Toolchain component (`metalfe-32023.918.1`) compiles `uint2b_format` `matmul2d` on the M3. This is now the active path: build `mm2d_q2_0.metallib` and wire (below) → ~7 GB, hardware-unpacked → the multiplier, zero waste. **In progress.**
+2. **CUDA (Modal).** Drafter + spec loop are model-agnostic; on a GPU with headroom the 4-bit up-convert fits and the layout fight disappears — the whitepaper's 1.34×+ lives there. (Fallback / cross-check.)
+3. **Larger-block-size drafter (retrain).** block_size=4 caps amortization at 5 tok/round; block_size 8–16 raises the ceiling more than any verify kernel can on the M3. Modal training. (Orthogonal — compounds with #1.)
 
-### The mirror (when 2-bit lands or on CUDA)
+### The mirror (2-bit now compiles on the M3 — this is the active build)
 
-Mirror the q4_K mm2d stack for Q2_0:
+Mirror the q4_K mm2d stack for Q2_0 (build with Xcode 27 beta 3's `-std=metal4.1`):
 1. `q2_0_mm2d_planes` (candle-core, **already written**): `codes [k,n_pad]` 2-bit + `d [k/128,n_pad]` fp16. For `matmul2d` land it as `tensor<device uint2b_format>` with K in dim-0 and 128-byte row-stride padding; d via `tensor_blockwise`.
 2. `mm2d_q2_0.metal`: mirror `kernel_mul_mm2d_q4k_bf16` with `int2b_format` B, half/bfloat A, and the **ternary fold** `acc += d_block·(P − rowsum)` (d is per-128 = per-4 K-tiles, vs q4_K's per-32) — the `P − rowsum` mirrors q4_K's `dsc·P − dmm·rowsum` with `dmm→d`, `dsc→d`, since `Σ(code−1)·d·a = d·(Σcode·a − Σa)`.
 3. Build `mm2d_q2_0.metallib`: `xcrun metal -std=metal4.1 -c mm2d_q2_0.metal -o x.air; xcrun metallib x.air -o mm2d_q2_0.metallib` on a Metal-4.1 machine (per `scripts/build_mm2d_q4k.sh`).
