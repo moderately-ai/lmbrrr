@@ -220,8 +220,14 @@ fn spec_decode(
     let caps = model.take_device_captures();
     let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
     drafter.append_context(&ctx_feat, 0)?;
+    let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
+    if dbg {
+        eprintln!("drafter loaded ({drafter_load_s:.1}s), prefill done, offset={}", ids.len());
+    }
 
     let mut anchor = argmax_row(&logits.narrow(1, ids.len() - 1, 1)?)?;
+    drop(logits);
+    drop(ctx_feat);
     let mut offset = ids.len();
     let mut committed: Vec<u32> = Vec::new();
     let mut rounds = 0usize;
@@ -243,8 +249,10 @@ fn spec_decode(
             .to_dtype(DType::U32)?
             .flatten_all()?
             .to_vec1::<u32>()?;
+        drop(logits); // free the [1, chunk, 248k] verify logits before any re-forward
         let caps = model.take_device_captures();
         let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
+        drop(caps);
 
         let accepted = drafts
             .iter()
@@ -257,7 +265,9 @@ fn spec_decode(
         // accepted drafts); the bonus's true hidden is recomputed next round.
         // These verify captures are valid regardless of the rollback below.
         let committed_feat = ctx_feat.narrow(1, 0, accepted + 1)?.contiguous()?;
+        drop(ctx_feat);
         drafter.append_context(&committed_feat, offset)?;
+        drop(committed_feat);
 
         if accepted != width {
             // Readvance rollback (memory-lean vs per-position verify-state
@@ -280,7 +290,7 @@ fn spec_decode(
         rounds += 1;
         anchor = bonus;
         device.synchronize()?;
-        if std::env::var("LMBRRR_SPEC_DEBUG").is_ok() {
+        if dbg {
             eprintln!(
                 "round {rounds}: offset={offset} accepted={accepted}/{width} committed={}",
                 committed.len()
