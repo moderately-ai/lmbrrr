@@ -1541,8 +1541,12 @@ impl GatedDeltaNet {
             && xs.dtype() == DType::BF16
             && self.conv_state.is_some()
             // GQA: the v2 prep maps value-heads to their group's k-head
-            // (h % num_k), same as the decode kernel and the v1 chunk.
+            // (h % num_k), same as the decode kernel and the v1 chunk. The
+            // re-grid's win only materializes at l >= 8 (MiniCPM: -7/-8% at
+            // l=8/12; Bonsai l=5: verify/round identical to v1, 195 vs 193 ms
+            // — measured 2026-07-16), so GQA models take v1 below that.
             && self.num_v_heads.is_multiple_of(self.num_k_heads)
+            && (self.num_k_heads == self.num_v_heads || l >= 8)
             && self.head_k_dim == 128
             && self.head_v_dim == 128
     }
