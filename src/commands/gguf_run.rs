@@ -40,6 +40,9 @@ enum GgufCmd {
     /// Micro-bench the ternary Q2_0 verify/decode GEMV kernels on the ffn shape
     /// (random weights; no model load) — isolates kernel bandwidth.
     BenchGemv,
+    /// mc-vs-mm2d on the model's REAL verify shapes at m=5 (interleaved):
+    /// attributes the in-loop planar-only verify shortfall per weight class.
+    BenchShapes,
     /// Loop ONE quantized matmul kernel in isolation so a gpucapture/gpudebug
     /// capture is dominated by it (counters are timeline-aggregate). No model.
     ProfileKernel(ProfileKernelArgs),
@@ -173,6 +176,187 @@ fn repack(device: &Device, args: &RepackArgs) -> Result<()> {
                 "skipped {count} x [{n}, {k}]: k={k} unsupported by the mm2d kernel; these stay on the GEMV route"
             );
         }
+    }
+    Ok(())
+}
+
+/// mc vs mm2d at m=5 on every Q2_0 weight shape the verify actually runs.
+/// Random weights; interleaved timing (DVFS-fair); correctness vs dense f32
+/// where the dense reference fits.
+fn bench_shapes(device: &Device) -> Result<()> {
+    use candle::quantized::k_quants::BlockQ2_0;
+    use candle::quantized::metal::q2_0_mm2d_planes;
+    use candle::quantized::{GgmlDType, QTensor};
+    use candle_metal_kernels::{
+        call_quantized_matmul_mm2d_q2_0, call_quantized_matmul_mv_mc, Mm2dQ2Variant,
+    };
+    let mdev = match device {
+        Device::Metal(d) => d.clone(),
+        _ => anyhow::bail!("bench needs metal"),
+    };
+    let m = 5usize; // verify width (block_size 4 + anchor)
+    // (label, n, k) — the per-layer verify matmuls + the head.
+    let shapes: [(&str, usize, usize); 6] = [
+        ("ba", 96, 5120),
+        ("o/out", 5120, 5120),
+        ("down(k17408)", 5120, 17408),
+        ("qkvz", 16384, 5120),
+        ("gate_up", 34816, 5120),
+        ("head", 248320, 5120),
+    ];
+    for (label, n, k) in shapes {
+        let w = Tensor::randn(0f32, 1f32, (n, k), device)?;
+        let qt = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+        let bytes = qt.storage_size_in_bytes();
+        // Dense reference only where the f32 weight is affordable.
+        let wdeq = if n * k <= 96_000_000 {
+            Some(qt.dequantize(device)?)
+        } else {
+            None
+        };
+        drop(w);
+        let data = qt.data()?;
+        let wbuf = mdev
+            .new_buffer_builder()
+            .with_data(&data)
+            .with_label("bs_w")
+            .build()?;
+        let blocks = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const BlockQ2_0, data.len() / 34)
+        };
+        let planes = q2_0_mm2d_planes(blocks, n, k)?;
+        let codes_buf = mdev
+            .new_buffer_builder()
+            .with_data(&planes.codes)
+            .with_label("bs_codes")
+            .build()?;
+        let d_bytes = unsafe {
+            std::slice::from_raw_parts(planes.d.as_ptr() as *const u8, planes.d.len() * 2)
+        };
+        let d_buf = mdev
+            .new_buffer_builder()
+            .with_data(d_bytes)
+            .with_label("bs_d")
+            .build()?;
+        drop(data);
+
+        let x = Tensor::randn(0f32, 1f32, (m, k), device)?.to_dtype(DType::BF16)?;
+        let (xs, xl) = x.storage_and_layout();
+        let xbuf = match &*xs {
+            candle::Storage::Metal(ms) => ms.buffer().clone(),
+            _ => anyhow::bail!("x not metal"),
+        };
+        let xoff = xl.start_offset() * 2;
+        let dst_mc = mdev
+            .new_buffer_builder()
+            .with_size(m * n * 2)
+            .with_label("bs_dst_mc")
+            .build()?;
+        let dst_mm = mdev
+            .new_buffer_builder()
+            .with_size(m * n * 2)
+            .with_label("bs_dst_mm")
+            .build()?;
+        let variant = if k <= Mm2dQ2Variant::DEFAULT.max_k {
+            Mm2dQ2Variant::DEFAULT
+        } else {
+            Mm2dQ2Variant::T64_K128_K17408
+        };
+        let disp_mc = || -> Result<()> {
+            let enc = mdev.command_encoder()?;
+            call_quantized_matmul_mv_mc(
+                mdev.metal_device(),
+                &enc,
+                mdev.kernels(),
+                GgmlDType::Q2_0.into(),
+                true,
+                true,
+                (1, m, n, k),
+                &xbuf,
+                xoff,
+                &wbuf,
+                0,
+                &dst_mc,
+            )?;
+            Ok(())
+        };
+        let disp_mm = || -> Result<()> {
+            let enc = mdev.command_encoder()?;
+            call_quantized_matmul_mm2d_q2_0(
+                mdev.metal_device(),
+                &enc,
+                mdev.kernels(),
+                (m, n, planes.n_pad, k),
+                &xbuf,
+                xoff,
+                &codes_buf,
+                &d_buf,
+                0,
+                &dst_mm,
+                variant,
+            )?;
+            Ok(())
+        };
+        for _ in 0..8 {
+            disp_mc()?;
+            disp_mm()?;
+        }
+        device.synchronize()?;
+        // Interleaved timing (DVFS-fair): alternate mc/mm2d batches.
+        let rounds = 30usize;
+        let batch = 8usize;
+        let (mut t_mc, mut t_mm) = (0.0f64, 0.0f64);
+        for _ in 0..rounds {
+            device.synchronize()?;
+            let t = Instant::now();
+            for _ in 0..batch {
+                disp_mc()?;
+            }
+            device.synchronize()?;
+            t_mc += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            for _ in 0..batch {
+                disp_mm()?;
+            }
+            device.synchronize()?;
+            t_mm += t.elapsed().as_secs_f64();
+        }
+        let per_mc = t_mc / (rounds * batch) as f64;
+        let per_mm = t_mm / (rounds * batch) as f64;
+        // Correctness against the dense reference (skipped for the head).
+        let rels = if let Some(wdeq) = &wdeq {
+            let refr = x.to_dtype(DType::F32)?.matmul(&wdeq.t()?)?;
+            let denom = refr.abs()?.mean_all()?.to_scalar::<f32>()?.max(1e-6);
+            let rel_of = |buf: &std::sync::Arc<candle_metal_kernels::metal::Buffer>| -> Result<f32> {
+                let out = candle::MetalStorage::new(buf.clone(), mdev.clone(), m * n, DType::BF16);
+                let got = Tensor::from_storage(
+                    candle::Storage::Metal(out),
+                    (m, n),
+                    candle::op::BackpropOp::none(),
+                    false,
+                )
+                .to_dtype(DType::F32)?;
+                Ok(got.sub(&refr)?.abs()?.mean_all()?.to_scalar::<f32>()? / denom)
+            };
+            disp_mc()?;
+            disp_mm()?;
+            device.synchronize()?;
+            Some((rel_of(&dst_mc)?, rel_of(&dst_mm)?))
+        } else {
+            None
+        };
+        let rel_str = match rels {
+            Some((a, b)) => format!("rel mc {a:.4} mm2d {b:.4}"),
+            None => "rel skipped".to_string(),
+        };
+        println!(
+            "{label:>13} [{n:>6}x{k:>5}] m={m}: mc {:>7.3} ms ({:>5.1} GB/s) | mm2d {:>7.3} ms ({:>5.1} GB/s) | {}",
+            1000.0 * per_mc,
+            bytes as f64 / per_mc / 1e9,
+            1000.0 * per_mm,
+            bytes as f64 / per_mm / 1e9,
+            rel_str
+        );
     }
     Ok(())
 }
@@ -1248,6 +1432,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
     match args.cmd {
         GgufCmd::Repack(a) => repack(&device, &a),
         GgufCmd::BenchGemv => bench_gemv(&device),
+        GgufCmd::BenchShapes => bench_shapes(&device),
         GgufCmd::ProfileKernel(a) => profile_kernel(&device, &a.which, a.iters, a.m),
         GgufCmd::Decode(a) => {
             let (mut model, ids, eos, _ctx, tok, load_seconds) = load_gguf_model(&a.model, &device)?;
