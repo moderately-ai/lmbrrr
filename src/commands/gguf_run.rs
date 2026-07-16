@@ -243,12 +243,14 @@ fn bench_gemv(device: &Device) -> Result<()> {
             };
             let xoff = xl.start_offset() * 2;
             for variant in Mm2dQ2Variant::ALL {
-                let run_mm2d = |mdev: &candle::MetalDevice| -> Result<candle::MetalStorage> {
-                    let dst = mdev
-                        .new_buffer_builder()
-                        .with_size(m * n * 2)
-                        .with_label("q2mm2d_dst")
-                        .build()?;
+                // One reused dst for the timing loop (no per-call allocation, so
+                // we measure the kernel, not buffer/residency churn).
+                let dst = mdev
+                    .new_buffer_builder()
+                    .with_size(m * n * 2)
+                    .with_label("q2mm2d_dst")
+                    .build()?;
+                let dispatch = |mdev: &candle::MetalDevice| -> Result<()> {
                     let enc = mdev.command_encoder()?;
                     call_quantized_matmul_mm2d_q2_0(
                         mdev.metal_device(),
@@ -263,19 +265,23 @@ fn bench_gemv(device: &Device) -> Result<()> {
                         &dst,
                         variant,
                     )?;
-                    Ok(candle::MetalStorage::new(dst, mdev.clone(), m * n, DType::BF16))
+                    Ok(())
                 };
                 for _ in 0..8 {
-                    let _ = run_mm2d(&mdev)?;
+                    dispatch(&mdev)?;
                 }
                 device.synchronize()?;
                 let t = Instant::now();
                 for _ in 0..iters {
-                    let _ = run_mm2d(&mdev)?;
+                    dispatch(&mdev)?;
                 }
                 device.synchronize()?;
                 let s2 = t.elapsed().as_secs_f64();
-                let out2 = run_mm2d(&mdev)?;
+                // Correctness: the last dispatch left a valid result in dst.
+                dispatch(&mdev)?;
+                device.synchronize()?;
+                let out2 =
+                    candle::MetalStorage::new(dst.clone(), mdev.clone(), m * n, DType::BF16);
                 let got2 = Tensor::from_storage(
                     candle::Storage::Metal(out2),
                     (m, n),
@@ -352,12 +358,12 @@ fn bench_gemv(device: &Device) -> Result<()> {
                 _ => anyhow::bail!("x not metal"),
             };
             let xoff = xl.start_offset() * 2;
-            let run = |mdev: &candle::MetalDevice| -> Result<candle::MetalStorage> {
-                let dst = mdev
-                    .new_buffer_builder()
-                    .with_size(m * n * 2)
-                    .with_label("q4k_dst")
-                    .build()?;
+            let dst = mdev
+                .new_buffer_builder()
+                .with_size(m * n * 2)
+                .with_label("q4k_dst")
+                .build()?;
+            let dispatch = |mdev: &candle::MetalDevice| -> Result<()> {
                 let enc = mdev.command_encoder()?;
                 call_quantized_matmul_mm2d_q4k(
                     mdev.metal_device(),
@@ -372,19 +378,21 @@ fn bench_gemv(device: &Device) -> Result<()> {
                     0,
                     &dst,
                 )?;
-                Ok(candle::MetalStorage::new(dst, mdev.clone(), m * n, DType::BF16))
+                Ok(())
             };
             for _ in 0..8 {
-                let _ = run(&mdev)?;
+                dispatch(&mdev)?;
             }
             device.synchronize()?;
             let t = Instant::now();
             for _ in 0..iters {
-                let _ = run(&mdev)?;
+                dispatch(&mdev)?;
             }
             device.synchronize()?;
             let s = t.elapsed().as_secs_f64();
-            let out = run(&mdev)?;
+            dispatch(&mdev)?;
+            device.synchronize()?;
+            let out = candle::MetalStorage::new(dst.clone(), mdev.clone(), m * n, DType::BF16);
             let got = Tensor::from_storage(
                 candle::Storage::Metal(out),
                 (m, n),
