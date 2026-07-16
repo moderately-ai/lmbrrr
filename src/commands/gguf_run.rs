@@ -281,42 +281,67 @@ fn bench_gemv(device: &Device) -> Result<()> {
             ("kernel_mul_mv_q2_0_bf16_mcx_4_8_4", 4, 8, 4),
             ("kernel_mul_mv_q2_0_bf16_mcx_8_8_4", 8, 8, 4),
         ];
-        for (name, nr, nc, nsg) in variants {
-            let dst = mdev
-                .new_buffer_builder()
-                .with_size(mm * n * 4)
-                .with_label("mcx_dst")
-                .build()?;
-            let dispatch = || -> Result<()> {
-                let enc = mdev.command_encoder()?;
-                call_quantized_matmul_mv_q2_0_mcx(
-                    mdev.metal_device(),
-                    &enc,
-                    mdev.kernels(),
-                    name,
-                    (nr, nc, nsg),
-                    (mm, n, k),
-                    &wbuf,
-                    &xbuf,
-                    xoff,
-                    &dst,
-                )?;
-                Ok(())
-            };
+        let nv = variants.len();
+        let dsts: Vec<_> = (0..nv)
+            .map(|_| {
+                mdev.new_buffer_builder()
+                    .with_size(mm * n * 4)
+                    .with_label("mcx_dst")
+                    .build()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let dispatch = |name: &'static str,
+                        nr: usize,
+                        nc: usize,
+                        nsg: usize,
+                        dst: &std::sync::Arc<candle_metal_kernels::metal::Buffer>|
+         -> Result<()> {
+            let enc = mdev.command_encoder()?;
+            call_quantized_matmul_mv_q2_0_mcx(
+                mdev.metal_device(),
+                &enc,
+                mdev.kernels(),
+                name,
+                (nr, nc, nsg),
+                (mm, n, k),
+                &wbuf,
+                &xbuf,
+                xoff,
+                dst,
+            )?;
+            Ok(())
+        };
+        // Warmup every variant.
+        for (vi, (name, nr, nc, nsg)) in variants.iter().enumerate() {
             for _ in 0..8 {
-                dispatch()?;
+                dispatch(name, *nr, *nc, *nsg, &dsts[vi])?;
             }
-            device.synchronize()?;
-            let iters = 200;
-            let t = Instant::now();
-            for _ in 0..iters {
-                dispatch()?;
+        }
+        device.synchronize()?;
+        // INTERLEAVED timing: round-robin batches so DVFS clock drift across the
+        // run hits every variant equally (a sequential per-variant sweep is
+        // position-confounded — later variants run at a drooped clock).
+        let rounds = 40usize;
+        let batch = 8usize;
+        let mut acc = vec![0.0f64; nv];
+        for _ in 0..rounds {
+            for (vi, (name, nr, nc, nsg)) in variants.iter().enumerate() {
+                device.synchronize()?;
+                let t = Instant::now();
+                for _ in 0..batch {
+                    dispatch(name, *nr, *nc, *nsg, &dsts[vi])?;
+                }
+                device.synchronize()?;
+                acc[vi] += t.elapsed().as_secs_f64();
             }
+        }
+        for (vi, (name, nr, nc, nsg)) in variants.iter().enumerate() {
+            let per = acc[vi] / (rounds * batch) as f64;
+            // correctness (one clean dispatch + read)
+            dispatch(name, *nr, *nc, *nsg, &dsts[vi])?;
             device.synchronize()?;
-            let s = t.elapsed().as_secs_f64();
-            dispatch()?;
-            device.synchronize()?;
-            let out = candle::MetalStorage::new(dst.clone(), mdev.clone(), mm * n, DType::F32);
+            let out =
+                candle::MetalStorage::new(dsts[vi].clone(), mdev.clone(), mm * n, DType::F32);
             let got = Tensor::from_storage(
                 candle::Storage::Metal(out),
                 (mm, n),
@@ -326,12 +351,12 @@ fn bench_gemv(device: &Device) -> Result<()> {
             let denom = refr.abs()?.mean_all()?.to_scalar::<f32>()?.max(1e-6);
             let rel = got.sub(&refr)?.abs()?.mean_all()?.to_scalar::<f32>()? / denom;
             let label = name
-                .strip_prefix("kernel_mul_mv_q2_0_bf16_mcx_")
+                .strip_prefix("kernel_mul_mv_q2_0_bf16_")
                 .unwrap_or(name);
             println!(
-                "Q2_0 MCX[{label:>9}] {n}x{k} m={mm}: {:.3} ms/call ({:.1} GB/s), rel_err {:.4}",
-                1000.0 * s / iters as f64,
-                (bytes as f64 * iters as f64) / s / 1e9,
+                "Q2_0 MCX[{label:>12}] {n}x{k} m={mm}: {:.3} ms/call ({:.1} GB/s), rel_err {:.4}",
+                1000.0 * per,
+                (bytes as f64) / per / 1e9,
                 rel
             );
         }
