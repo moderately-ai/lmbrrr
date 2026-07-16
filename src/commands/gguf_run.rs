@@ -9,43 +9,76 @@ use std::time::Instant;
 
 use anyhow::Result;
 use candle::{DType, Device, Tensor, D};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 use lmbrrr::gguf::GgufFile;
 use lmbrrr::model_ctx::ModelCtx;
 use lmbrrr::qwen35::{CausalTextModel, Qwen35CausalLM, Qwen35Profiler};
+use tokenizers::Tokenizer;
 
+/// Text-decode + throughput harness for the ternary Ternary-Bonsai-27B GGUF.
 #[derive(Parser, Debug)]
-pub(crate) struct GgufRunArgs {
+pub(crate) struct GgufArgs {
+    #[command(subcommand)]
+    cmd: GgufCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum GgufCmd {
+    /// Greedy text decode with a per-token sync (the honest throughput floor).
+    Decode(DecodeArgs),
+    /// DSpark speculative decode with a Bonsai drafter GGUF.
+    Spec(SpecArgs),
+    /// Attach the per-op profiler and dump the decode-step breakdown by
+    /// component (deltanet_recurrent_rule / mlp / attention / norms / ...).
+    Profile(ProfileArgs),
+    /// Micro-bench the ternary Q2_0 verify/decode GEMV kernels on the ffn shape
+    /// (random weights; no model load) — isolates kernel bandwidth.
+    BenchGemv,
+}
+
+/// Model-loading args shared by the decode / spec / profile subcommands.
+#[derive(Args, Debug)]
+struct ModelArgs {
     /// Path to the qwen35-hybrid GGUF (e.g. Ternary-Bonsai-27B-Q2_0.gguf).
     #[arg(long)]
-    pub gguf: PathBuf,
+    gguf: PathBuf,
 
     #[arg(long, default_value = "Explain quantum computing in simple terms.")]
-    pub prompt: String,
-
-    #[arg(long, default_value_t = 128)]
-    pub max_new_tokens: usize,
+    prompt: String,
 
     /// Feed the prompt verbatim instead of wrapping it in the ChatML template.
     #[arg(long)]
-    pub raw: bool,
+    raw: bool,
+}
 
-    /// Micro-bench the decode GEMV (Q2_0 vs Q4K) on the ffn shape instead of
-    /// decoding — isolates kernel bandwidth from model overhead.
-    #[arg(long)]
-    pub bench_gemv: bool,
+#[derive(Args, Debug)]
+struct DecodeArgs {
+    #[command(flatten)]
+    model: ModelArgs,
 
-    /// Attach the per-op profiler and dump the decode-step breakdown by
-    /// component (deltanet_recurrent_rule / mlp / attention / norms / ...).
-    #[arg(long)]
-    pub profile: bool,
+    #[arg(long, default_value_t = 128)]
+    max_new_tokens: usize,
+}
 
-    /// Enable DSpark speculative decoding with the given drafter GGUF
-    /// (Ternary-Bonsai-27B-dspark-Q4_1.gguf). Draft width defaults to the
-    /// drafter's block_size.
+#[derive(Args, Debug)]
+struct SpecArgs {
+    #[command(flatten)]
+    model: ModelArgs,
+
+    /// Drafter GGUF (Ternary-Bonsai-27B-dspark-Q4_1.gguf). The draft width is
+    /// the drafter's block_size.
     #[arg(long)]
-    pub spec_drafter: Option<PathBuf>,
+    drafter: PathBuf,
+
+    #[arg(long, default_value_t = 128)]
+    max_new_tokens: usize,
+}
+
+#[derive(Args, Debug)]
+struct ProfileArgs {
+    #[command(flatten)]
+    model: ModelArgs,
 }
 
 fn bench_gemv(device: &Device) -> Result<()> {
@@ -515,14 +548,43 @@ fn spec_decode(
     Ok(())
 }
 
-pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
+pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
-    let dtype = DType::BF16;
-
-    if args.bench_gemv {
-        return bench_gemv(&device);
+    match args.cmd {
+        GgufCmd::BenchGemv => bench_gemv(&device),
+        GgufCmd::Decode(a) => {
+            let (mut model, ids, eos, _ctx, tok, load_seconds) = load_gguf_model(&a.model, &device)?;
+            decode(&mut model, &device, &ids, eos, a.max_new_tokens, &tok, load_seconds)
+        }
+        GgufCmd::Spec(a) => {
+            let (mut model, ids, eos, ctx, tok, _load_seconds) = load_gguf_model(&a.model, &device)?;
+            spec_decode(
+                &mut model,
+                &a.drafter,
+                &device,
+                &ids,
+                eos,
+                a.max_new_tokens,
+                &ctx,
+                &tok,
+            )
+        }
+        GgufCmd::Profile(a) => {
+            let (mut model, ids, _eos, _ctx, _tok, _load_seconds) =
+                load_gguf_model(&a.model, &device)?;
+            profile_decode(&mut model, &device, &ids)
+        }
     }
+}
 
+/// Open the GGUF, build the Qwen35 target, and encode the prompt (ChatML unless
+/// `--raw`). Returns the model, prompt ids, eos id, the `ModelCtx` (needed by
+/// spec decode), the tokenizer, and the model-load time.
+fn load_gguf_model(
+    args: &ModelArgs,
+    device: &Device,
+) -> Result<(Qwen35CausalLM, Vec<u32>, u32, ModelCtx, Tokenizer, f64)> {
+    let dtype = DType::BF16;
     let load = Instant::now();
     let gguf = GgufFile::open(&args.gguf)?;
     let cfg = gguf.config()?;
@@ -551,26 +613,22 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
         .get_ids()
         .to_vec();
     let eos = gguf.eos_token_id().unwrap_or(248046);
+    Ok((model, ids, eos, ctx, tok, load_seconds))
+}
 
-    if args.profile {
-        return profile_decode(&mut model, &device, &ids);
-    }
-
-    if let Some(drafter_path) = args.spec_drafter.as_ref() {
-        return spec_decode(
-            &mut model,
-            drafter_path,
-            &device,
-            &ids,
-            eos,
-            args.max_new_tokens,
-            &ctx,
-            &tok,
-        );
-    }
-
+/// Greedy decode with a per-token sync; prints the generated text and a JSON
+/// throughput summary (steady-state = median inter-token gap after 3 warm-ups).
+fn decode(
+    model: &mut Qwen35CausalLM,
+    device: &Device,
+    ids: &[u32],
+    eos: u32,
+    max_new_tokens: usize,
+    tok: &Tokenizer,
+    load_seconds: f64,
+) -> Result<()> {
     let prefill = Instant::now();
-    let input = Tensor::from_slice(&ids, (1, ids.len()), &device)?;
+    let input = Tensor::from_slice(ids, (1, ids.len()), device)?;
     let mut logits = model.forward(&input, 0)?;
     device.synchronize()?;
     let prefill_seconds = prefill.elapsed().as_secs_f64();
@@ -579,7 +637,7 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
     let mut out = Vec::new();
     let mut gaps = Vec::new();
     let decode = Instant::now();
-    for _ in 0..args.max_new_tokens {
+    for _ in 0..max_new_tokens {
         let t0 = Instant::now();
         // The argmax read-back forces execution of the pending forward — no
         // separate synchronize, so the forward + argmax batch into one point.
@@ -592,7 +650,7 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
             break;
         }
         out.push(next);
-        let step = Tensor::from_slice(&[next], (1, 1), &device)?;
+        let step = Tensor::from_slice(&[next], (1, 1), device)?;
         logits = model.forward(&step, offset)?;
         offset += 1;
         gaps.push(t0.elapsed().as_secs_f64());

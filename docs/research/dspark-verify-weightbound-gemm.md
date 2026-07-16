@@ -6,7 +6,7 @@ Deliverable of [[dspark-bonsai-integration]] (ticket `dspark-bonsai-integration`
 
 DSpark spec decode only pays off if the target's **verify** (a forward at m = block_size + 1 = 5) costs about **1× a single decode**, not 5×. At high acceptance (block_size 4 ⇒ ≤5 committed tokens/round), the round is `verify + propose + overhead`; it beats plain decode only if `verify ≈ weight-bound` (one weight read serves all 5 columns).
 
-Measured round breakdown (`gguf-run --spec-drafter` prints propose/verify/overhead seconds), quantum-computing prompt, mean_accepted 3.4–4.0/4:
+Measured round breakdown (`gguf spec` prints propose/verify/overhead seconds), quantum-computing prompt, mean_accepted 3.4–4.0/4:
 
 | segment | share | note |
 |---|---|---|
@@ -79,6 +79,6 @@ The hand-rolled planar kernel is already flat/weight-bound-STRUCTURED at 38 GB/s
 
 ## Status of what's committed (candle rev pinned in lmbrrr `Cargo.toml`)
 
-Kernels 1–6 were all A/B'd and the slow ones reverted; the shipped candle keeps **mc for the m∈2..7 verify** (best working), the **generic tile mm for m≥8 prefill** (a real prefill win), and **mv for m=1 decode**. `q2_0_mm2d_planes` + `kernel_mul_mm2d_q2_0_smallm` + `call_quantized_matmul_mm2d_q2_0_smallm` are committed on the candle `lmbrrr` branch (the 38 GB/s hand-rolled planar proof-of-concept, exercised by `gguf-run --bench-gemv`'s `Q2_0 PLANAR` lines). The DSpark e2e is working + byte-correct at parity.
+Kernels 1–6 were all A/B'd and the slow ones reverted; the shipped candle keeps **mc for the m∈2..7 verify** (best working), the **generic tile mm for m≥8 prefill** (a real prefill win), and **mv for m=1 decode**. `q2_0_mm2d_planes` + `kernel_mul_mm2d_q2_0_smallm` + `call_quantized_matmul_mm2d_q2_0_smallm` are committed on the candle `lmbrrr` branch (the 38 GB/s hand-rolled planar proof-of-concept, exercised by `gguf bench-gemv`'s `Q2_0 PLANAR` lines). The DSpark e2e is working + byte-correct at parity.
 
 See [[dspark-bonsai-e2e-working]], [[ternary-q2_0-gemv-exhausted]], and `metal_notes.md` §"Metal 4.x tensor/matmul2d quantized formats".
