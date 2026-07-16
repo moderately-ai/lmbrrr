@@ -2565,6 +2565,10 @@ impl Qwen35CausalLM {
         self.model.rollback_to_prefix(snapshot, prefix_len)
     }
 
+    pub fn restore_decode_state(&mut self, snapshot: &DecodeStateSnapshot) -> Result<()> {
+        self.model.restore_decode_state(snapshot)
+    }
+
     /// Dense logits for every input position (verify forward): embed -> text
     /// core (with capture) -> head.
     pub fn forward_all_logits(&mut self, input_ids: &Tensor, offset: usize) -> Result<Tensor> {

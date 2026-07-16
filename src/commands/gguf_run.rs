@@ -227,9 +227,6 @@ fn spec_decode(
     let mut rounds = 0usize;
     let mut accepted_total = 0usize;
 
-    // Capture per-position DeltaNet recurrent state during verify so a partial
-    // accept can roll the hybrid mixer state back to the commit point.
-    model.set_verify_state_capture(true);
     let decode = Instant::now();
     while committed.len() < max_new_tokens {
         let snapshot = model.snapshot_decode_state();
@@ -255,14 +252,26 @@ fn spec_decode(
             .take_while(|(d, t)| d == t)
             .count();
         let bonus = targets[accepted];
-        if accepted != width {
-            model.rollback_to_prefix(&snapshot, accepted + 1)?;
-            device.synchronize()?;
-        }
+
         // Extend the drafter context with the committed captures (anchor +
         // accepted drafts); the bonus's true hidden is recomputed next round.
+        // These verify captures are valid regardless of the rollback below.
         let committed_feat = ctx_feat.narrow(1, 0, accepted + 1)?.contiguous()?;
         drafter.append_context(&committed_feat, offset)?;
+
+        if accepted != width {
+            // Readvance rollback (memory-lean vs per-position verify-state
+            // capture on the 48 hybrid DeltaNet layers): restore the pre-chunk
+            // decode state and re-forward only the committed prefix to rebuild
+            // the target KV + mixer state at the commit point. The re-forward's
+            // captures duplicate the committed ones already appended, so drop.
+            model.restore_decode_state(&snapshot)?;
+            let readvance = &chunk[..accepted + 1];
+            let readvance_input = Tensor::from_slice(readvance, (1, readvance.len()), device)?;
+            let _ = model.forward_all_logits(&readvance_input, offset)?;
+            let _ = model.take_device_captures();
+            device.synchronize()?;
+        }
         offset += accepted + 1;
 
         committed.extend_from_slice(&drafts[..accepted]);
@@ -282,7 +291,6 @@ fn spec_decode(
         }
     }
     let decode_seconds = decode.elapsed().as_secs_f64();
-    model.set_verify_state_capture(false);
     committed.truncate(max_new_tokens);
     let text = tok
         .decode(&committed, true)
