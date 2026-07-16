@@ -205,16 +205,34 @@ fn bench_shapes(device: &Device) -> Result<()> {
         ("head", 248320, 5120),
     ];
     for (label, n, k) in shapes {
-        let w = Tensor::randn(0f32, 1f32, (n, k), device)?;
-        let qt = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+        // Giant shapes (the head) are timing-only: synthesize random Q2_0
+        // blocks directly — the dense f32 weight (5+ GB) OOMs the bench.
+        let dense_ok = n * k <= 96_000_000;
+        let qt = if dense_ok {
+            let w = Tensor::randn(0f32, 1f32, (n, k), device)?;
+            QTensor::quantize(&w, GgmlDType::Q2_0)?
+        } else {
+            use candle::quantized::ggml_file::qtensor_from_ggml;
+            let nb = n * (k / 128);
+            let mut raw = Vec::with_capacity(nb * 34);
+            let d = [0x1Fu8, 0x21]; // f16 ~0.01, little-endian
+            let mut s = 0x1234_5678u32;
+            for _ in 0..nb {
+                raw.extend_from_slice(&d);
+                for _ in 0..32 {
+                    s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    raw.push((s >> 24) as u8);
+                }
+            }
+            qtensor_from_ggml(GgmlDType::Q2_0, &raw, vec![n, k], device)?
+        };
         let bytes = qt.storage_size_in_bytes();
         // Dense reference only where the f32 weight is affordable.
-        let wdeq = if n * k <= 96_000_000 {
+        let wdeq = if dense_ok {
             Some(qt.dequantize(device)?)
         } else {
             None
         };
-        drop(w);
         let data = qt.data()?;
         let wbuf = mdev
             .new_buffer_builder()
@@ -1236,6 +1254,7 @@ fn spec_decode(
     max_new_tokens: usize,
     ctx: &ModelCtx,
     tok: &tokenizers::Tokenizer,
+    readvance_rollback: bool,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -1265,6 +1284,14 @@ fn spec_decode(
 
     let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
 
+    // Partial-accept rollback strategy: capture-based closed-form
+    // reconstruction by default (no re-forward; the capture is one S0 + small
+    // per-position vectors per layer, ~150 MB total — NOT the per-position
+    // state capture that OOM'd historically). LMBRRR_READVANCE_ROLLBACK=1
+    // restores the restore+re-forward path (bit-faithful, ~2x the rollback
+    // cost per partial accept).
+    model.set_verify_state_capture(!readvance_rollback);
+
     // Prefill with tap-layer capture, seed the drafter context.
     model.clear_cache();
     drafter.clear_context();
@@ -1289,6 +1316,7 @@ fn spec_decode(
     let mut accepted_total = 0usize;
     let mut propose_s = 0.0f64;
     let mut verify_s = 0.0f64;
+    let mut rollback_s = 0.0f64;
 
     let decode = Instant::now();
     while committed.len() < max_new_tokens {
@@ -1365,17 +1393,25 @@ fn spec_decode(
         drop(committed_feat);
 
         if accepted != width {
-            // Readvance rollback (memory-lean vs per-position verify-state
-            // capture on the 48 hybrid DeltaNet layers): restore the pre-chunk
-            // decode state and re-forward only the committed prefix to rebuild
-            // the target KV + mixer state at the commit point. The re-forward's
-            // captures duplicate the committed ones already appended, so drop.
-            model.restore_decode_state(&snapshot)?;
-            let readvance = &chunk[..accepted + 1];
-            let readvance_input = Tensor::from_slice(readvance, (1, readvance.len()), device)?;
-            let _ = model.forward_all_logits(&readvance_input, offset)?;
-            let _ = model.take_device_captures();
+            let tr = Instant::now();
+            if readvance_rollback {
+                // Readvance rollback: restore the pre-chunk decode state and
+                // re-forward only the committed prefix to rebuild the target
+                // KV + mixer state at the commit point. The re-forward's
+                // captures duplicate the committed ones already appended.
+                model.restore_decode_state(&snapshot)?;
+                let readvance = &chunk[..accepted + 1];
+                let readvance_input =
+                    Tensor::from_slice(readvance, (1, readvance.len()), device)?;
+                let _ = model.forward_all_logits(&readvance_input, offset)?;
+                let _ = model.take_device_captures();
+            } else {
+                // Capture rollback: closed-form DeltaNet reconstruction at the
+                // commit point + KV truncate — no re-forward.
+                model.rollback_to_prefix(&snapshot, accepted + 1)?;
+            }
             device.synchronize()?;
+            rollback_s += tr.elapsed().as_secs_f64();
         }
         offset += accepted + 1;
 
@@ -1421,6 +1457,7 @@ fn spec_decode(
             "draft_width": width,
             "propose_seconds": propose_s,
             "verify_seconds": verify_s,
+            "rollback_seconds": rollback_s,
             "overhead_seconds": decode_seconds - propose_s - verify_s,
         })
     );
@@ -1439,6 +1476,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
             decode(&mut model, &device, &ids, eos, a.max_new_tokens, &tok, load_seconds)
         }
         GgufCmd::Spec(a) => {
+            let spec_run = lmbrrr::runtime_config::SpecRunConfig::from_env();
             let (mut model, ids, eos, ctx, tok, _load_seconds) = load_gguf_model(&a.model, &device)?;
             spec_decode(
                 &mut model,
@@ -1449,6 +1487,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 a.max_new_tokens,
                 &ctx,
                 &tok,
+                spec_run.readvance_rollback,
             )
         }
         GgufCmd::Profile(a) => {

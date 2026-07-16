@@ -76,7 +76,7 @@ impl MixedLinear {
         // QMatMul construction below (raw stays, GEMV route).
         if mm2d_cfg.enabled
             && mm2d_cfg.planar_only
-            && n_rows >= mm2d_cfg.min_n
+            && n_rows >= mm2d_cfg.min_n.max(crate::mm2d::PLANAR_ONLY_MIN_N)
             && crate::mm2d::mm2d_q2_plane_eligible(&weight)
         {
             if let candle::Device::Metal(dev) = weight.device() {

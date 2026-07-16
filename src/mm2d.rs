@@ -292,6 +292,12 @@ pub fn mm2d_q2_k_supported(k: usize) -> bool {
     k % 128 == 0 && k <= Mm2dQ2Variant::T64_K128_K17408.max_k
 }
 
+/// Planar-only keeps weights below this n on the raw+GEMV route: a tensor-op
+/// dispatch on a tiny weight is pure latency (ba [96, 5120]: 2 threadgroups,
+/// mm2d 0.175 ms vs the GEMV's 0.074 — bench-shapes 2026-07-16) and the raw
+/// copy of such weights is memory-trivial (~0.13 MB/layer).
+pub const PLANAR_ONLY_MIN_N: usize = 1024;
+
 /// The kernel instantiation for a plane depth: the default (KMAX 8192, 2 KB
 /// rs_tg) wherever it fits, the deep-K one (ffn_down) above it.
 fn q2_variant_for_k(k: usize) -> Mm2dQ2Variant {
