@@ -235,8 +235,17 @@ fn spec_decode(
 
     let decode = Instant::now();
     while committed.len() < max_new_tokens {
+        if dbg {
+            eprintln!("round {}: snapshot...", rounds + 1);
+        }
         let snapshot = model.snapshot_decode_state();
+        if dbg {
+            eprintln!("round {}: propose...", rounds + 1);
+        }
         let drafts = drafter.propose(anchor, offset, width)?.tokens;
+        if dbg {
+            eprintln!("round {}: proposed {drafts:?}, verify...", rounds + 1);
+        }
         let mut chunk = Vec::with_capacity(width + 1);
         chunk.push(anchor);
         chunk.extend_from_slice(&drafts);
