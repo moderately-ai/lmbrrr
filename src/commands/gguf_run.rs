@@ -238,6 +238,8 @@ fn spec_decode(
     let mut committed: Vec<u32> = Vec::new();
     let mut rounds = 0usize;
     let mut accepted_total = 0usize;
+    let mut propose_s = 0.0f64;
+    let mut verify_s = 0.0f64;
 
     let decode = Instant::now();
     while committed.len() < max_new_tokens {
@@ -248,11 +250,13 @@ fn spec_decode(
         if dbg {
             eprintln!("round {}: anchor={anchor} propose...", rounds + 1);
         }
+        let tp = Instant::now();
         let proposal = if dbg && rounds == 0 {
             drafter.propose_with_diagnostics(anchor, offset, width)?
         } else {
             drafter.propose(anchor, offset, width)?
         };
+        propose_s += tp.elapsed().as_secs_f64();
         let drafts = proposal.tokens.clone();
         if dbg {
             if let Some(bh) = &proposal.block_hidden {
@@ -283,12 +287,14 @@ fn spec_decode(
         let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), device)?;
 
         model.set_device_capture(Some(layers.clone()));
+        let tv = Instant::now();
         let logits = model.forward_all_logits(&chunk_input, offset)?;
         let targets = logits
             .argmax(D::Minus1)?
             .to_dtype(DType::U32)?
             .flatten_all()?
             .to_vec1::<u32>()?;
+        verify_s += tv.elapsed().as_secs_f64();
         drop(logits); // free the [1, chunk, 248k] verify logits before any re-forward
         let caps = model.take_device_captures();
         let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
@@ -364,6 +370,9 @@ fn spec_decode(
             "rounds": rounds,
             "mean_accepted_per_round": accepted_total as f64 / rounds.max(1) as f64,
             "draft_width": width,
+            "propose_seconds": propose_s,
+            "verify_seconds": verify_s,
+            "overhead_seconds": decode_seconds - propose_s - verify_s,
         })
     );
     Ok(())
