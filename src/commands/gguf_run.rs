@@ -218,9 +218,24 @@ fn spec_decode(
     let logits = model.forward_all_logits(&input, 0)?;
     device.synchronize()?;
     let caps = model.take_device_captures();
+    let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
+    if dbg {
+        let stats: Vec<String> = caps
+            .iter()
+            .map(|c| {
+                let f = c.to_dtype(DType::F32).unwrap();
+                format!(
+                    "{:?} mean {:.3} absmean {:.3}",
+                    c.dims(),
+                    f.mean_all().unwrap().to_scalar::<f32>().unwrap(),
+                    f.abs().unwrap().mean_all().unwrap().to_scalar::<f32>().unwrap()
+                )
+            })
+            .collect();
+        eprintln!("captures ({}): {:?}", caps.len(), stats);
+    }
     let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
     drafter.append_context(&ctx_feat, 0)?;
-    let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
     if dbg {
         eprintln!("drafter loaded ({drafter_load_s:.1}s), prefill done, offset={}", ids.len());
     }
