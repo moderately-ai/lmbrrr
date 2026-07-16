@@ -279,6 +279,13 @@ fn spec_decode(
         accepted_total += accepted;
         rounds += 1;
         anchor = bonus;
+        device.synchronize()?;
+        if std::env::var("LMBRRR_SPEC_DEBUG").is_ok() {
+            eprintln!(
+                "round {rounds}: offset={offset} accepted={accepted}/{width} committed={}",
+                committed.len()
+            );
+        }
 
         if committed[committed.len() - (accepted + 1)..]
             .iter()
