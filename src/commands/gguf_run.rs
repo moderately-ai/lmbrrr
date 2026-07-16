@@ -1436,8 +1436,18 @@ fn spec_decode(
                 let _ = model.take_device_captures();
             } else {
                 // Capture rollback: closed-form DeltaNet reconstruction at the
-                // commit point + KV truncate — no re-forward.
-                model.rollback_to_prefix(&snapshot, accepted + 1)?;
+                // commit point + KV truncate — no re-forward. Some verify
+                // paths never capture (chunk > 32, sequential fallback) —
+                // fall back to a readvance instead of dying mid-decode.
+                if let Err(err) = model.rollback_to_prefix(&snapshot, accepted + 1) {
+                    eprintln!("warning: capture rollback unavailable, readvancing ({err})");
+                    model.restore_decode_state(&snapshot)?;
+                    let readvance = &chunk[..accepted + 1];
+                    let readvance_input =
+                        Tensor::from_slice(readvance, (1, readvance.len()), device)?;
+                    let _ = model.forward_all_logits(&readvance_input, offset)?;
+                    let _ = model.take_device_captures();
+                }
             }
             device.synchronize()?;
             rollback_s += tr.elapsed().as_secs_f64();

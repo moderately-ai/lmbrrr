@@ -101,6 +101,32 @@ impl MixedLinear {
         }
         if mm2d_cfg.enabled && !mm2d_cfg.planar_only && n_rows >= mm2d_cfg.min_n {
             if let candle::Device::Metal(dev) = weight.device() {
+                // Non-planar planes DUPLICATE the weight on-device. Exceeding
+                // the GPU working-set budget does not error — it silently
+                // corrupts resident buffers (twice documented on the 18 GB
+                // M3) — so stop building planes when the next one would come
+                // within 10% of the budget. Planar mode replaces the raw copy
+                // and does not need this guard.
+                let projected = dev.current_allocated_size()
+                    + weight.storage_size_in_bytes();
+                if projected as f64 > dev.recommended_max_working_set_size() as f64 * 0.9 {
+                    static BUDGET_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+                    BUDGET_WARNED.get_or_init(|| {
+                        eprintln!(
+                            "warning: skipping further mm2d plane builds — GPU allocation would approach the working-set budget (use LMBRRR_MM2D_PLANAR=1 or LMBRRR_MM2D_MIN_N)"
+                        );
+                    });
+                    let _ = mm2d.set(None);
+                    let _ = mm2d_q2.set(None);
+                    return Ok(Self::QMatMul {
+                        matmul: Arc::new(QMatMul::from_qtensor(weight)?),
+                        force_f32_input: true,
+                        bf16_direct,
+                        mm2d: Arc::new(mm2d),
+                        mm2d_q2: Arc::new(mm2d_q2),
+                        mm2d_cfg,
+                    });
+                }
                 match weight.dtype() {
                     GgmlDType::Q4K => match crate::mm2d::Mm2dPlanes::from_qtensor(
                         &weight,

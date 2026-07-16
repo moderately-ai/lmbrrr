@@ -123,7 +123,15 @@ impl Mm2dConfig {
                     .ok()
                     .or_else(default_plane_cache_dir)
             },
-            planar_only: std::env::var(k::MM2D_PLANAR).is_ok_and(|v| v == "1"),
+            planar_only: {
+                let planar = std::env::var(k::MM2D_PLANAR).is_ok_and(|v| v == "1");
+                // Planar without the master switch silently does nothing —
+                // indistinguishable from a planar run except by throughput.
+                if planar && !std::env::var(k::MM2D).is_ok_and(|v| v != "0") {
+                    eprintln!("warning: LMBRRR_MM2D_PLANAR=1 has no effect without LMBRRR_MM2D=1");
+                }
+                planar
+            },
             fused_verify_argmax: std::env::var(k::FUSED_VERIFY_ARGMAX).is_ok_and(|v| v == "1"),
         }
     }
