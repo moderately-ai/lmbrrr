@@ -1397,24 +1397,31 @@ mod gguf_drafter_tests {
         // 5 tap layers). A wrong concat order/layout is invisible to a uniform
         // random context but degenerate with this structure.
         let scales = [0.063f64, 0.31, 0.50, 0.55, 1.66];
+        let rows = 27; // match the e2e prompt length that fails
         let parts: Vec<Tensor> = scales
             .iter()
-            .map(|s| Tensor::randn(0f32, *s as f32, (1, 4, hidden), &device))
+            .map(|s| Tensor::randn(0f32, *s as f32, (1, rows, hidden), &device))
             .collect::<candle::Result<_>>()?;
         let refs: Vec<&Tensor> = parts.iter().collect();
-        let mut raw_ctx = Tensor::cat(&refs, candle::D::Minus1)?;
-        // Inject massive-activation outliers (real captures had maxabs ~50-81)
-        // into a few feature dims — these overflow a naive bf16 forward.
         let cap = drafter.config.target_layer_ids.len() * hidden;
         let mut spike = vec![0f32; cap];
         for d in [37usize, 512, 4096, cap - 3] {
             spike[d] = 80.0;
         }
-        let spike = Tensor::from_vec(spike, (1, 1, cap), &device)?.broadcast_as((1, 4, cap))?;
-        raw_ctx = raw_ctx.add(&spike)?.to_dtype(DType::BF16)?;
+        let spike = Tensor::from_vec(spike, (1, 1, cap), &device)?.broadcast_as((1, rows, cap))?;
+        let raw_ctx = Tensor::cat(&refs, candle::D::Minus1)?.add(&spike)?.to_dtype(DType::BF16)?;
         drafter.append_context(&raw_ctx, 0)?;
-        let proposal = drafter.propose_with_diagnostics(100u32, 4, bs)?;
+        let proposal = drafter.propose_with_diagnostics(9419u32, rows, bs)?;
         assert_eq!(proposal.tokens.len(), bs);
+        if let Some(bh) = &proposal.block_hidden {
+            let bh = bh.to_dtype(DType::F32)?;
+            eprintln!(
+                "block_hidden {:?} absmean {:.3} finite={}",
+                bh.dims(),
+                bh.abs()?.mean_all()?.to_scalar::<f32>()?,
+                bh.sum_all()?.to_scalar::<f32>()?.is_finite()
+            );
+        }
         if let Some(bl) = &proposal.base_logits {
             let bl = bl.to_dtype(DType::F32)?;
             let per_pos_argmax = bl.argmax(candle::D::Minus1)?.flatten_all()?.to_vec1::<u32>()?;
