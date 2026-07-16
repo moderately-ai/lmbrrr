@@ -103,6 +103,11 @@ struct SpecArgs {
 struct ProfileArgs {
     #[command(flatten)]
     model: ModelArgs,
+    /// Chunk width to profile: 1 = plain decode steps; 5 = verify-shaped
+    /// chunks (block_size 4 + anchor) — attributes the per-round verify cost
+    /// by component under whatever route env is set (LMBRRR_MM2D etc.).
+    #[arg(long, default_value_t = 1)]
+    verify_width: usize,
 }
 
 #[derive(Args, Debug)]
@@ -1174,7 +1179,12 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
     Ok(())
 }
 
-fn profile_decode(model: &mut Qwen35CausalLM, device: &Device, ids: &[u32]) -> Result<()> {
+fn profile_decode(
+    model: &mut Qwen35CausalLM,
+    device: &Device,
+    ids: &[u32],
+    width: usize,
+) -> Result<()> {
     use candle::D;
     use std::collections::HashMap;
 
@@ -1189,22 +1199,41 @@ fn profile_decode(model: &mut Qwen35CausalLM, device: &Device, ids: &[u32]) -> R
 
     let steps = 24usize;
     let mut offset = ids.len();
-    for _ in 0..steps {
-        let next = logits
-            .argmax(D::Minus1)?
-            .to_dtype(DType::U32)?
-            .flatten_all()?
-            .to_vec1::<u32>()?[0];
-        let step = Tensor::from_slice(&[next], (1, 1), device)?;
-        logits = model.forward(&step, offset)?;
-        device.synchronize()?;
-        offset += 1;
+    if width == 1 {
+        for _ in 0..steps {
+            let next = logits
+                .argmax(D::Minus1)?
+                .to_dtype(DType::U32)?
+                .flatten_all()?
+                .to_vec1::<u32>()?[0];
+            let step = Tensor::from_slice(&[next], (1, 1), device)?;
+            logits = model.forward(&step, offset)?;
+            device.synchronize()?;
+            offset += 1;
+        }
+    } else {
+        // Verify-shaped chunks: forward `width` tokens per step through the
+        // full-logits path (what the spec verify runs). Token identity is
+        // irrelevant to timing; reuse the prompt's first `width` ids.
+        let chunk: Vec<u32> = ids.iter().cycle().take(width).copied().collect();
+        for _ in 0..steps {
+            let chunk_input = Tensor::from_slice(&chunk, (1, width), device)?;
+            let logits = model.forward_all_logits(&chunk_input, offset)?;
+            // Include the verify's argmax readback in the step, as spec does.
+            let _ = logits
+                .argmax(D::Minus1)?
+                .to_dtype(DType::U32)?
+                .flatten_all()?
+                .to_vec1::<u32>()?;
+            device.synchronize()?;
+            offset += width;
+        }
     }
 
-    // Aggregate decode-step events (seq_len == 1) by component.
+    // Aggregate step events (seq_len == width) by component.
     let mut agg: HashMap<String, (f64, usize)> = HashMap::new();
     for e in prof.events() {
-        if e.seq_len != 1 {
+        if e.seq_len != width {
             continue;
         }
         let slot = agg.entry(e.component.clone()).or_default();
@@ -1215,11 +1244,11 @@ fn profile_decode(model: &mut Qwen35CausalLM, device: &Device, ids: &[u32]) -> R
     let mut rows: Vec<_> = agg.into_iter().collect();
     rows.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
     println!(
-        "profiled {steps} decode steps; summed op-time {:.1} ms ({:.2} ms/token)",
+        "profiled {steps} steps at width {width}; summed op-time {:.1} ms ({:.2} ms/step)",
         total * 1000.0,
         total * 1000.0 / steps as f64
     );
-    println!("{:<40} {:>10} {:>8} {:>6}", "component", "ms/token", "calls", "pct");
+    println!("{:<40} {:>10} {:>8} {:>6}", "component", "ms/step", "calls", "pct");
     for (name, (secs, calls)) in rows {
         println!(
             "{:<40} {:>10.3} {:>8} {:>6.1}",
@@ -1493,7 +1522,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
         GgufCmd::Profile(a) => {
             let (mut model, ids, _eos, _ctx, _tok, _load_seconds) =
                 load_gguf_model(&a.model, &device)?;
-            profile_decode(&mut model, &device, &ids)
+            profile_decode(&mut model, &device, &ids, a.verify_width)
         }
     }
 }
