@@ -119,6 +119,13 @@ struct SpecArgs {
     /// reproducing the MiniCPM campaign's ungated-PLD lesson.
     #[arg(long)]
     pld: bool,
+
+    /// Two-branch tree verification: when the drafter's runner-up root token
+    /// is live, verify [anchor, a_1..a_3, b_1..b_3] in one flattened 7-row
+    /// chunk (fits the flat m<=8 tensor tile) and commit the longer branch.
+    /// Exact-argmax acceptance only.
+    #[arg(long)]
+    tree: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1431,6 +1438,7 @@ fn spec_decode(
     readvance_rollback: bool,
     accept_margin: Option<f32>,
     use_pld: bool,
+    use_tree: bool,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -1499,6 +1507,8 @@ fn spec_decode(
     let mut indexed = 0usize;
     let mut pld_rounds = 0usize;
     let mut pld_accepted = 0usize;
+    let mut tree_rounds = 0usize;
+    let mut alt_wins = 0usize;
     let mut offset = ids.len();
     let mut committed: Vec<u32> = vec![anchor];
     let mut rounds = 0usize;
@@ -1527,12 +1537,110 @@ fn spec_decode(
         } else {
             None
         };
-        let (drafts, used_pld) = match copy_draft {
-            Some(d) => {
+        // Tree round: verify [anchor, a_1..a_tw, b_1..b_tw] as one flattened
+        // chunk (tw = 3 keeps 1 + 2*tw = 7 within the flat m<=8 tensor tile)
+        // and commit the longer-accepted branch. Fires only when the
+        // runner-up root is live (distinct token).
+        let mut pre_drafts: Option<Vec<u32>> = None;
+        if use_tree && copy_draft.is_none() {
+            const TW: usize = 3;
+            let tp = Instant::now();
+            let p = drafter.propose_branching(anchor, offset, width)?;
+            propose_s += tp.elapsed().as_secs_f64();
+            if p.alt_tokens.len() >= TW && p.tokens.len() >= TW && p.alt_tokens[0] != p.tokens[0]
+            {
+                let a = &p.tokens[..TW];
+                let b = &p.alt_tokens[..TW];
+                let snapshot = model.snapshot_decode_state();
+                let mut flat = Vec::with_capacity(1 + 2 * TW);
+                flat.push(anchor);
+                flat.extend_from_slice(a);
+                flat.extend_from_slice(b);
+                let flat_input = Tensor::from_slice(&flat, (1, flat.len()), device)?;
+                model.set_device_capture(Some(layers.clone()));
+                let tv = Instant::now();
+                let logits = model.forward_tree_all_logits(&flat_input, offset, TW)?;
+                let targets = logits
+                    .argmax(D::Minus1)?
+                    .to_dtype(DType::U32)?
+                    .flatten_all()?
+                    .to_vec1::<u32>()?;
+                verify_s += tv.elapsed().as_secs_f64();
+                drop(logits);
+                let caps = model.take_device_captures();
+                let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
+                drop(caps);
+
+                let main_accepted = a
+                    .iter()
+                    .zip(targets[..TW].iter())
+                    .take_while(|(d, t)| d == t)
+                    .count();
+                let alt_accepted = if targets[0] == b[0] {
+                    1 + b[1..]
+                        .iter()
+                        .zip(targets[TW + 1..].iter())
+                        .take_while(|(d, t)| d == t)
+                        .count()
+                } else {
+                    0
+                };
+                let on_alt = alt_accepted > main_accepted;
+                let accepted = main_accepted.max(alt_accepted);
+                let winner: &[u32] = if on_alt { b } else { a };
+                let bonus_row = if on_alt { TW + alt_accepted } else { main_accepted };
+                let bonus = targets[bonus_row];
+
+                let ctx_rows = if on_alt {
+                    Tensor::cat(
+                        &[ctx_feat.narrow(1, 0, 1)?, ctx_feat.narrow(1, TW + 1, accepted)?],
+                        1,
+                    )?
+                    .contiguous()?
+                } else {
+                    ctx_feat.narrow(1, 0, accepted + 1)?.contiguous()?
+                };
+                drop(ctx_feat);
+                drafter.append_context(&ctx_rows, offset)?;
+                drop(ctx_rows);
+
+                let tr = Instant::now();
+                model.rollback_tree(&snapshot, TW, on_alt, accepted)?;
+                device.synchronize()?;
+                rollback_s += tr.elapsed().as_secs_f64();
+
+                offset += accepted + 1;
+                committed.extend_from_slice(&winner[..accepted]);
+                committed.push(bonus);
+                accepted_total += accepted;
+                rounds += 1;
+                tree_rounds += 1;
+                if on_alt {
+                    alt_wins += 1;
+                }
+                anchor = bonus;
+                if committed[committed.len() - (accepted + 1)..]
+                    .iter()
+                    .any(|&t| t == eos)
+                {
+                    if let Some(pos) = committed.iter().position(|&t| t == eos) {
+                        committed.truncate(pos + 1);
+                    }
+                    break;
+                }
+                continue;
+            }
+            // Alt root dead: fall through to a plain round with the already-
+            // proposed main chain.
+            pre_drafts = Some(p.tokens);
+        }
+        let (drafts, used_pld) = match (copy_draft, pre_drafts) {
+            (Some(d), _) => {
                 pld_rounds += 1;
                 (d, true)
             }
-            None => {
+            (None, Some(d)) => (d, false),
+            (None, None) => {
                 let tp = Instant::now();
                 let proposal = if dbg && rounds == 0 {
                     drafter.propose_with_diagnostics(anchor, offset, width)?
@@ -1696,6 +1804,8 @@ fn spec_decode(
             "accept_margin": accept_margin,
             "pld_rounds": pld_rounds,
             "pld_accepted": pld_accepted,
+            "tree_rounds": tree_rounds,
+            "alt_wins": alt_wins,
             "overhead_seconds": decode_seconds - propose_s - verify_s,
         })
     );
@@ -1740,6 +1850,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 spec_run.readvance_rollback,
                 a.accept_margin,
                 a.pld,
+                a.tree,
             )
         }
         GgufCmd::Profile(a) => {

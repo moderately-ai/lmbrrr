@@ -2585,6 +2585,31 @@ impl Qwen35CausalLM {
         let hidden = self.model.forward_ids(input_ids, offset)?;
         self.lm_head.forward(&hidden)
     }
+
+    /// Two-branch tree verify over the flattened [anchor, a_1..a_w, b_1..b_w]
+    /// layout: dense logits for all 1 + 2w rows. Commit the winner with
+    /// rollback_tree before the next forward.
+    pub fn forward_tree_all_logits(
+        &mut self,
+        input_ids: &Tensor,
+        offset: usize,
+        branch_width: usize,
+    ) -> Result<Tensor> {
+        let embeds = self.model.embed(input_ids)?;
+        let hidden = self.model.forward_tree_embeds(&embeds, offset, branch_width)?;
+        self.lm_head.forward(&hidden)
+    }
+
+    pub fn rollback_tree(
+        &mut self,
+        snapshot: &DecodeStateSnapshot,
+        branch_width: usize,
+        on_alt: bool,
+        accepted: usize,
+    ) -> Result<()> {
+        self.model
+            .rollback_tree(snapshot, branch_width, on_alt, accepted)
+    }
 }
 
 impl CausalTextModel for Qwen35CausalLM {
