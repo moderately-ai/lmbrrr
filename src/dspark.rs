@@ -534,13 +534,16 @@ impl DsparkDrafter {
         gguf: &crate::gguf::GgufFile,
         device: &Device,
         dtype: DType,
-        _ctx: &crate::model_ctx::ModelCtx,
+        ctx: &crate::model_ctx::ModelCtx,
         propose_timing: bool,
     ) -> Result<Self> {
         let config = DsparkConfig::from_gguf(gguf)?;
         let head_dim = config.head_dim;
         let eps = config.rms_norm_eps;
         let rd = |name: &str| read_dense(gguf, name, device, dtype);
+        // Keep the 248k-row lm_head packed (Q4_1) rather than expanding to
+        // dense bf16 — a ~1.8 GB save so the drafter fits alongside the target.
+        let lm_head = ctx.quantized_linear(gguf.read_qtensor("output.weight", device)?)?;
         let norm = |name: &str| -> Result<RmsNorm> {
             Ok(RmsNorm { weight: rd(name)?, eps })
         };
@@ -601,7 +604,7 @@ impl DsparkDrafter {
             norm: norm("output_norm.weight")?,
             fc: Linear::new(rd("dspark.fc.weight")?, None),
             hidden_norm: norm("dspark.hidden_norm.weight")?,
-            lm_head: MixedLinear::dense(Linear::new(rd("output.weight")?, None)),
+            lm_head,
             markov_w1: rd("dspark.markov_head_a.weight")?,
             markov_w2: MixedLinear::dense(Linear::new(rd("dspark.markov_head_b.weight")?, None)),
             draft_vocab_ids: None,
