@@ -55,7 +55,14 @@ impl MixedLinear {
         // is reported via load_seconds.
         let mm2d = std::sync::OnceLock::new();
         let mm2d_q2 = std::sync::OnceLock::new();
-        if mm2d_cfg.enabled {
+        // min_n gates the BUILD, not just the route: planes are a second
+        // device-resident copy of the weight, and building them for weights
+        // the forward will never route (n < min_n) blows the M3's ~13 GB GPU
+        // working-set budget — which does not error, it silently corrupts
+        // resident buffers (measured: the spec prefill read f32 1.0 bit
+        // patterns as token ids with all ~5.3 GB of Q2_0 planes resident).
+        let n_rows = weight.shape().dims().first().copied().unwrap_or(0);
+        if mm2d_cfg.enabled && n_rows >= mm2d_cfg.min_n {
             if let candle::Device::Metal(dev) = weight.device() {
                 match weight.dtype() {
                     GgmlDType::Q4K => match crate::mm2d::Mm2dPlanes::from_qtensor(

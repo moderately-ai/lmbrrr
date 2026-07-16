@@ -985,6 +985,20 @@ fn spec_decode(
     let width = drafter.config.block_size;
     let drafter_load_s = load.elapsed().as_secs_f64();
 
+    // Residency audit: exceeding the GPU working-set budget does NOT error on
+    // Metal — it silently corrupts resident buffers (seen twice on the 18 GB
+    // M3: drafter-weight corruption pre-packed-embed, and f32-1.0 token ids
+    // when the full ~5.3 GB of mm2d Q2_0 planes were built). Surface the
+    // numbers so an over-budget run is diagnosable from its log.
+    if let Device::Metal(dev) = device {
+        let allocated = dev.current_allocated_size() as f64 / 1e9;
+        let budget = dev.recommended_max_working_set_size() as f64 / 1e9;
+        eprintln!("gpu allocated {allocated:.2} GB / working-set budget {budget:.2} GB");
+        if allocated > budget {
+            eprintln!("warning: GPU allocation exceeds the working-set budget — expect silent buffer corruption, reduce residency (LMBRRR_MM2D_MIN_N, packed embed)");
+        }
+    }
+
     let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
 
     // Prefill with tap-layer capture, seed the drafter context.
