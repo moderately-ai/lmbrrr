@@ -63,7 +63,11 @@ Kernel A/B log (all M3, bench-gemv GB/s @ 17408×5120), profile-guided:
 - 16-bit yl, tpb=16: → 86.8 [LOSS — too few blocks in flight]
 - 16-bit yl, tpb=8: → **106.2 [WIN]**
 
-Q2_0 now 106 GB/s vs Q4K's 142 (75%). Remaining incremental kernel levers (untried): vectorized 34-B block loads (scattered per-byte reads today), dedup the per-block `d` read (8 threads reload it). Q4K parity likely needs a ground-up simdgroup-matrix rewrite (the q4k k1-keystone equivalent) — a real project, not a tweak.
+Q2_0 now 106 GB/s vs Q4K's 142 (75%).
+
+- **int8-activation (on-the-fly, per-slice scale): 60.2 GB/s [LOSS]** — output stayed coherent (per-16-elem int8 preserves quality) but the per-block quantization ALU (max pass + rint/clamp every block) dwarfs the int8 register/occupancy win. Reverted (candle f482c517). A *proper* int8 path must pre-quantize the activation ONCE per matmul (a separate quantize step + candle-core `fwd_mv` wiring + a global-scale quality check) — a distinct bigger project, not an in-kernel tweak.
+
+**KERNEL EXHAUSTION (measured):** the incremental space is explored — nr2 ✓, 16-bit yl ✓ (→106 GB/s, 14.63 tok/s, the shipped best), FMA ✗, tpb16 ✗, int8-on-the-fly ✗. Full Q4K parity (106→142) now requires a ground-up **simdgroup-matrix rewrite** of the Q2_0 GEMV (q4k k1-keystone equivalent); the other named lever is **pre-quantized int8**. Both are major projects. Best-shipped single-stream ceiling: **14.63 tok/s**. The bigger multiplier from here is DSpark spec decode (goal phase 2).
 
 ## MEASURED LIMITER (2026-07-15, gpucapture + gpudebug replay profile — the macOS 27 headless flow, see metal_notes.md / [[gputrace-cli-profiling]])
 
