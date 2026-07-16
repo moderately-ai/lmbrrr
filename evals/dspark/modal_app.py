@@ -358,6 +358,7 @@ def prepare_cache(
     cache_name: str = "target-cache-smoke",
     local_batch_size: int = 8,
     target_model: str | None = "/vol/models/minicpm-v46-fakequant-q4kft",
+    config: str = TRAIN_CONFIG,
 ) -> None:
     """DeepSpec target cache (hidden states via hooks) for the given JSONL.
 
@@ -375,7 +376,7 @@ def prepare_cache(
             "python",
             "/deepspec/scripts/data/prepare_target_cache.py",
             "--config",
-            TRAIN_CONFIG,
+            config,
             "--train-data-path",
             f"/vol/{train_data}",
             "--output-dir",
@@ -411,6 +412,7 @@ def _train_impl(
     draft_init_checkpoint: str | None,
     lr: float | None,
     target_model: str,
+    config: str = TRAIN_CONFIG,
 ) -> None:
     """Shared trainer invocation for the H100:4 and H100:8 entrypoints.
 
@@ -445,7 +447,7 @@ def _train_impl(
     if logging_steps is not None:
         opts.append(f"logging.logging_steps={logging_steps}")
     opts.append(f"train.torch_compile={'true' if torch_compile else 'false'}")
-    cmd = ["python", "/deepspec/train.py", "--config", TRAIN_CONFIG]
+    cmd = ["python", "/deepspec/train.py", "--config", config]
     for opt in opts:
         cmd.extend(["--opts", opt])
     env = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
@@ -526,6 +528,7 @@ def train(
     draft_init_checkpoint: str | None = None,
     lr: float | None = None,
     target_model: str = "/vol/models/minicpm-v46-fakequant-q4kft",
+    config: str = TRAIN_CONFIG,
 ) -> None:
     """Train the drafter on a prepared cache (4x H100); see _train_impl."""
     _train_impl(
@@ -540,6 +543,7 @@ def train(
         draft_init_checkpoint,
         lr,
         target_model,
+        config,
     )
 
 
@@ -556,6 +560,7 @@ def train8(
     draft_init_checkpoint: str | None = None,
     lr: float | None = None,
     target_model: str = "/vol/models/minicpm-v46-fakequant-q4kft",
+    config: str = TRAIN_CONFIG,
 ) -> None:
     """8x H100 variant of train (same recipe, fixed global batch: pure DDP
     speedup). First use: a 1-epoch probe on the 40k cache to measure the
@@ -572,6 +577,7 @@ def train8(
         draft_init_checkpoint,
         lr,
         target_model,
+        config,
     )
 
 
