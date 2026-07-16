@@ -227,6 +227,9 @@ fn spec_decode(
     let mut rounds = 0usize;
     let mut accepted_total = 0usize;
 
+    // Capture per-position DeltaNet recurrent state during verify so a partial
+    // accept can roll the hybrid mixer state back to the commit point.
+    model.set_verify_state_capture(true);
     let decode = Instant::now();
     while committed.len() < max_new_tokens {
         let snapshot = model.snapshot_decode_state();
@@ -279,6 +282,7 @@ fn spec_decode(
         }
     }
     let decode_seconds = decode.elapsed().as_secs_f64();
+    model.set_verify_state_capture(false);
     committed.truncate(max_new_tokens);
     let text = tok
         .decode(&committed, true)
