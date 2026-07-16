@@ -23,8 +23,8 @@ use candle::quantized::{GgmlDType, QTensor};
 use candle::{DType, MetalDevice, Storage, Tensor};
 use candle_metal_kernels::metal::Buffer;
 use candle_metal_kernels::{
-    call_quantized_matmul_mm2d_q2_0, call_quantized_matmul_mm2d_q4k,
-    call_quantized_matmul_mm2d_q4k_splitk, Mm2dQ2Variant,
+    call_quantized_matmul_mm2d_q2_0, call_quantized_matmul_mm2d_q2_0_splitk,
+    call_quantized_matmul_mm2d_q4k, call_quantized_matmul_mm2d_q4k_splitk, Mm2dQ2Variant,
 };
 
 /// Tensor-op route configuration. Constructed ONCE at the entrypoint
@@ -449,25 +449,60 @@ pub fn mm2d_q2_0_forward(xs: &Tensor, planes: &Mm2dQ2Planes, cfg: &Mm2dConfig) -
         .with_label("mm2d_q2_dst")
         .build()?;
     let variant = q2_variant_for_k(planes.k);
+    // Split-K for under-occupied grids (same policy as the q4_K route):
+    // small-N shapes dispatch Npad/64 threadgroups on a serial K loop, so
+    // partition K until the grid reaches the target threadgroup count.
+    let n_splits = if cfg.splitk {
+        (cfg.split_target_tgs / (planes.n_pad / 64)).clamp(1, planes.k / 128)
+    } else {
+        1
+    };
+    let partials = if n_splits > 1 {
+        Some(
+            device
+                .new_buffer_builder()
+                .with_size(n_splits * 8 * planes.n_pad * 4)
+                .with_label("mm2d_q2_splitk_partials")
+                .build()?,
+        )
+    } else {
+        None
+    };
     let dispatch = || -> Result<()> {
         let encoder = device.command_encoder().context("mm2d q2 encoder")?;
         let mut row = 0usize;
         while row < m {
             let mc = (m - row).min(8);
-            call_quantized_matmul_mm2d_q2_0(
-                device.metal_device(),
-                &encoder,
-                device.kernels(),
-                (mc, planes.n, planes.n_pad, planes.k),
-                ms.buffer(),
-                lhs_offset + row * planes.k * 2,
-                &planes.codes,
-                &planes.d,
-                row * planes.n * 2,
-                &dst,
-                variant,
-            )
-            .context("mm2d q2_0 dispatch")?;
+            match &partials {
+                Some(partials) => call_quantized_matmul_mm2d_q2_0_splitk(
+                    device.metal_device(),
+                    &encoder,
+                    device.kernels(),
+                    (mc, planes.n, planes.n_pad, planes.k, n_splits),
+                    ms.buffer(),
+                    lhs_offset + row * planes.k * 2,
+                    &planes.codes,
+                    &planes.d,
+                    partials,
+                    row * planes.n * 2,
+                    &dst,
+                )
+                .context("mm2d q2_0 splitk dispatch")?,
+                None => call_quantized_matmul_mm2d_q2_0(
+                    device.metal_device(),
+                    &encoder,
+                    device.kernels(),
+                    (mc, planes.n, planes.n_pad, planes.k),
+                    ms.buffer(),
+                    lhs_offset + row * planes.k * 2,
+                    &planes.codes,
+                    &planes.d,
+                    row * planes.n * 2,
+                    &dst,
+                    variant,
+                )
+                .context("mm2d q2_0 dispatch")?,
+            }
             row += mc;
         }
         Ok(())
