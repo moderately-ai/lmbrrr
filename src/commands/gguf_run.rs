@@ -40,6 +40,12 @@ pub(crate) struct GgufRunArgs {
     /// component (deltanet_recurrent_rule / mlp / attention / norms / ...).
     #[arg(long)]
     pub profile: bool,
+
+    /// Enable DSpark speculative decoding with the given drafter GGUF
+    /// (Ternary-Bonsai-27B-dspark-Q4_1.gguf). Draft width defaults to the
+    /// drafter's block_size.
+    #[arg(long)]
+    pub spec_drafter: Option<PathBuf>,
 }
 
 fn bench_gemv(device: &Device) -> Result<()> {
@@ -173,6 +179,127 @@ fn profile_decode(model: &mut Qwen35CausalLM, device: &Device, ids: &[u32]) -> R
     Ok(())
 }
 
+fn argmax_row(logits: &Tensor) -> Result<u32> {
+    Ok(logits
+        .argmax(D::Minus1)?
+        .to_dtype(DType::U32)?
+        .flatten_all()?
+        .to_vec1::<u32>()?[0])
+}
+
+/// DSpark speculative decode: prefill+capture the target's tap layers, seed the
+/// drafter context, then per round draft a block, verify it in one target pass,
+/// accept the longest exact-match prefix, roll the target KV back to the
+/// commit point, and extend the drafter context with the committed captures.
+#[allow(clippy::too_many_arguments)]
+fn spec_decode(
+    model: &mut Qwen35CausalLM,
+    drafter_path: &std::path::Path,
+    device: &Device,
+    ids: &[u32],
+    eos: u32,
+    max_new_tokens: usize,
+    ctx: &ModelCtx,
+    tok: &tokenizers::Tokenizer,
+) -> Result<()> {
+    use lmbrrr::dspark::DsparkDrafter;
+    let load = Instant::now();
+    let dgguf = GgufFile::open(drafter_path)?;
+    let mut drafter = DsparkDrafter::load_gguf(&dgguf, device, DType::BF16, ctx, false)?;
+    let layers = drafter.config.target_layer_ids.clone();
+    let width = drafter.config.block_size;
+    let drafter_load_s = load.elapsed().as_secs_f64();
+
+    // Prefill with tap-layer capture, seed the drafter context.
+    model.clear_cache();
+    drafter.clear_context();
+    model.set_device_capture(Some(layers.clone()));
+    let input = Tensor::from_slice(ids, (1, ids.len()), device)?;
+    let logits = model.forward_all_logits(&input, 0)?;
+    device.synchronize()?;
+    let caps = model.take_device_captures();
+    let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
+    drafter.append_context(&ctx_feat, 0)?;
+
+    let mut anchor = argmax_row(&logits.narrow(1, ids.len() - 1, 1)?)?;
+    let mut offset = ids.len();
+    let mut committed: Vec<u32> = Vec::new();
+    let mut rounds = 0usize;
+    let mut accepted_total = 0usize;
+
+    let decode = Instant::now();
+    while committed.len() < max_new_tokens {
+        let snapshot = model.snapshot_decode_state();
+        let drafts = drafter.propose(anchor, offset, width)?.tokens;
+        let mut chunk = Vec::with_capacity(width + 1);
+        chunk.push(anchor);
+        chunk.extend_from_slice(&drafts);
+        let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), device)?;
+
+        model.set_device_capture(Some(layers.clone()));
+        let logits = model.forward_all_logits(&chunk_input, offset)?;
+        let targets = logits
+            .argmax(D::Minus1)?
+            .to_dtype(DType::U32)?
+            .flatten_all()?
+            .to_vec1::<u32>()?;
+        let caps = model.take_device_captures();
+        let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
+
+        let accepted = drafts
+            .iter()
+            .zip(targets.iter())
+            .take_while(|(d, t)| d == t)
+            .count();
+        let bonus = targets[accepted];
+        if accepted != width {
+            model.rollback_to_prefix(&snapshot, accepted + 1)?;
+            device.synchronize()?;
+        }
+        // Extend the drafter context with the committed captures (anchor +
+        // accepted drafts); the bonus's true hidden is recomputed next round.
+        let committed_feat = ctx_feat.narrow(1, 0, accepted + 1)?.contiguous()?;
+        drafter.append_context(&committed_feat, offset)?;
+        offset += accepted + 1;
+
+        committed.extend_from_slice(&drafts[..accepted]);
+        committed.push(bonus);
+        accepted_total += accepted;
+        rounds += 1;
+        anchor = bonus;
+
+        if committed[committed.len() - (accepted + 1)..]
+            .iter()
+            .any(|&t| t == eos)
+        {
+            if let Some(p) = committed.iter().position(|&t| t == eos) {
+                committed.truncate(p + 1);
+            }
+            break;
+        }
+    }
+    let decode_seconds = decode.elapsed().as_secs_f64();
+    committed.truncate(max_new_tokens);
+    let text = tok
+        .decode(&committed, true)
+        .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+
+    println!("--- SPEC GENERATED ({} tokens) ---\n{text}\n---", committed.len());
+    println!(
+        "{}",
+        serde_json::json!({
+            "drafter_load_seconds": drafter_load_s,
+            "generated_tokens": committed.len(),
+            "decode_seconds": decode_seconds,
+            "decode_tokens_per_second": committed.len() as f64 / decode_seconds.max(f64::EPSILON),
+            "rounds": rounds,
+            "mean_accepted_per_round": accepted_total as f64 / rounds.max(1) as f64,
+            "draft_width": width,
+        })
+    );
+    Ok(())
+}
+
 pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
     let dtype = DType::BF16;
@@ -212,6 +339,19 @@ pub(crate) fn gguf_run(args: GgufRunArgs) -> Result<()> {
 
     if args.profile {
         return profile_decode(&mut model, &device, &ids);
+    }
+
+    if let Some(drafter_path) = args.spec_drafter.as_ref() {
+        return spec_decode(
+            &mut model,
+            drafter_path,
+            &device,
+            &ids,
+            eos,
+            args.max_new_tokens,
+            &ctx,
+            &tok,
+        );
     }
 
     let prefill = Instant::now();

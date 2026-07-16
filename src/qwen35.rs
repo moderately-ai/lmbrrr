@@ -2536,6 +2536,41 @@ impl Qwen35CausalLM {
     pub fn set_profiler(&mut self, profiler: Option<Qwen35Profiler>) {
         self.model.set_profiler(profiler);
     }
+
+    // --- DSpark spec-decode target surface (delegates to the inner text model
+    // + this head). The GGUF text target has no vision, so these are the plain
+    // text-only forms of the MiniCpm methods the spec loop uses. ---
+
+    pub fn set_device_capture(&mut self, layers: Option<Vec<usize>>) {
+        self.model.set_device_capture(layers);
+    }
+
+    pub fn take_device_captures(&mut self) -> Vec<Tensor> {
+        self.model.take_device_captures()
+    }
+
+    pub fn set_verify_state_capture(&mut self, on: bool) {
+        self.model.set_verify_state_capture(on);
+    }
+
+    pub fn snapshot_decode_state(&self) -> DecodeStateSnapshot {
+        self.model.snapshot_decode_state()
+    }
+
+    pub fn rollback_to_prefix(
+        &mut self,
+        snapshot: &DecodeStateSnapshot,
+        prefix_len: usize,
+    ) -> Result<()> {
+        self.model.rollback_to_prefix(snapshot, prefix_len)
+    }
+
+    /// Dense logits for every input position (verify forward): embed -> text
+    /// core (with capture) -> head.
+    pub fn forward_all_logits(&mut self, input_ids: &Tensor, offset: usize) -> Result<Tensor> {
+        let hidden = self.model.forward_ids(input_ids, offset)?;
+        self.lm_head.forward(&hidden)
+    }
 }
 
 impl CausalTextModel for Qwen35CausalLM {
