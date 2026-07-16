@@ -225,10 +225,11 @@ fn spec_decode(
             .map(|c| {
                 let f = c.to_dtype(DType::F32).unwrap();
                 format!(
-                    "{:?} mean {:.3} absmean {:.3}",
+                    "{:?} absmean {:.3} maxabs {:.1}",
                     c.dims(),
-                    f.mean_all().unwrap().to_scalar::<f32>().unwrap(),
-                    f.abs().unwrap().mean_all().unwrap().to_scalar::<f32>().unwrap()
+                    f.abs().unwrap().mean_all().unwrap().to_scalar::<f32>().unwrap(),
+                    f.abs().unwrap().max(D::Minus1).unwrap().max(D::Minus1).unwrap()
+                        .max(D::Minus1).unwrap().to_scalar::<f32>().unwrap()
                 )
             })
             .collect();
@@ -267,7 +268,13 @@ fn spec_decode(
             if let Some(bl) = &proposal.base_logits {
                 let bl = bl.to_dtype(DType::F32)?;
                 let am = bl.argmax(D::Minus1)?.flatten_all()?.to_vec1::<u32>()?;
-                eprintln!("round {}: base_logits argmax {am:?}", rounds + 1);
+                let mx = bl.max(D::Minus1)?.flatten_all()?.to_vec1::<f32>()?;
+                let sum = bl.sum_all()?.to_scalar::<f32>()?;
+                eprintln!(
+                    "round {}: base_logits argmax {am:?} max {mx:?} sum_finite={}",
+                    rounds + 1,
+                    sum.is_finite()
+                );
             }
             eprintln!("round {}: proposed {drafts:?}, verify...", rounds + 1);
         }
