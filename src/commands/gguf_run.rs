@@ -32,6 +32,10 @@ enum GgufCmd {
     /// Attach the per-op profiler and dump the decode-step breakdown by
     /// component (deltanet_recurrent_rule / mlp / attention / norms / ...).
     Profile(ProfileArgs),
+    /// Requantize a GGUF's 2D float tensors to a new ggml dtype (arch-agnostic
+    /// — works on the dspark drafter, which stock llama.cpp cannot quantize).
+    /// 1D and non-divisible tensors pass through unchanged; metadata is copied.
+    Requant(RequantArgs),
     /// Build the mm2d (tensor-op verify) plane artifact for a Q2_0 GGUF: repack
     /// every eligible weight into the planar layout and write the plane files
     /// next to the model. One-time; runs point at the artifact via
@@ -122,6 +126,71 @@ struct ProfileArgs {
     /// by component under whatever route env is set (LMBRRR_MM2D etc.).
     #[arg(long, default_value_t = 1)]
     verify_width: usize,
+}
+
+#[derive(Args, Debug)]
+struct RequantArgs {
+    /// Source GGUF.
+    #[arg(long)]
+    gguf: PathBuf,
+    /// Output GGUF path.
+    #[arg(long)]
+    out: PathBuf,
+    /// Target ggml dtype for 2D float tensors: q8_0 | q4_1 | q4k | q6k.
+    #[arg(long, default_value = "q8_0")]
+    dtype: String,
+}
+
+/// CPU-only requant: read every tensor, quantize eligible 2D float tensors to
+/// the target dtype, pass everything else (f32 norms, 1D, already-quantized)
+/// through, and write a fresh GGUF with the source metadata verbatim.
+fn requant(args: &RequantArgs) -> Result<()> {
+    use candle::quantized::{gguf_file, GgmlDType, QTensor};
+    let dtype = match args.dtype.as_str() {
+        "q8_0" => GgmlDType::Q8_0,
+        "q4_1" => GgmlDType::Q4_1,
+        "q4k" => GgmlDType::Q4K,
+        "q6k" => GgmlDType::Q6K,
+        other => anyhow::bail!("unsupported requant dtype {other}"),
+    };
+    let started = Instant::now();
+    let mut file = std::fs::File::open(&args.gguf)?;
+    let content = gguf_file::Content::read(&mut file)?;
+    let device = Device::Cpu;
+    let mut names: Vec<String> = content.tensor_infos.keys().cloned().collect();
+    names.sort();
+    let mut tensors: Vec<(String, QTensor)> = Vec::with_capacity(names.len());
+    let (mut converted, mut passed) = (0usize, 0usize);
+    for name in &names {
+        let qt = content.tensor(&mut file, name, &device)?;
+        let dims = qt.shape().dims().to_vec();
+        let eligible = matches!(qt.dtype(), GgmlDType::BF16 | GgmlDType::F16)
+            && dims.len() == 2
+            && dims[1] % dtype.block_size() == 0;
+        if eligible {
+            let t = qt.dequantize(&device)?;
+            tensors.push((name.clone(), QTensor::quantize(&t, dtype)?));
+            converted += 1;
+        } else {
+            tensors.push((name.clone(), qt));
+            passed += 1;
+        }
+    }
+    let metadata: Vec<(&str, &gguf_file::Value)> = content
+        .metadata
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect();
+    let tensor_refs: Vec<(&str, &QTensor)> =
+        tensors.iter().map(|(n, t)| (n.as_str(), t)).collect();
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&args.out)?);
+    gguf_file::write(&mut out, &metadata, &tensor_refs)?;
+    println!(
+        "requantized {converted} tensors to {dtype:?} ({passed} passed through) in {:.1}s -> {}",
+        started.elapsed().as_secs_f64(),
+        args.out.display()
+    );
+    Ok(())
 }
 
 #[derive(Args, Debug)]
@@ -1569,6 +1638,7 @@ fn spec_decode(
 pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
     match args.cmd {
+        GgufCmd::Requant(a) => requant(&a),
         GgufCmd::Repack(a) => repack(&device, &a),
         GgufCmd::BenchGemv => bench_gemv(&device),
         GgufCmd::BenchShapes => bench_shapes(&device),
