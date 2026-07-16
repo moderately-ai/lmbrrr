@@ -268,16 +268,15 @@ fn bench_gemv(device: &Device) -> Result<()> {
             _ => anyhow::bail!("x not metal"),
         };
         let xoff = xl.start_offset() * 2;
-        let variants: [(&'static str, usize, usize, usize); 9] = [
-            ("kernel_mul_mv_q2_0_bf16_mcx_2_8_2_0", 2, 8, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_4_8_2_0", 4, 8, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_8_8_2_0", 8, 8, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_2_8_2_1", 2, 8, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_4_8_2_1", 4, 8, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_8_8_2_1", 8, 8, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_4_4_2_0", 4, 4, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_4_16_2_0", 4, 16, 2),
-            ("kernel_mul_mv_q2_0_bf16_mcx_4_8_4_0", 4, 8, 4),
+        let variants: [(&'static str, usize, usize, usize); 8] = [
+            ("kernel_mul_mv_q2_0_bf16_mcx_2_8_2", 2, 8, 2),
+            ("kernel_mul_mv_q2_0_bf16_mcx_4_8_2", 4, 8, 2),
+            ("kernel_mul_mv_q2_0_bf16_mcx_8_8_2", 8, 8, 2),
+            ("kernel_mul_mv_q2_0_bf16_mcx_16_8_2", 16, 8, 2),
+            ("kernel_mul_mv_q2_0_bf16_mcx_8_4_2", 8, 4, 2),
+            ("kernel_mul_mv_q2_0_bf16_mcx_8_16_2", 8, 16, 2),
+            ("kernel_mul_mv_q2_0_bf16_mcx_4_8_4", 4, 8, 4),
+            ("kernel_mul_mv_q2_0_bf16_mcx_8_8_4", 8, 8, 4),
         ];
         for (name, nr, nc, nsg) in variants {
             let dst = mdev
