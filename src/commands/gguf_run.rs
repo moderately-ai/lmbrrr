@@ -452,6 +452,35 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
     let ctx = ModelCtx::default();
     eprintln!("profile-kernel: which={which} iters={iters} m={m} shape={n}x{k}");
 
+    // Occupancy-limiter diagnosis: print the two per-pipeline resources that cap
+    // occupancy — staticThreadgroupMemoryLength (bytes) and
+    // maxTotalThreadsPerThreadgroup (< 1024 ⇒ register pressure). No dispatch.
+    if which == "pipeline-info" {
+        use candle_metal_kernels::source::Source;
+        let kernels = mdev.kernels();
+        let dev = mdev.metal_device();
+        println!("{:<42} {:>8} {:>14}", "kernel", "maxTPT", "tgMem(B)");
+        for v in Mm2dQ2Variant::ALL {
+            let p = kernels.load_pipeline(dev, Source::Mm2dQ2_0, v.kernel)?;
+            println!(
+                "{:<42} {:>8} {:>14}",
+                v.kernel,
+                p.max_total_threads_per_threadgroup(),
+                p.static_threadgroup_memory_length()
+            );
+        }
+        for name in ["kernel_mul_mm2d_q4k_bf16", "kernel_mul_mm2d_q4k_bf16_t32"] {
+            let p = kernels.load_pipeline(dev, Source::Mm2dQ4k, name)?;
+            println!(
+                "{:<42} {:>8} {:>14}",
+                name,
+                p.max_total_threads_per_threadgroup(),
+                p.static_threadgroup_memory_length()
+            );
+        }
+        return Ok(());
+    }
+
     // Build whichever inputs the chosen kernel needs, then a `dispatch` closure.
     let q2_variant = match which {
         "mm2d-k32" => Some(Mm2dQ2Variant::T64_K32),

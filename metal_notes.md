@@ -264,30 +264,42 @@ One interface discrepancy in gpudebug 1.0: the `performance/timeline` node adver
 
 ## 5. Profile captured GPU work
 
-On M3/A17-class hardware or newer, `gpudebug` can collect a new GPU replay profile:
+On M3/A17-class hardware or newer, `gpudebug` collects a GPU replay profile. **Verified working recipe (2026-07-16, gpudebug 1.0, M3 Pro), with two corrections to the earlier notes:**
+
+1. **`profile run` only COLLECTS — you must then `profile load 0` (explicit index) before the `performance/*` tree is navigable.** Bare `profile load` returns `loaded_session_index: -1` and the tree stays EMPTY (every node `totalCount: 0`), which looks like a broken capture but is just the un-loaded state. `profile run --embed` alone is NOT enough.
+2. **`go performance` + `info --all` errors (`'performance' has no info handler`)** — ignore the "inspect the performance root via info" step from older notes; go straight to the counter groups.
+
+Also: after opening a session, `status` shows `replayer.state: loading` → `ready`; **wait for `ready` before `profile run`** (poll `status`). Use a persistent session for a multi-step investigation (open once, reuse `-s N`); `--oneshot` DOES work for a self-contained run **as long as the same invocation chains `profile run` → `profile load 0` → the `go` queries** (state does not survive across separate `--oneshot` processes).
 
 ```sh
-gpudebug --json -s 412 \
-  -c 'profile run --gpu-state default --exec overlapping --embed'
+# 1. open (slow: ~1 GB/trace); grab "Session N created." and wait for ready
+gpudebug --json -t workload.gputrace -o out -c 'status'      # -> Session 28, replayer loading
+gpudebug --json -s 28 -c 'status'                            # repeat until replayer.state=ready
+# 2. collect + LOAD (load 0 is mandatory) — ~4 s run + ~2 s load
+gpudebug --json -s 28 \
+  -c 'profile run --gpu-state default --exec overlapping' \
+  -c 'profile load 0'
+# 3. counters live at performance/timeline/counters/<group>; `go <group>`
+#    returns its sub-counters WITH values (no separate `info` needed).
+gpudebug --json -s 28 -c 'go performance/timeline/counters' -c 'list'   # 30 groups
+gpudebug --json -s 28 -c 'go performance/timeline/counters/occupancy'   # values inline
 ```
 
-After profiling, inspect the performance root first:
+The 30 counter groups (each `go <group>` yields named sub-counters as `%` or a bare number):
+
+- **occupancy**: `vs_/fs_/kernel_/total_occupancy` — % of max resident threads.
+- **occupancy_manager**: `occupancy_manager_target` (the occupancy the GPU is *willing* to run; <100% ⇒ GPU is deliberately capping) + `l1_eviction_rate`.
+- **alu**: `alu_utilization`. **f32**/**f16**: `_limiter` + `_utilization`. **instruction_throughput**: `_limiter` + `_utilization`.
+- **bandwidth**: `gpu_bandwidth` / `gpu_read_bandwidth` / `gpu_write_bandwidth` (unitless ≈ % of peak; read+write≈total).
+- **shader_launch_limiter**: `vertex_/fragment_/compute_shader_launch_limiter` (>80% ⇒ threads launch fine, not launch-bound).
+- **last_level_cache**, **mmu**, **active_cores**, plus texture/control_flow/address_generation/integer_* groups.
+
+**Reading the ladder** (per the WWDC M3 talk): a `_limiter` is the fraction of GPU-active time that unit gated issue; the highest `_limiter` across units is your bottleneck. Low occupancy with `occupancy_manager_target ≈ 100%` and low `l1_eviction_rate` ⇒ occupancy is capped by **register pressure** (not the manager, not cache) → 16-bit types / fewer live registers raise it.
+
+Older ad-hoc explore (per-encoder/per-shader COSTS, still valid, but the rich COUNTERS only exist under `performance/timeline/counters` after `profile load 0`):
 
 ```sh
-gpudebug --json -s 412 \
-  -c 'go performance' \
-  -c 'info --all' \
-  -c 'list'
-```
-
-Then explore:
-
-```sh
-gpudebug --json -s 412 -c 'go performance/encoders' -c 'list'
-gpudebug --json -s 412 -c 'go performance/commands' -c 'list'
-gpudebug --json -s 412 -c 'go performance/shaders' -c 'list'
-gpudebug --json -s 412 -c 'go performance/timeline' -c 'list'
-gpudebug --json -s 412 -c 'go performance/timeline/counters' -c 'list'
+gpudebug --json -s 28 -c 'go performance/timeline' -c 'list'   # encoders / counters / shaders
 ```
 
 Typical results include:
