@@ -214,6 +214,23 @@ fn spec_decode(
     let width = drafter.config.block_size;
     let drafter_load_s = load.elapsed().as_secs_f64();
 
+    if std::env::var("LMBRRR_SPEC_DEBUG").is_ok() {
+        // Sanity: propose with a random context BEFORE the target ever runs a
+        // forward. Non-zero here => the drafter loaded fine and the target's
+        // forward corrupts it; zero => the load-with-target-resident is corrupt.
+        let cap = layers.len() * drafter.config.hidden_size;
+        let rc = Tensor::randn(0f32, 1f32, (1, 4, cap), device)?.to_dtype(DType::BF16)?;
+        drafter.append_context(&rc, 0)?;
+        let p = drafter.propose_with_diagnostics(9419, 4, width)?;
+        let bh = p.block_hidden.as_ref().unwrap().to_dtype(DType::F32)?;
+        eprintln!(
+            "SANITY (pre-target-forward): block_hidden absmean {:.3} tokens {:?}",
+            bh.abs()?.mean_all()?.to_scalar::<f32>()?,
+            p.tokens
+        );
+        drafter.clear_context();
+    }
+
     // Prefill with tap-layer capture, seed the drafter context.
     model.clear_cache();
     drafter.clear_context();
