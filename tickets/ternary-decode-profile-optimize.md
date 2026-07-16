@@ -52,6 +52,21 @@ nr=2 rows/simdgroup (align 4) vs N_DST=4: Q2_0 GEMV 93.3 → **98.6 GB/s**; E2E 
 
 Decode is now bandwidth-bound at the Q2_0 kernel's ~98 GB/s (fwd 74 ms ≈ 7.17 GB / 98). **DECISIVE-LEAD LEVER (open): Q2_0 kernel bandwidth 98 → Q4K's 142 GB/s** (45% headroom → ~18 tok/s). Candidates: FMA-form dot, vectorized 34 B block loads, simdgroup-matrix. Host path is negligible — do not touch it.
 
+## MEASURED LIMITER (2026-07-15, gpucapture + gpudebug replay profile — the macOS 27 headless flow, see metal_notes.md / [[gputrace-cli-profiling]])
+
+Q2_0 GEMV (`kernel_mul_mv_q2_0_bf16_bf16`), counters over the bench capture:
+
+| counter | value | reading |
+|---|---|---|
+| total occupancy | 55.9% | not saturated |
+| ALU utilization | 26.8% | low → NOT alu-bound |
+| compute launch limiter | 85.5% | threads launch fine |
+| occupancy_manager_target | 66.3% | GPU capping occupancy |
+| L1 eviction rate | 0.05 | not cache-thrash |
+| bandwidth (gpu/read/write) | 97.75 / 72.2 / 25.6 | (blended w/ Q4K + setup) |
+
+**Diagnosis (Apple's ladder): occupancy-limited by REGISTER pressure** (occ manager caps at 66% with negligible L1 eviction). Confirms the earlier empirical A/B: FMA-form ALU-reduction was *slower* (98.6→74.8) because the kernel isn't ALU-op-bound; nr2 + 16-bit yl (occupancy) are the right axis. LESSON: the roofline/inference guesses were wrong twice; MEASURE with gpucapture/gpudebug first. **Lever: cut registers → lift the occupancy cap.** (Per-encoder counters aren't exposed, so the number is a Q2_0+Q4K blend; still decisive.)
+
 ## EVIDENCE (measured, not assumed)
 
 1. **Host path is negligible.** fwd/head split: argmax + full-logits readback = **0.35 ms/token**; the entire 200 ms is the model forward. (So fused-argmax / async-readback / device-chain — the MiniCPM fast paths — buy ~nothing here. Do NOT start there.)
