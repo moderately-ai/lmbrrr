@@ -1416,7 +1416,11 @@ impl GatedDeltaNet {
             && matches!(xs.device(), Device::Metal(_))
             && xs.dtype() == DType::BF16
             && self.conv_state.is_some()
-            && self.num_k_heads == self.num_v_heads
+            // GQA: the chunk kernel maps each value-head to its group's
+            // key/query head (Bonsai: 16 | 48), same as the decode kernel.
+            // Without this, Bonsai's verify ran the unfused tensor path —
+            // profiled at ~42% of the m=5 step (2026-07-16).
+            && self.num_v_heads.is_multiple_of(self.num_k_heads)
             && self.head_k_dim == 128
             && self.head_v_dim == 128
     }
