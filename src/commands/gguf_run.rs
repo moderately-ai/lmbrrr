@@ -1347,6 +1347,15 @@ fn spec_decode(
     let mut anchor = argmax_row(&logits.narrow(1, ids.len() - 1, 1)?)?;
     drop(logits);
     drop(ctx_feat);
+    // Prompt-lookup drafting (PLD): zero-cost copy proposals from verbatim
+    // n-gram matches over prompt+committed text. Fires only when the match
+    // is at least drafter-width wide — ungated PLD preempts strong drafter
+    // rounds and loses (measured -13% on math in the MiniCPM campaign).
+    let mut ngram_index = lmbrrr::ngram_draft::NgramDraftIndex::new(3, 4);
+    ngram_index.extend(ids);
+    let mut indexed = 0usize;
+    let mut pld_rounds = 0usize;
+    let mut pld_accepted = 0usize;
     let mut offset = ids.len();
     let mut committed: Vec<u32> = Vec::new();
     let mut rounds = 0usize;
@@ -1364,38 +1373,38 @@ fn spec_decode(
         if dbg {
             eprintln!("round {}: anchor={anchor} propose...", rounds + 1);
         }
-        let tp = Instant::now();
-        let proposal = if dbg && rounds == 0 {
-            drafter.propose_with_diagnostics(anchor, offset, width)?
-        } else {
-            drafter.propose(anchor, offset, width)?
-        };
-        propose_s += tp.elapsed().as_secs_f64();
-        let drafts = proposal.tokens.clone();
-        if dbg {
-            if let Some(bh) = &proposal.block_hidden {
-                let bh = bh.to_dtype(DType::F32)?;
-                eprintln!(
-                    "round {}: block_hidden absmean {:.3} finite={}",
-                    rounds + 1,
-                    bh.abs()?.mean_all()?.to_scalar::<f32>()?,
-                    bh.sum_all()?.to_scalar::<f32>()?.is_finite()
-                );
-            }
-            if let Some(bl) = &proposal.base_logits {
-                let bl = bl.to_dtype(DType::F32)?;
-                let am = bl.argmax(D::Minus1)?.flatten_all()?.to_vec1::<u32>()?;
-                let mx = bl.max(D::Minus1)?.flatten_all()?.to_vec1::<f32>()?;
-                let sum = bl.sum_all()?.to_scalar::<f32>()?;
-                eprintln!(
-                    "round {}: base_logits argmax {am:?} max {mx:?} sum_finite={}",
-                    rounds + 1,
-                    sum.is_finite()
-                );
-            }
-            eprintln!("round {}: proposed {drafts:?}, verify...", rounds + 1);
+        // Keep the lookup index in sync with committed text, then prefer a
+        // wide verbatim copy over a drafter round when one exists.
+        if committed.len() > indexed {
+            ngram_index.extend(&committed[indexed..]);
+            indexed = committed.len();
         }
-        let mut chunk = Vec::with_capacity(width + 1);
+        let copy_draft = ngram_index.propose(8).filter(|d| d.len() >= width);
+        let (drafts, used_pld) = match copy_draft {
+            Some(d) => {
+                pld_rounds += 1;
+                (d, true)
+            }
+            None => {
+                let tp = Instant::now();
+                let proposal = if dbg && rounds == 0 {
+                    drafter.propose_with_diagnostics(anchor, offset, width)?
+                } else {
+                    drafter.propose(anchor, offset, width)?
+                };
+                propose_s += tp.elapsed().as_secs_f64();
+                let p = if dbg { proposal.tokens.clone() } else { proposal.tokens };
+                (p, false)
+            }
+        };
+        let round_width = drafts.len();
+        if dbg {
+            eprintln!(
+                "round {}: proposed {drafts:?} (pld={used_pld}), verify...",
+                rounds + 1
+            );
+        }
+        let mut chunk = Vec::with_capacity(round_width + 1);
         chunk.push(anchor);
         chunk.extend_from_slice(&drafts);
         let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), device)?;
@@ -1418,14 +1427,15 @@ fn spec_decode(
                 .zip(targets.iter())
                 .take_while(|(d, t)| d == t)
                 .count(),
-            Some(margin) if width > 0 => {
-                let verify_logits = logits.narrow(1, 0, width)?;
+            Some(margin) if round_width > 0 => {
+                let verify_logits = logits.narrow(1, 0, round_width)?;
                 let max_vals = verify_logits
                     .max(D::Minus1)?
                     .to_dtype(DType::F32)?
                     .squeeze(0)?
                     .to_vec1::<f32>()?;
-                let idx = Tensor::from_slice(&drafts[..width], (1, width, 1), device)?;
+                let idx =
+                    Tensor::from_slice(&drafts[..round_width], (1, round_width, 1), device)?;
                 let draft_vals = verify_logits
                     .gather(&idx, D::Minus1)?
                     .to_dtype(DType::F32)?
@@ -1456,7 +1466,10 @@ fn spec_decode(
         drafter.append_context(&committed_feat, offset)?;
         drop(committed_feat);
 
-        if accepted != width {
+        if used_pld {
+            pld_accepted += accepted;
+        }
+        if accepted != round_width {
             let tr = Instant::now();
             if readvance_rollback {
                 // Readvance rollback: restore the pre-chunk decode state and
@@ -1533,6 +1546,8 @@ fn spec_decode(
             "verify_seconds": verify_s,
             "rollback_seconds": rollback_s,
             "accept_margin": accept_margin,
+            "pld_rounds": pld_rounds,
+            "pld_accepted": pld_accepted,
             "overhead_seconds": decode_seconds - propose_s - verify_s,
         })
     );
