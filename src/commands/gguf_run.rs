@@ -554,6 +554,22 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
                 p.static_threadgroup_memory_length()
             );
         }
+        // GEMV verify kernels (register-pressure diagnosis: maxTPT < 1024 ⇒
+        // register-limited occupancy).
+        for name in [
+            "kernel_mul_mv_q2_0_bf16",
+            "kernel_mul_mv_q2_0_bf16_mc",
+            "kernel_mul_mv_q2_0_bf16_mc2",
+            "kernel_mul_mv_q2_0_bf16_mct",
+        ] {
+            let p = kernels.load_pipeline(dev, Source::Quantized, name)?;
+            println!(
+                "{:<42} {:>8} {:>14}",
+                name,
+                p.max_total_threads_per_threadgroup(),
+                p.static_threadgroup_memory_length()
+            );
+        }
         return Ok(());
     }
 
