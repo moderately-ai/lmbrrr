@@ -487,11 +487,14 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
         "mm2d-k128" => Some(Mm2dQ2Variant::T64_K128),
         _ => None,
     };
-    if which == "mv" {
-        // Decode GEMV path (the bandwidth-limited baseline), m=1.
+    if which == "mv" || which == "mc" {
+        // GEMV path via MixedLinear: "mv" = decode m=1 (bandwidth baseline);
+        // "mc" = verify at width m (the weight-shared-columns kernel). Set
+        // LMBRRR_Q2_MC2=1 to route "mc" to the ILP variant.
+        let mrows = if which == "mv" { 1 } else { m };
         let qt = QTensor::quantize(&w, GgmlDType::Q2_0)?;
         let lin = MixedLinear::from_qtensor(qt, ctx.mm2d.clone())?;
-        let x = Tensor::randn(0f32, 1f32, (1, 1, k), device)?.to_dtype(DType::BF16)?;
+        let x = Tensor::randn(0f32, 1f32, (1, mrows, k), device)?.to_dtype(DType::BF16)?;
         for _ in 0..8 {
             let _ = lin.forward(&x)?;
         }
