@@ -702,6 +702,42 @@ Separate from capture/profiling: what the M3's Metal stack can actually *run* fo
   - *Install path (the Metal Toolchain is decoupled from Xcode since 26):* the beta must come from the **Xcode _beta_** train (27.x) — the 26.6 stable toolchain lacks 4.1. Grab Xcode-beta via the developer-downloads web page (visual; xcodes CLI auth is flaky), then `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -downloadComponent MetalToolchain` (838 MB; no sudo). License accept needs one `sudo xcodebuild -license accept`.
   - **Lesson:** a toolchain-capability "wall" is a *dated* fact tied to the installed compiler build, not a permanent limit. Re-test on every Xcode beta with `xcrun metal -std=metal4.1 -c` on a `uint2b_format` matmul2d kernel before treating a platform gap as a dead end. The DSpark verify GEMM is now the near-mechanical q4_K-mm2d mirror (docs/research/dspark-verify-weightbound-gemm.md).
 
+## 15. Kernel perf-diagnosis playbook + the ternary-verify utilization case study (2026-07-16)
+
+A multi-day investigation into *why the Q2_0 verify matmul (M=5–8) under-utilizes the M3* produced a reusable diagnosis process and a settled architectural answer. Full case study + measurements: `docs/research/dspark-verify-weightbound-gemm.md`. This section is the durable methodology + the "don't retry these" record.
+
+### A. The confounds that bit us — control them BEFORE believing any number
+
+Every one of these silently inflated a comparison by 30–130% and produced a *false* conclusion until controlled. Check all three at the start of any A/B, not the end.
+
+1. **DVFS / thermal clock droop across a sweep.** Running N variants back-to-back (200 iters each) heats the GPU; *later* variants run at a drooped clock and read 2–3× slower — a pure position artifact, not a kernel difference (`pmset -g therm` showed no *warning*, but the clock still droops). **Fix: interleave.** Round-robin small batches per variant (`for round { for variant { sync; time B dispatches; sync } }`) so the drift hits every variant equally. A sequential per-variant sweep is invalid for relative comparison. This flipped an apparent "NR=4 is faster" into the true "NR is monotonically slower."
+2. **Harness / dispatch-path difference.** A kernel benched via a hand-rolled `command_encoder()` closure vs via the production `lin.forward` (MixedLinear) path can differ. **Control: run the SAME (reference) kernel through BOTH harnesses.** If ref-via-your-harness == ref-via-production, the harness is neutral; the remaining gap is the kernel. (Ours was neutral — the cost view confirmed both are compute-dominated.)
+3. **Threadgroup 2D shape.** Identical thread *count* in a different 2D shape (`(8,8)` vs `(32,2)`) changes Metal's physical thread adjacency / memory scheduling and moved a number ~10%. **Match the reference kernel's `threadsPerThreadgroup` shape exactly**, not just the count.
+
+### B. The loop, in order
+
+1. **Validate the ruler first.** A known-equal pair MUST read equal (e.g. `mc`-via-lin.forward ≈ `mc`-via-your-harness ≈ your-templatized-`mc`). If they don't, you're measuring a confound — stop and fix it before interpreting anything.
+2. **Attribute cost, don't assume wall==kernel.** Capture the isolated kernel; `performance/timeline/encoders` → per-encoder GPU time. If the compute encoders dominate (~92% for us) the wall number is real kernel time; the blit/zeros/setup encoders are the harness and were ~1%. (Per-shader/per-command *cost* trees are empty in gpudebug 1.0; per-*encoder* GPU time works.)
+3. **Counters name a CANDIDATE; validate by MOVING THE NUMBER** (see §5). We "fixed occupancy" 39→51% with zero speed change — a *disproof*, not a null result.
+4. **Isolate ONE variable per experiment.** A strip-probe (e.g. `probe_nofold`, `probe_fullk`) proves only that the *stripped* part is small — it does not prove any specific remainder is the bottleneck. State what's still unattributed. (See memory `after-each-result-what-does-it-prove`.)
+
+### C. Interpreting occupancy on M3 (Dynamic Caching era)
+
+- `occupancy_manager_target` is the GPU's **dynamic** occupancy decision, **not a hard resource cap** — confirm with pipeline-info (`maxTotalThreadsPerThreadgroup` and `staticThreadgroupMemoryLength`; ours were 1024 / 0 for every GEMV variant, so *no* static resource limited them).
+- The target is a **readout of memory-access efficiency**: healthier access → higher target (isolated captures: mv 90% > mc 41% > transposed-`mct` 31%; the worse the coalescing, the lower the manager sets it, *and you meet it*). Raise it by improving transaction efficiency (coalescing, fewer/wider loads), NOT by adding threads.
+- **Apple GPUs hide latency via OCCUPANCY, not per-thread ILP.** Adding accumulators (ILP, row-amortization) costs registers → lowers occupancy → loses. This is why `mc` deliberately uses `nr=2` and why every "more work per thread" variant we tried was slower.
+
+### D. The settled result — two utilization walls, neither reaches the ideal
+
+Roofline says M=8 verify *could* be weight-bound at ~0.22 ms / ~106 GB/s. It is not reachable on M3:
+
+- **Tensor path** (`mm2d_q2_0`, hardware `uint2b_format matmul2d`): **compute-bound** at M=8 ≈ **0.55 ms / 43 GB/s**. Pre-M5 GPUs have **no matrix unit** — `matmul2d` lowers onto `simdgroup_matrix`+ALU (Rigel arXiv 2606.12765 on M4-Max: fp8 at 0.94× fp16; Apple WWDC26 330: "falls back to optimized shader implementations"). The fixed 8×8 fragment + dequant overhead at small M is the ~2× penalty. **This is the best verify kernel** and is 2.1× over the shipped `mc`.
+- **GEMV path** (`mc`, weight-shared-columns): **occupancy-bound** ~41% ≈ **1.18 ms / 20 GB/s**. `nr=2` is already optimal.
+
+**Do NOT retry these (all measured-refuted):** occupancy right-sizing (moved occupancy, not speed); ILP/independent-accumulators (`mc2`, slower); transposed `[K][M]` activation (`mct`, slower — breaks cross-thread coalescing); NR row-amortization (monotonically slower — register cost); int8 integer matmul2d (no integer datapath before M5); K-tile > 128 or `relaxed_precision` (no/marginal). Every production Apple LLM stack (llama.cpp/MLX/BaseRT) uses a GEMV at small M and reserves `matmul2d` for large-M prefill — our result reproduces that consensus.
+
+**Consequence:** the DSpark verify per-matmul cannot go below mm2d's 0.55 ms on M3, so the speculative-decode multiplier is NOT in the verify kernel — it comes from **wiring mm2d into the verify** (bank the 2.1×), **`block_size`** (fill mm2d's flat-to-M=8 tile), and **CUDA/M5** (where int8 + the tensor unit engage). The utilization limit itself is architectural on this GPU.
+
 ## Bottom line
 
 macOS 27 removes the Xcode GUI from most GPU capture and replay-analysis loops. For applications you control, the strongest workflow is:
