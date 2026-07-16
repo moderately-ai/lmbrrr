@@ -257,9 +257,44 @@ impl DraftLayer {
     }
 }
 
+/// Token embedding table. The GGUF drafter's is a 248k x 5120 Q2_0 tensor
+/// (~2.5 GB dense); keeping it packed and dequantizing only the block's few
+/// rows per propose saves that memory (embedding rows are contiguous packed
+/// blocks, so a row slice is a byte slice).
+enum EmbedTable {
+    Dense(Tensor),
+    Packed(candle::quantized::QTensor),
+}
+
+impl EmbedTable {
+    /// Gather rows for `ids` -> `[1, ids.len(), hidden]` in `dtype`.
+    fn gather(&self, ids: &[u32], device: &Device, dtype: DType) -> candle::Result<Tensor> {
+        match self {
+            EmbedTable::Dense(t) => {
+                let idx = Tensor::from_slice(ids, ids.len(), device)?;
+                t.index_select(&idx, 0)?.unsqueeze(0)
+            }
+            EmbedTable::Packed(qt) => {
+                use candle::quantized::ggml_file::qtensor_from_ggml;
+                let (_vocab, hidden) = qt.shape().dims2()?;
+                let gd = qt.dtype();
+                let row_bytes = (hidden / gd.block_size()) * gd.type_size();
+                let all = qt.data()?;
+                let mut bytes = Vec::with_capacity(ids.len() * row_bytes);
+                for &id in ids {
+                    let off = id as usize * row_bytes;
+                    bytes.extend_from_slice(&all[off..off + row_bytes]);
+                }
+                let rows = qtensor_from_ggml(gd, &bytes, vec![ids.len(), hidden], device)?;
+                rows.dequantize(device)?.to_dtype(dtype)?.unsqueeze(0)
+            }
+        }
+    }
+}
+
 pub struct DsparkDrafter {
     pub config: DsparkConfig,
-    embed_tokens: Tensor,
+    embed_tokens: EmbedTable,
     layers: Vec<DraftLayer>,
     norm: RmsNorm,
     fc: Linear,
@@ -487,7 +522,7 @@ impl DsparkDrafter {
         }
 
         Ok(Self {
-            embed_tokens: vb.get((config.vocab_size, h), "embed_tokens.weight")?,
+            embed_tokens: EmbedTable::Dense(vb.get((config.vocab_size, h), "embed_tokens.weight")?),
             norm: RmsNorm::load(&vb, "norm.weight", h, eps)?,
             fc: Linear::new(
                 vb.get((h, config.target_layer_ids.len() * h), "fc.weight")?,
@@ -631,7 +666,7 @@ impl DsparkDrafter {
         };
 
         Ok(Self {
-            embed_tokens: rd("token_embd.weight")?,
+            embed_tokens: EmbedTable::Packed(gguf.read_qtensor("token_embd.weight", device)?),
             norm: norm("output_norm.weight")?,
             fc: Linear::new(rd("dspark.fc.weight")?, None),
             hidden_norm: norm("dspark.hidden_norm.weight")?,
@@ -661,8 +696,7 @@ impl DsparkDrafter {
     }
 
     fn embed(&self, ids: &[u32]) -> candle::Result<Tensor> {
-        let ids = Tensor::from_slice(ids, ids.len(), &self.device)?;
-        self.embed_tokens.index_select(&ids, 0)?.unsqueeze(0)
+        self.embed_tokens.gather(ids, &self.device, self.dtype)
     }
 
     /// Fuses raw capture-layer concat states ([1, m, capture*hidden]) and
