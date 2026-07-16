@@ -296,6 +296,8 @@ The 30 counter groups (each `go <group>` yields named sub-counters as `%` or a b
 
 **Reading the ladder** (per the WWDC M3 talk): a `_limiter` is the fraction of GPU-active time that unit gated issue; the highest `_limiter` across units is your bottleneck. Low occupancy with `occupancy_manager_target ≈ 100%` and low `l1_eviction_rate` ⇒ occupancy is capped by **register pressure** (not the manager, not cache) → 16-bit types / fewer live registers raise it.
 
+**CRITICAL method lesson (2026-07-16, mm2d_q2_0): a `_limiter` names a CANDIDATE; validate by MOVING THE NUMBER.** The occupancy ladder is necessary but not sufficient — a low occupancy that *looks* binding may not be. Case: mm2d_q2_0 at 39% occupancy (vs a healthy mv at 81%) looked occupancy-limited. Right-sizing its threadgroup array (8 KB → 2 KB) and dropping a `max_total_threads` attribute raised occupancy to **51% — with ZERO change in ms/call or gpu_bandwidth.** That directly *disproved* occupancy as the bottleneck; the real limiter was `instruction_throughput_limiter=73%` (a scalar epilogue), which the occupancy fix never touched. Also note: `maxTotalThreadsPerThreadgroup` is a reported *ceiling* (set by the `[[max_total_threads_per_threadgroup]]` attribute), NOT actual registers-per-thread — don't infer register usage from it. So: apply the candidate fix, re-capture, and only believe the diagnosis if the *speed* moves. Never mass-apply an occupancy fix across kernels off the diagnosis alone.
+
 Older ad-hoc explore (per-encoder/per-shader COSTS, still valid, but the rich COUNTERS only exist under `performance/timeline/counters` after `profile load 0`):
 
 ```sh

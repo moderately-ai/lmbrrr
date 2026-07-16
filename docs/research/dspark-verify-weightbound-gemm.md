@@ -82,3 +82,35 @@ The hand-rolled planar kernel is already flat/weight-bound-STRUCTURED at 38 GB/s
 Kernels 1–6 were all A/B'd and the slow ones reverted; the shipped candle keeps **mc for the m∈2..7 verify** (best working), the **generic tile mm for m≥8 prefill** (a real prefill win), and **mv for m=1 decode**. `q2_0_mm2d_planes` + `kernel_mul_mm2d_q2_0_smallm` + `call_quantized_matmul_mm2d_q2_0_smallm` are committed on the candle `lmbrrr` branch (the 38 GB/s hand-rolled planar proof-of-concept, exercised by `gguf bench-gemv`'s `Q2_0 PLANAR` lines). The DSpark e2e is working + byte-correct at parity.
 
 See [[dspark-bonsai-e2e-working]], [[ternary-q2_0-gemv-exhausted]], and `metal_notes.md` §"Metal 4.x tensor/matmul2d quantized formats".
+
+## mm2d_q2_0 built + GPU-counter investigation (2026-07-16, Xcode 27 beta 3)
+
+The mirror above is **built and correct** (`mm2d_q2_0.metal`, templated `<TILE_N,BK,NSIMD,RELAXED>` via the mlx `instantiate_*` idiom; `Mm2dQ2Variant` selector; `q2_0_mm2d_planes` reused). It compiles+links+runs 2-bit `matmul2d` on the M3 (macOS 27.0 runtime executes it — no fallback), rel_err 0.0023. But the **projected ~140 GB/s did not materialize** — and the reason is now measured, not guessed.
+
+### Measured (17408×5120, per-call harness with dst reuse; `gguf bench-gemv`)
+
+| path | ms/call (flat in m) | eff GB/s | vs its mv |
+|---|---|---|---|
+| Q2_0 mv (decode, m=1) | 0.225 | 105 | — (bandwidth-bound baseline) |
+| Q4K mv (m=1) | 0.362 | 139 | — |
+| **Q2_0 mm2d k128** | **0.55** | **43** | 0.41× |
+| Q4K mm2d (ref) | 0.69 | 72 | 0.52× |
+
+Both mm2d paths run at **~half their mv bandwidth** — so this is a `matmul2d`-at-small-M property, **not** 2-bit-specific (H2 rejected). K-tile sweep: k32 0.72 → k64 0.62 → k128 0.55 (op-count, ~24%, plateaus); `relaxed_precision` = exact no-op; tile-N 32 ≈ 64. mm2d k128 (0.55, flat) still **beats the incumbent `mc` verify** (0.68@m=4, 1.17@m=8) at the verify width — so it is a usable win — but it does **not** reach the weight-bound ideal (~0.225).
+
+### GPU counters (gpudebug `profile run`; see metal_notes.md §5) — the honest arc
+
+Isolated single-kernel captures (`gguf profile-kernel --which …`), timeline counters:
+
+- **mv (fast): occupancy 81%, gpu_bandwidth 78% → bandwidth-bound.** As it should be.
+- **mm2d k128 & q4k mm2d: occupancy ~39%, gpu_bandwidth ~40%/66%, `instruction_throughput_limiter` 73% (highest), `occupancy_manager_target` ~97%, `l1_eviction` low.**
+
+**First hypothesis (WRONG, disproven by measurement):** the ~39% occupancy was capped by an over-sized `threadgroup float rs_tg[8*256]` = **8192 B** (pipeline `staticThreadgroupMemoryLength`) and a needless `[[max_total_threads_per_threadgroup(NSIMD*32)]]` attribute (pinned `maxTPT=128` vs q4_K's 1024). Fix applied: right-size `rs_tg` to `8*(8192/BK)` (k128 → 2048 B) and drop the attribute (`maxTPT → 1024`). **Result: occupancy rose 39% → 51%, but ms/call and gpu_bandwidth were UNCHANGED (0.554 ms, 40%).** That is direct proof — **occupancy was never the binding constraint.** Raising it bought nothing.
+
+**Real limiter (leading hypothesis):** `instruction_throughput_limiter = 73%`, unmoved by the occupancy fix. The kernel is **issue/instruction-bound on the scalar epilogue of the manual K-loop** — per K-tile, per output-element: `get_multidimensional_index` + a `d` load + an `rs_tg` load + two `fma`, while the `matmul2d` MMA itself is cheap. Not yet *proven* (proof = reduce instructions, watch speed move).
+
+**Two instruction-reduction levers:** (1) cheap — hoist the `get_multidimensional_index → (n,m)` mapping out of the K-loop (it's invariant across tiles); (2) the real fix — Metal 4.1 hardware block-scaling (`tensor_blockwise`) applies the per-128 `d` inside the tensor op, deleting the scalar fold epilogue entirely.
+
+**Kernel-audit note (do NOT mass-apply the occupancy fix):** the same oversized-`rs_tg` / small-`max_total_threads` footgun exists in `mm2d_q4k.metal` (3 kernels, argmax one ~16 KB), `skinny_gemm.metal` (24 KB `a_sh` worst-cased on `SK_MAX_M`), and the deltanet chunk kernels. It's real hygiene, but the measurement above shows it is **not a speed lever** for the matmul2d path — so treat it as cleanup, verified per-kernel with counters, not a throughput fix.
+
+**Method lesson (also in metal_notes §5):** a high `_limiter` names a *candidate*; the limiter ladder must be *validated by moving the number*. Occupancy at 39% looked like the bottleneck and wasn't — raising it to 51% with no speed change is what proved it. Measure the fix, don't infer it from the diagnosis.
