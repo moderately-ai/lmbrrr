@@ -52,6 +52,19 @@ nr=2 rows/simdgroup (align 4) vs N_DST=4: Q2_0 GEMV 93.3 → **98.6 GB/s**; E2E 
 
 Decode is now bandwidth-bound at the Q2_0 kernel's ~98 GB/s (fwd 74 ms ≈ 7.17 GB / 98). **DECISIVE-LEAD LEVER (open): Q2_0 kernel bandwidth 98 → Q4K's 142 GB/s** (45% headroom → ~18 tok/s). Candidates: FMA-form dot, vectorized 34 B block loads, simdgroup-matrix. Host path is negligible — do not touch it.
 
+## WIN 3 (2026-07-15): 16-bit yl (occupancy) → 14.63 tok/s — DECISIVE lead
+
+Profile said occupancy-limited by registers → made `yl` half instead of float (cuts the dominant register array). Q2_0 GEMV **98.6 → 106.2 GB/s**; decode **13.72 → 14.63 tok/s (steady 14.50)**, coherent. candle a0465b5a. **Now clearly past the 13.7 bar (+6.8%).** Total campaign: 4.98 → 14.63 = **2.94×**.
+
+Kernel A/B log (all M3, bench-gemv GB/s @ 17408×5120), profile-guided:
+- select-form float yl, N_DST=4: baseline
+- nr2 (2 rows/simdgroup): → 98.6 [WIN]
+- FMA-form dot: → 74.8 [LOSS — not ALU-bound]
+- 16-bit yl, tpb=16: → 86.8 [LOSS — too few blocks in flight]
+- 16-bit yl, tpb=8: → **106.2 [WIN]**
+
+Q2_0 now 106 GB/s vs Q4K's 142 (75%). Remaining incremental kernel levers (untried): vectorized 34-B block loads (scattered per-byte reads today), dedup the per-block `d` read (8 threads reload it). Q4K parity likely needs a ground-up simdgroup-matrix rewrite (the q4k k1-keystone equivalent) — a real project, not a tweak.
+
 ## MEASURED LIMITER (2026-07-15, gpucapture + gpudebug replay profile — the macOS 27 headless flow, see metal_notes.md / [[gputrace-cli-profiling]])
 
 Q2_0 GEMV (`kernel_mul_mv_q2_0_bf16_bf16`), counters over the bench capture:
