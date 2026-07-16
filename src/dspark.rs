@@ -1391,11 +1391,18 @@ mod gguf_drafter_tests {
         assert!(drafter.log_snr_bias.is_some());
 
         let bs = drafter.config.block_size;
-        let cap = drafter.config.target_layer_ids.len() * drafter.config.hidden_size;
-        // Realistic-ish context: a few rows of unit-scale hidden states (the
-        // target residual stream is O(1) after norm), not zeros — zeros give a
-        // degenerate forward that hides loader bugs.
-        let raw_ctx = Tensor::randn(0f32, 1f32, (1, 4, cap), &device)?.to_dtype(DType::BF16)?;
+        let hidden = drafter.config.hidden_size;
+        // Realistic per-layer-scaled context: the target residual stream grows
+        // with depth (measured absmean ~0.06, 0.31, 0.50, 0.55, 1.66 for the
+        // 5 tap layers). A wrong concat order/layout is invisible to a uniform
+        // random context but degenerate with this structure.
+        let scales = [0.063f64, 0.31, 0.50, 0.55, 1.66];
+        let parts: Vec<Tensor> = scales
+            .iter()
+            .map(|s| Tensor::randn(0f32, *s as f32, (1, 4, hidden), &device))
+            .collect::<candle::Result<_>>()?;
+        let refs: Vec<&Tensor> = parts.iter().collect();
+        let raw_ctx = Tensor::cat(&refs, candle::D::Minus1)?.to_dtype(DType::BF16)?;
         drafter.append_context(&raw_ctx, 0)?;
         let proposal = drafter.propose_with_diagnostics(100u32, 4, bs)?;
         assert_eq!(proposal.tokens.len(), bs);
