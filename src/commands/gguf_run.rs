@@ -255,10 +255,20 @@ fn spec_decode(
         }
         let snapshot = model.snapshot_decode_state();
         if dbg {
-            eprintln!("round {}: propose...", rounds + 1);
+            eprintln!("round {}: anchor={anchor} propose...", rounds + 1);
         }
-        let drafts = drafter.propose(anchor, offset, width)?.tokens;
+        let proposal = if dbg && rounds == 0 {
+            drafter.propose_with_diagnostics(anchor, offset, width)?
+        } else {
+            drafter.propose(anchor, offset, width)?
+        };
+        let drafts = proposal.tokens.clone();
         if dbg {
+            if let Some(bl) = &proposal.base_logits {
+                let bl = bl.to_dtype(DType::F32)?;
+                let am = bl.argmax(D::Minus1)?.flatten_all()?.to_vec1::<u32>()?;
+                eprintln!("round {}: base_logits argmax {am:?}", rounds + 1);
+            }
             eprintln!("round {}: proposed {drafts:?}, verify...", rounds + 1);
         }
         let mut chunk = Vec::with_capacity(width + 1);
