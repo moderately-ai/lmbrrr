@@ -168,6 +168,82 @@ fn bench_gemv(device: &Device) -> Result<()> {
         );
     }
 
+    // Transposed-activation verify GEMV (mct): src1 = activation transposed to
+    // [K][M] so the NC column reads are contiguous — the fix for the mc's L1
+    // thrash (measured l1_eviction 1.42, occupancy capped at 41%).
+    {
+        use candle_metal_kernels::call_quantized_matmul_mv_q2_0_mct;
+        let qtm = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+        let data = qtm.data()?;
+        let mdev = match device {
+            Device::Metal(d) => d.clone(),
+            _ => anyhow::bail!("mct bench needs metal"),
+        };
+        let wbuf = mdev
+            .new_buffer_builder()
+            .with_data(&data)
+            .with_label("mct_w")
+            .build()?;
+        for m in [1usize, 2, 4, 8] {
+            let x = Tensor::randn(0f32, 1f32, (m, k), device)?.to_dtype(DType::BF16)?;
+            let refr = x.to_dtype(DType::F32)?.matmul(&wdeq.t()?)?;
+            let xt = x.t()?.contiguous()?; // [k][m]
+            let (xs, xl) = xt.storage_and_layout();
+            let xtbuf = match &*xs {
+                candle::Storage::Metal(ms) => ms.buffer().clone(),
+                _ => anyhow::bail!("xt not metal"),
+            };
+            let xoff = xl.start_offset() * 2;
+            let dst = mdev
+                .new_buffer_builder()
+                .with_size(m * n * 4)
+                .with_label("mct_dst")
+                .build()?;
+            let dispatch = || -> Result<()> {
+                let enc = mdev.command_encoder()?;
+                call_quantized_matmul_mv_q2_0_mct(
+                    mdev.metal_device(),
+                    &enc,
+                    mdev.kernels(),
+                    (m, n, k),
+                    &wbuf,
+                    &xtbuf,
+                    xoff,
+                    &dst,
+                )?;
+                Ok(())
+            };
+            for _ in 0..8 {
+                dispatch()?;
+            }
+            device.synchronize()?;
+            let iters = 200;
+            let t = Instant::now();
+            for _ in 0..iters {
+                dispatch()?;
+            }
+            device.synchronize()?;
+            let s = t.elapsed().as_secs_f64();
+            dispatch()?;
+            device.synchronize()?;
+            let out = candle::MetalStorage::new(dst.clone(), mdev.clone(), m * n, DType::F32);
+            let got = Tensor::from_storage(
+                candle::Storage::Metal(out),
+                (m, n),
+                candle::op::BackpropOp::none(),
+                false,
+            );
+            let denom = refr.abs()?.mean_all()?.to_scalar::<f32>()?.max(1e-6);
+            let rel = got.sub(&refr)?.abs()?.mean_all()?.to_scalar::<f32>()? / denom;
+            println!(
+                "Q2_0 MCT   {n}x{k} m={m}: {:.3} ms/call ({:.1} GB/s), rel_err {:.4}",
+                1000.0 * s / iters as f64,
+                (bytes as f64 * iters as f64) / s / 1e9,
+                rel
+            );
+        }
+    }
+
     // Planar coalesced verify GEMM (q2_0_mm2d): reads a [k][n_pad] repack so the
     // cross-row weight read coalesces (the [row][block] kernels were capped ~21
     // GB/s). This is the DSpark-verify weight-bound lever.
