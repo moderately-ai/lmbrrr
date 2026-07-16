@@ -35,6 +35,12 @@ fn default_markov_head_type() -> String {
 fn default_true() -> bool {
     true
 }
+fn default_min_log_snr() -> f64 {
+    -9.0
+}
+fn default_max_log_snr() -> f64 {
+    9.0
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct DsparkConfig {
@@ -60,6 +66,15 @@ pub struct DsparkConfig {
     pub enable_confidence_head: bool,
     #[serde(default = "default_true")]
     pub confidence_head_with_markov: bool,
+    // GIDD log-SNR conditioning (diffusion-style timestep embed added to the
+    // draft-block embedding). Off in the safetensors round-4 drafter; the
+    // Bonsai GGUF drafter enables it. When on, log_snr_fc1/fc2 must be present.
+    #[serde(default)]
+    pub log_snr_conditioning: bool,
+    #[serde(default = "default_min_log_snr")]
+    pub min_log_snr: f64,
+    #[serde(default = "default_max_log_snr")]
+    pub max_log_snr: f64,
 }
 
 impl DsparkConfig {
@@ -210,6 +225,11 @@ pub struct DsparkDrafter {
     markov_w1: Tensor,
     markov_w2: MixedLinear,
     confidence: Linear,
+    // Precomputed GIDD log-SNR conditioning bias [block_size, hidden], added to
+    // the draft-block embedding each propose. None when the drafter has no
+    // log-SNR conditioning. It's a fixed function of block_size/min/max_log_snr
+    // and the fc1/fc2 weights, so it's evaluated once at load.
+    log_snr_bias: Option<Tensor>,
     rotary: Rotary,
     // FR-Spec draft-vocabulary restriction: when set, lm_head and markov_w2
     // hold only these rows (rank order), and proposal argmaxes remap through
@@ -271,6 +291,41 @@ fn quantize_or_dense(
             Ok(ctx.quantized_linear(q)?)
         }
     }
+}
+
+/// Precompute the GIDD log-SNR conditioning bias [block, hidden] (src/models/
+/// dspark.cpp in the prism llama.cpp fork). Each block's anchor row (pos 0)
+/// takes max_log_snr, the masked rows min_log_snr; a 128-dim sinusoidal embed
+/// (t scaled by 1000) runs through fc1 -> silu -> fc2. Purely a function of the
+/// block/bounds/weights, so it's evaluated once and added every propose.
+fn compute_log_snr_bias(
+    block: usize,
+    min_snr: f64,
+    max_snr: f64,
+    fc1: &Linear,
+    fc2: &Linear,
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    const N_FREQ: usize = 128;
+    const HALF: usize = N_FREQ / 2;
+    if !(max_snr > min_snr) || !min_snr.is_finite() || !max_snr.is_finite() {
+        anyhow::bail!("log-SNR conditioning: need finite max ({max_snr}) > min ({min_snr})");
+    }
+    let mut feat = vec![0f32; block * N_FREQ];
+    for pos in 0..block {
+        let log_snr = if pos % block == 0 { max_snr } else { min_snr };
+        let t = ((log_snr - min_snr) / (max_snr - min_snr) * 1000.0) as f32;
+        for i in 0..HALF {
+            let freq = (-(10000f32.ln()) * (i as f32) / (HALF as f32)).exp();
+            let angle = t * freq;
+            feat[pos * N_FREQ + i] = angle.sin();
+            feat[pos * N_FREQ + HALF + i] = angle.cos();
+        }
+    }
+    let feat = Tensor::from_vec(feat, (block, N_FREQ), device)?.to_dtype(dtype)?;
+    let h = candle_nn::ops::silu(&fc1.forward(&feat)?)?;
+    Ok(fc2.forward(&h)?)
 }
 
 /// Load request for [`DsparkDrafter::load`] — a parameter object so the
@@ -410,6 +465,9 @@ impl DsparkDrafter {
                 vb.get((1, h + config.markov_rank), "confidence_head.proj.weight")?,
                 Some(vb.get(1, "confidence_head.proj.bias")?),
             ),
+            // The safetensors round-4 drafter has no log-SNR conditioning; the
+            // GGUF loader path populates this when the metadata enables it.
+            log_snr_bias: None,
             rotary: Rotary::new(head_dim, config.rope_parameters.rope_theta, dtype, device)?,
             layers,
             markov_fused_slots: std::sync::OnceLock::new(),
@@ -561,6 +619,13 @@ impl DsparkDrafter {
         let mut ids = vec![self.config.mask_token_id; block];
         ids[0] = anchor_token;
         let mut hidden = self.embed(&ids)?;
+        // GIDD log-SNR conditioning: add the fixed per-position bias to the
+        // draft-block embedding before the layers (anchor row = max-SNR embed,
+        // masked rows = min-SNR embed). Bias is [block, hidden]; hidden is
+        // [1, block, hidden].
+        if let Some(bias) = &self.log_snr_bias {
+            hidden = hidden.broadcast_add(&bias.unsqueeze(0)?)?;
+        }
         let (b, q_len, _) = hidden.dims3()?;
         let heads = self.config.num_attention_heads;
         let kv_heads = self.config.num_key_value_heads;
