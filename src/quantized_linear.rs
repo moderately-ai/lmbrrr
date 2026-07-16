@@ -620,3 +620,29 @@ mod tests {
         ));
     }
 }
+
+/// Gather rows `ids` from a packed `[vocab, hidden]` QTensor and dequantize to
+/// `dtype`, returning `[ids.len(), hidden]`. Rows are contiguous packed blocks
+/// (blocks run along the input/hidden dim), so a row slice is a byte slice —
+/// this dequantizes only the requested rows, keeping a 248k-vocab embedding
+/// packed instead of expanding the whole table to dense.
+pub fn packed_row_gather(
+    qt: &QTensor,
+    ids: &[u32],
+    device: &Device,
+    dtype: DType,
+) -> Result<Tensor> {
+    use candle::quantized::ggml_file::qtensor_from_ggml;
+    let (_vocab, hidden) = qt.shape().dims2()?;
+    let gd = qt.dtype();
+    let row_bytes = (hidden / gd.block_size()) * gd.type_size();
+    let all = qt.data()?;
+    let mut bytes = Vec::with_capacity(ids.len() * row_bytes);
+    for &id in ids {
+        let off = id as usize * row_bytes;
+        bytes.extend_from_slice(&all[off..off + row_bytes]);
+    }
+    Ok(qtensor_from_ggml(gd, &bytes, vec![ids.len(), hidden], device)?
+        .dequantize(device)?
+        .to_dtype(dtype)?)
+}

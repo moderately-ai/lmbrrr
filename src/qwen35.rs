@@ -2595,7 +2595,7 @@ impl CausalTextModel for Qwen35CausalLM {
 
 #[derive(Clone, Debug)]
 pub struct Qwen35TextModel {
-    embed_tokens: Embedding,
+    embed_tokens: TokenEmbedding,
     layers: Vec<DecoderLayer>,
     norm: Qwen35RmsNorm,
     device: Device,
@@ -2608,13 +2608,67 @@ pub struct Qwen35TextModel {
     device_captures: Vec<Tensor>,
 }
 
+/// Token embedding table, dense or packed. The GGUF path keeps the 248k-row
+/// table packed (Q2_0) and gather-dequantizes only the batch's rows, saving the
+/// ~2.5 GB a dense bf16 expansion would cost — critical for fitting the target
+/// alongside the DSpark drafter.
+#[derive(Clone)]
+enum TokenEmbedding {
+    Dense(Embedding),
+    Packed {
+        qt: std::sync::Arc<candle::quantized::QTensor>,
+        dtype: DType,
+    },
+}
+
+impl std::fmt::Debug for TokenEmbedding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenEmbedding::Dense(_) => write!(f, "TokenEmbedding::Dense"),
+            TokenEmbedding::Packed { .. } => write!(f, "TokenEmbedding::Packed"),
+        }
+    }
+}
+
+impl TokenEmbedding {
+    fn forward(&self, ids: &Tensor) -> Result<Tensor> {
+        match self {
+            TokenEmbedding::Dense(e) => e.forward(ids),
+            TokenEmbedding::Packed { qt, dtype } => {
+                let (b, seq) = ids.dims2()?;
+                let idv = ids.flatten_all()?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+                let rows = crate::quantized_linear::packed_row_gather(qt.as_ref(), &idv, ids.device(), *dtype)
+                    .map_err(candle::Error::wrap)?;
+                rows.reshape((b, seq, qt.shape().dims2()?.1))
+            }
+        }
+    }
+
+    fn embeddings(&self) -> &Tensor {
+        match self {
+            TokenEmbedding::Dense(e) => e.embeddings(),
+            TokenEmbedding::Packed { .. } => {
+                panic!("packed token embedding has no dense weight (used only on the safetensors/MTP path)")
+            }
+        }
+    }
+}
+
 impl Qwen35TextModel {
     pub fn new<S: LinearSource>(cfg: &TextConfig, source: &S, ctx: &ModelCtx) -> Result<Self> {
-        let embed_w = source.tensor(
-            (cfg.vocab_size, cfg.hidden_size).into(),
-            "embed_tokens.weight",
-        )?;
-        let embed_tokens = Embedding::new(embed_w, cfg.hidden_size);
+        let embed_tokens = match source.embedding_qtensor("embed_tokens.weight")? {
+            Some(qt) => TokenEmbedding::Packed {
+                qt: std::sync::Arc::new(qt),
+                dtype: source.dtype(),
+            },
+            None => {
+                let embed_w = source.tensor(
+                    (cfg.vocab_size, cfg.hidden_size).into(),
+                    "embed_tokens.weight",
+                )?;
+                TokenEmbedding::Dense(Embedding::new(embed_w, cfg.hidden_size))
+            }
+        };
         let rotary = Arc::new(RotaryEmbedding::new(cfg, source.dtype(), source.device())?);
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let layers_src = source.sub("layers");

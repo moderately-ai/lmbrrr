@@ -44,6 +44,14 @@ pub trait LinearSource {
     fn norms_pre_shifted(&self) -> bool {
         false
     }
+
+    /// The packed embedding weight at `name`, if this source can supply it
+    /// quantized (the GGUF path). Returning `Some` lets the model keep the
+    /// 248k-row table packed and gather-dequantize rows on demand instead of
+    /// expanding it to a ~2.5 GB dense tensor. Default `None` (dense path).
+    fn embedding_qtensor(&self, _name: &str) -> Result<Option<candle::quantized::QTensor>> {
+        Ok(None)
+    }
 }
 
 fn bias_name(weight_name: &str) -> String {

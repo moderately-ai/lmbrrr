@@ -360,6 +360,11 @@ impl LinearSource for GgufSource<'_> {
     fn norms_pre_shifted(&self) -> bool {
         true
     }
+
+    fn embedding_qtensor(&self, name: &str) -> Result<Option<QTensor>> {
+        let gname = to_gguf_name(&self.path(name))?;
+        Ok(Some(self.file.read_qtensor(&gname, &self.device)?))
+    }
 }
 
 #[cfg(test)]
