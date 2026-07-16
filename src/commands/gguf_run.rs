@@ -35,6 +35,22 @@ enum GgufCmd {
     /// Micro-bench the ternary Q2_0 verify/decode GEMV kernels on the ffn shape
     /// (random weights; no model load) — isolates kernel bandwidth.
     BenchGemv,
+    /// Loop ONE quantized matmul kernel in isolation so a gpucapture/gpudebug
+    /// capture is dominated by it (counters are timeline-aggregate). No model.
+    ProfileKernel(ProfileKernelArgs),
+}
+
+#[derive(Args, Debug)]
+struct ProfileKernelArgs {
+    /// Kernel to loop: mv | mm2d-k32 | mm2d-k128 | q4k-mm2d.
+    #[arg(long, default_value = "mm2d-k128")]
+    which: String,
+    /// Dispatches to enqueue (make it large so the kernel dominates the capture).
+    #[arg(long, default_value_t = 3000)]
+    iters: usize,
+    /// Activation rows (verify width). mv ignores this (always m=1).
+    #[arg(long, default_value_t = 8)]
+    m: usize,
 }
 
 /// Model-loading args shared by the decode / spec / profile subcommands.
@@ -413,6 +429,179 @@ fn bench_gemv(device: &Device) -> Result<()> {
     Ok(())
 }
 
+/// Loop ONE quantized matmul kernel in isolation (17408x5120 ffn shape) so a
+/// gpucapture capture is dominated by it — gpudebug counters are
+/// timeline-aggregate, so isolation is how we attribute occupancy/ALU/bandwidth
+/// to a single kernel. Enqueues `iters` dispatches then one sync. Correctness is
+/// not checked here (that's bench-gemv's job); this exists purely for profiling.
+fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Result<()> {
+    use candle::quantized::k_quants::{BlockQ2_0, BlockQ4K};
+    use candle::quantized::metal::{q2_0_mm2d_planes, q4k_mm2d_planes};
+    use candle::quantized::{GgmlDType, QTensor};
+    use candle_metal_kernels::{
+        call_quantized_matmul_mm2d_q2_0, call_quantized_matmul_mm2d_q4k, Mm2dQ2Variant,
+    };
+    use lmbrrr::quantized_linear::MixedLinear;
+
+    let (n, k) = (17408usize, 5120usize);
+    let w = Tensor::randn(0f32, 1f32, (n, k), device)?;
+    let mdev = match device {
+        Device::Metal(d) => d.clone(),
+        _ => anyhow::bail!("profile-kernel needs metal"),
+    };
+    let ctx = ModelCtx::default();
+    eprintln!("profile-kernel: which={which} iters={iters} m={m} shape={n}x{k}");
+
+    // Build whichever inputs the chosen kernel needs, then a `dispatch` closure.
+    let q2_variant = match which {
+        "mm2d-k32" => Some(Mm2dQ2Variant::T64_K32),
+        "mm2d-k128" => Some(Mm2dQ2Variant::T64_K128),
+        _ => None,
+    };
+    if which == "mv" {
+        // Decode GEMV path (the bandwidth-limited baseline), m=1.
+        let qt = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+        let lin = MixedLinear::from_qtensor(qt, ctx.mm2d.clone())?;
+        let x = Tensor::randn(0f32, 1f32, (1, 1, k), device)?.to_dtype(DType::BF16)?;
+        for _ in 0..8 {
+            let _ = lin.forward(&x)?;
+        }
+        device.synchronize()?;
+        for _ in 0..iters {
+            let _ = lin.forward(&x)?;
+        }
+        device.synchronize()?;
+    } else if let Some(variant) = q2_variant {
+        let qt = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+        let data = qt.data()?;
+        let blocks =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const BlockQ2_0, data.len() / 34) };
+        let planes = q2_0_mm2d_planes(blocks, n, k)?;
+        let codes_buf = mdev
+            .new_buffer_builder()
+            .with_data(&planes.codes)
+            .with_label("pk_codes")
+            .build()?;
+        let d_bytes = unsafe {
+            std::slice::from_raw_parts(planes.d.as_ptr() as *const u8, planes.d.len() * 2)
+        };
+        let d_buf = mdev
+            .new_buffer_builder()
+            .with_data(d_bytes)
+            .with_label("pk_d")
+            .build()?;
+        let x = Tensor::randn(0f32, 1f32, (m, k), device)?.to_dtype(DType::BF16)?;
+        let (xs, xl) = x.storage_and_layout();
+        let xbuf = match &*xs {
+            candle::Storage::Metal(ms) => ms.buffer().clone(),
+            _ => anyhow::bail!("x not metal"),
+        };
+        let xoff = xl.start_offset() * 2;
+        let dst = mdev
+            .new_buffer_builder()
+            .with_size(m * n * 2)
+            .with_label("pk_dst")
+            .build()?;
+        let dispatch = || -> Result<()> {
+            let enc = mdev.command_encoder()?;
+            call_quantized_matmul_mm2d_q2_0(
+                mdev.metal_device(),
+                &enc,
+                mdev.kernels(),
+                (m, n, planes.n_pad, k),
+                &xbuf,
+                xoff,
+                &codes_buf,
+                &d_buf,
+                0,
+                &dst,
+                variant,
+            )?;
+            Ok(())
+        };
+        for _ in 0..8 {
+            dispatch()?;
+        }
+        device.synchronize()?;
+        for _ in 0..iters {
+            dispatch()?;
+        }
+        device.synchronize()?;
+    } else if which == "q4k-mm2d" {
+        let qt = QTensor::quantize(&w, GgmlDType::Q4K)?;
+        let data = qt.data()?;
+        let blocks = unsafe {
+            std::slice::from_raw_parts(
+                data.as_ptr() as *const BlockQ4K,
+                data.len() / std::mem::size_of::<BlockQ4K>(),
+            )
+        };
+        let planes = q4k_mm2d_planes(blocks, n, k)?;
+        let nib_buf = mdev
+            .new_buffer_builder()
+            .with_data(&planes.nibbles)
+            .with_label("pk_nib")
+            .build()?;
+        let dsc_bytes = unsafe {
+            std::slice::from_raw_parts(planes.dsc.as_ptr() as *const u8, planes.dsc.len() * 2)
+        };
+        let dmm_bytes = unsafe {
+            std::slice::from_raw_parts(planes.dmm.as_ptr() as *const u8, planes.dmm.len() * 2)
+        };
+        let dsc_buf = mdev
+            .new_buffer_builder()
+            .with_data(dsc_bytes)
+            .with_label("pk_dsc")
+            .build()?;
+        let dmm_buf = mdev
+            .new_buffer_builder()
+            .with_data(dmm_bytes)
+            .with_label("pk_dmm")
+            .build()?;
+        let x = Tensor::randn(0f32, 1f32, (m, k), device)?.to_dtype(DType::BF16)?;
+        let (xs, xl) = x.storage_and_layout();
+        let xbuf = match &*xs {
+            candle::Storage::Metal(ms) => ms.buffer().clone(),
+            _ => anyhow::bail!("x not metal"),
+        };
+        let xoff = xl.start_offset() * 2;
+        let dst = mdev
+            .new_buffer_builder()
+            .with_size(m * n * 2)
+            .with_label("pk_dst")
+            .build()?;
+        let dispatch = || -> Result<()> {
+            let enc = mdev.command_encoder()?;
+            call_quantized_matmul_mm2d_q4k(
+                mdev.metal_device(),
+                &enc,
+                mdev.kernels(),
+                (m, n, planes.n_pad, k),
+                &xbuf,
+                xoff,
+                &nib_buf,
+                &dsc_buf,
+                &dmm_buf,
+                0,
+                &dst,
+            )?;
+            Ok(())
+        };
+        for _ in 0..8 {
+            dispatch()?;
+        }
+        device.synchronize()?;
+        for _ in 0..iters {
+            dispatch()?;
+        }
+        device.synchronize()?;
+    } else {
+        anyhow::bail!("unknown --which {which:?}; use mv | mm2d-k32 | mm2d-k128 | q4k-mm2d");
+    }
+    eprintln!("profile-kernel: done ({iters} dispatches)");
+    Ok(())
+}
+
 fn profile_decode(model: &mut Qwen35CausalLM, device: &Device, ids: &[u32]) -> Result<()> {
     use candle::D;
     use std::collections::HashMap;
@@ -674,6 +863,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
     let device = Device::new_metal(0)?;
     match args.cmd {
         GgufCmd::BenchGemv => bench_gemv(&device),
+        GgufCmd::ProfileKernel(a) => profile_kernel(&device, &a.which, a.iters, a.m),
         GgufCmd::Decode(a) => {
             let (mut model, ids, eos, _ctx, tok, load_seconds) = load_gguf_model(&a.model, &device)?;
             decode(&mut model, &device, &ids, eos, a.max_new_tokens, &tok, load_seconds)
