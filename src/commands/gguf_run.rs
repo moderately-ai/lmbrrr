@@ -104,6 +104,13 @@ struct SpecArgs {
     /// from greedy. Unset = exact argmax match (lossless).
     #[arg(long)]
     accept_margin: Option<f32>,
+
+    /// Prompt-lookup drafting. Default OFF: measured a net LOSS against this
+    /// drafter on both prose (18.3 -> 15.2 tok/s, 0 copy tokens accepted) and
+    /// code (20.0 -> 16.1 — copy rounds preempt stronger drafter rounds),
+    /// reproducing the MiniCPM campaign's ungated-PLD lesson.
+    #[arg(long)]
+    pld: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1292,6 +1299,7 @@ fn spec_decode(
     tok: &tokenizers::Tokenizer,
     readvance_rollback: bool,
     accept_margin: Option<f32>,
+    use_pld: bool,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -1379,7 +1387,11 @@ fn spec_decode(
             ngram_index.extend(&committed[indexed..]);
             indexed = committed.len();
         }
-        let copy_draft = ngram_index.propose(8).filter(|d| d.len() >= width);
+        let copy_draft = if use_pld {
+            ngram_index.propose(8).filter(|d| d.len() >= width)
+        } else {
+            None
+        };
         let (drafts, used_pld) = match copy_draft {
             Some(d) => {
                 pld_rounds += 1;
@@ -1579,6 +1591,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 &tok,
                 spec_run.readvance_rollback,
                 a.accept_margin,
+                a.pld,
             )
         }
         GgufCmd::Profile(a) => {
