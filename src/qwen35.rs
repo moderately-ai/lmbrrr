@@ -1540,7 +1540,9 @@ impl GatedDeltaNet {
             && matches!(xs.device(), Device::Metal(_))
             && xs.dtype() == DType::BF16
             && self.conv_state.is_some()
-            && self.num_k_heads == self.num_v_heads
+            // GQA: the v2 prep maps value-heads to their group's k-head
+            // (h % num_k), same as the decode kernel and the v1 chunk.
+            && self.num_v_heads.is_multiple_of(self.num_k_heads)
             && self.head_k_dim == 128
             && self.head_v_dim == 128
     }
