@@ -25,8 +25,10 @@ pub enum MixedLinear {
         // block dtypes, skipping the input-cast dispatch per call.
         bf16_direct: bool,
         // Tensor-op planes (mm2d verify route); shared across clones so the
-        // repack happens once per weight.
+        // repack happens once per weight. Exactly one of these is populated,
+        // keyed by the weight dtype (q4_K vs the ternary Q2_0 verify path).
         mm2d: Arc<std::sync::OnceLock<Option<crate::mm2d::Mm2dPlanes>>>,
+        mm2d_q2: Arc<std::sync::OnceLock<Option<crate::mm2d::Mm2dQ2Planes>>>,
         // Route configuration, resolved at the entrypoint and passed down
         // at construction — modules never read the environment.
         mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
@@ -52,20 +54,37 @@ impl MixedLinear {
         // contaminated the first verify's timing when lazy). Load-time cost
         // is reported via load_seconds.
         let mm2d = std::sync::OnceLock::new();
-        if mm2d_cfg.enabled && weight.dtype() == GgmlDType::Q4K {
+        let mm2d_q2 = std::sync::OnceLock::new();
+        if mm2d_cfg.enabled {
             if let candle::Device::Metal(dev) = weight.device() {
-                match crate::mm2d::Mm2dPlanes::from_qtensor(
-                    &weight,
-                    &dev,
-                    mm2d_cfg.plane_cache_dir.as_deref(),
-                ) {
-                    Ok(p) => {
-                        let _ = mm2d.set(Some(p));
-                    }
-                    Err(err) => {
-                        eprintln!("warning: mm2d repack failed, wide route stays ({err})");
-                        let _ = mm2d.set(None);
-                    }
+                match weight.dtype() {
+                    GgmlDType::Q4K => match crate::mm2d::Mm2dPlanes::from_qtensor(
+                        &weight,
+                        &dev,
+                        mm2d_cfg.plane_cache_dir.as_deref(),
+                    ) {
+                        Ok(p) => {
+                            let _ = mm2d.set(Some(p));
+                        }
+                        Err(err) => {
+                            eprintln!("warning: mm2d repack failed, wide route stays ({err})");
+                            let _ = mm2d.set(None);
+                        }
+                    },
+                    GgmlDType::Q2_0 => match crate::mm2d::Mm2dQ2Planes::from_qtensor(
+                        &weight,
+                        &dev,
+                        mm2d_cfg.plane_cache_dir.as_deref(),
+                    ) {
+                        Ok(p) => {
+                            let _ = mm2d_q2.set(Some(p));
+                        }
+                        Err(err) => {
+                            eprintln!("warning: mm2d q2 repack failed, wide route stays ({err})");
+                            let _ = mm2d_q2.set(None);
+                        }
+                    },
+                    _ => {}
                 }
             }
         }
@@ -74,6 +93,7 @@ impl MixedLinear {
             force_f32_input: true,
             bf16_direct,
             mm2d: Arc::new(mm2d),
+            mm2d_q2: Arc::new(mm2d_q2),
             mm2d_cfg,
         })
     }
@@ -117,6 +137,7 @@ impl MixedLinear {
                 force_f32_input,
                 bf16_direct,
                 mm2d,
+                mm2d_q2,
                 mm2d_cfg,
             } => {
                 if *force_f32_input && xs.dtype() != DType::F32 {
@@ -131,6 +152,13 @@ impl MixedLinear {
                             if let Some(Some(planes)) = mm2d.get() {
                                 if let Ok(out) =
                                     crate::mm2d::mm2d_q4k_forward(xs, planes, mm2d_cfg)
+                                {
+                                    return Ok(out);
+                                }
+                            }
+                            if let Some(Some(planes)) = mm2d_q2.get() {
+                                if let Ok(out) =
+                                    crate::mm2d::mm2d_q2_0_forward(xs, planes, mm2d_cfg)
                                 {
                                     return Ok(out);
                                 }

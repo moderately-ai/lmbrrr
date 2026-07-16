@@ -18,12 +18,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use candle::op::BackpropOp;
-use candle::quantized::k_quants::BlockQ4K;
+use candle::quantized::k_quants::{BlockQ2_0, BlockQ4K};
 use candle::quantized::{GgmlDType, QTensor};
 use candle::{DType, MetalDevice, Storage, Tensor};
 use candle_metal_kernels::metal::Buffer;
 use candle_metal_kernels::{
-    call_quantized_matmul_mm2d_q4k, call_quantized_matmul_mm2d_q4k_splitk,
+    call_quantized_matmul_mm2d_q2_0, call_quantized_matmul_mm2d_q4k,
+    call_quantized_matmul_mm2d_q4k_splitk, Mm2dQ2Variant,
 };
 
 /// Tensor-op route configuration. Constructed ONCE at the entrypoint
@@ -253,6 +254,186 @@ impl Mm2dPlanes {
             k: planes.k,
         })
     }
+}
+
+/// Device-resident repacked planes for one Q2_0 (ternary) weight — the DSpark
+/// verify route. Parallel to [`Mm2dPlanes`] (q4_K): codes `[k, n_pad]` 2-bit +
+/// `d [k/128, n_pad]` fp16 (candle::quantized::metal::q2_0_mm2d_planes).
+pub struct Mm2dQ2Planes {
+    codes: Arc<Buffer>,
+    d: Arc<Buffer>,
+    n: usize,
+    n_pad: usize,
+    k: usize,
+}
+
+impl Mm2dQ2Planes {
+    /// Repack + upload a Q2_0 weight's mm2d planes (cache read, else CPU repack
+    /// of the resident ggml blocks then upload). k must be a multiple of 128.
+    pub fn from_qtensor(
+        weight: &QTensor,
+        device: &MetalDevice,
+        cache_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            weight.dtype() == GgmlDType::Q2_0,
+            "mm2d q2 planes need Q2_0 (got {:?})",
+            weight.dtype()
+        );
+        let dims = weight.shape().dims();
+        anyhow::ensure!(dims.len() == 2, "mm2d planes need [n, k]; got {dims:?}");
+        let (n, k) = (dims[0], dims[1]);
+        anyhow::ensure!(k % 128 == 0 && k <= 8192, "q2 mm2d needs k%128==0, k<=8192 (k={k})");
+        let data = weight.data().context("read ggml blocks")?;
+        anyhow::ensure!(
+            data.len() % std::mem::size_of::<BlockQ2_0>() == 0,
+            "Q2_0 data length {} is not block-aligned",
+            data.len()
+        );
+
+        let n_pad = n.div_ceil(64) * 64;
+        let codes_len = k * n_pad / 4; // 2-bit, 4 codes/byte
+        let d_len = (k / 128) * n_pad * 2; // fp16 per-128-block scale
+        let total_len = codes_len + d_len;
+
+        let cache_path = cache_dir.and_then(|dir| {
+            std::fs::create_dir_all(dir).ok()?;
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&*data);
+            let digest = hasher.finalize();
+            let short = digest[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            Some(dir.join(format!("{short}-{n}x{k}.q2v{PLANE_CACHE_VERSION}.bin")))
+        });
+
+        let upload = |bytes: &[u8], label: &str| -> Result<Arc<Buffer>> {
+            device
+                .new_buffer_builder()
+                .with_data(bytes)
+                .with_label(label)
+                .build()
+                .with_context(|| format!("upload {label}"))
+        };
+
+        if let Some(path) = &cache_path {
+            if let Ok(bytes) = std::fs::read(path) {
+                if bytes.len() == total_len {
+                    return Ok(Self {
+                        codes: upload(&bytes[..codes_len], "mm2d_q2_codes")?,
+                        d: upload(&bytes[codes_len..], "mm2d_q2_d")?,
+                        n,
+                        n_pad,
+                        k,
+                    });
+                }
+            }
+        }
+
+        let blocks = unsafe {
+            std::slice::from_raw_parts(
+                data.as_ptr() as *const BlockQ2_0,
+                data.len() / std::mem::size_of::<BlockQ2_0>(),
+            )
+        };
+        let planes = candle::quantized::metal::q2_0_mm2d_planes(blocks, n, k)?;
+        anyhow::ensure!(
+            planes.n_pad == n_pad && planes.codes.len() == codes_len,
+            "q2_0 plane layout drifted — bump PLANE_CACHE_VERSION"
+        );
+        let d_bytes =
+            unsafe { std::slice::from_raw_parts(planes.d.as_ptr() as *const u8, planes.d.len() * 2) };
+
+        if let Some(path) = &cache_path {
+            let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+            let write = || -> std::io::Result<()> {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&tmp)?;
+                f.write_all(&planes.codes)?;
+                f.write_all(d_bytes)?;
+                f.flush()?;
+                std::fs::rename(&tmp, path)
+            };
+            if let Err(err) = write() {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!("warning: mm2d q2 plane cache write failed ({err})");
+            }
+        }
+
+        Ok(Self {
+            codes: upload(&planes.codes, "mm2d_q2_codes")?,
+            d: upload(d_bytes, "mm2d_q2_d")?,
+            n: planes.n,
+            n_pad: planes.n_pad,
+            k: planes.k,
+        })
+    }
+}
+
+/// One Q2_0 matmul through the tensor-op verify kernel: xs `[.., m, k]` BF16 ->
+/// `[.., m, n]` BF16. Mirrors [`mm2d_q4k_forward`]; the DSpark verify route.
+pub fn mm2d_q2_0_forward(xs: &Tensor, planes: &Mm2dQ2Planes, cfg: &Mm2dConfig) -> Result<Tensor> {
+    anyhow::ensure!(planes.n >= cfg.min_n, "below the configured mm2d min_n");
+    let candle::Device::Metal(device) = xs.device() else {
+        anyhow::bail!("mm2d forward requires a Metal device");
+    };
+    let dims = xs.dims().to_vec();
+    let k = *dims.last().context("empty activation shape")?;
+    let m: usize = dims[..dims.len() - 1].iter().product();
+    anyhow::ensure!(k == planes.k, "activation k={k} vs planes k={}", planes.k);
+    anyhow::ensure!((1..=8).contains(&m), "mm2d m={m} out of tile range");
+
+    let xs = if xs.is_contiguous() {
+        xs.clone()
+    } else {
+        xs.contiguous()?
+    };
+    let (storage, layout) = xs.storage_and_layout();
+    let Storage::Metal(ms) = &*storage else {
+        anyhow::bail!("activations are not Metal-resident");
+    };
+    let lhs_offset = layout.start_offset() * 2;
+    let dst = device
+        .new_buffer_builder()
+        .with_size(m * planes.n * 2)
+        .with_label("mm2d_q2_dst")
+        .build()?;
+    let dispatch = || -> Result<()> {
+        let encoder = device.command_encoder().context("mm2d q2 encoder")?;
+        call_quantized_matmul_mm2d_q2_0(
+            device.metal_device(),
+            &encoder,
+            device.kernels(),
+            (m, planes.n, planes.n_pad, planes.k),
+            ms.buffer(),
+            lhs_offset,
+            &planes.codes,
+            &planes.d,
+            0,
+            &dst,
+            Mm2dQ2Variant::DEFAULT,
+        )
+        .context("mm2d q2_0 dispatch")
+    };
+    if let Err(err) = dispatch() {
+        if !MM2D_BROKEN.swap(true, Ordering::Relaxed) {
+            eprintln!("warning: mm2d Q2_0 route unavailable, using wide kernels ({err})");
+        }
+        anyhow::bail!("mm2d q2 dispatch failed: {err}");
+    }
+    drop(storage);
+
+    let mut out_dims = dims;
+    *out_dims.last_mut().expect("non-empty dims") = planes.n;
+    let storage = candle::MetalStorage::new(dst, device.clone(), m * planes.n, DType::BF16);
+    Ok(Tensor::from_storage(
+        Storage::Metal(storage),
+        out_dims,
+        BackpropOp::none(),
+        false,
+    ))
 }
 
 /// Whether this activation shape is eligible for the tensor-op route.
