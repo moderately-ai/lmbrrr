@@ -263,7 +263,7 @@ impl DraftLayer {
 /// blocks, so a row slice is a byte slice).
 enum EmbedTable {
     Dense(Tensor),
-    Packed(candle::quantized::QTensor),
+    Packed(crate::quantized_linear::PackedEmbed),
 }
 
 impl EmbedTable {
@@ -274,20 +274,7 @@ impl EmbedTable {
                 let idx = Tensor::from_slice(ids, ids.len(), device)?;
                 t.index_select(&idx, 0)?.unsqueeze(0)
             }
-            EmbedTable::Packed(qt) => {
-                use candle::quantized::ggml_file::qtensor_from_ggml;
-                let (_vocab, hidden) = qt.shape().dims2()?;
-                let gd = qt.dtype();
-                let row_bytes = (hidden / gd.block_size()) * gd.type_size();
-                let all = qt.data()?;
-                let mut bytes = Vec::with_capacity(ids.len() * row_bytes);
-                for &id in ids {
-                    let off = id as usize * row_bytes;
-                    bytes.extend_from_slice(&all[off..off + row_bytes]);
-                }
-                let rows = qtensor_from_ggml(gd, &bytes, vec![ids.len(), hidden], device)?;
-                rows.dequantize(device)?.to_dtype(dtype)?.unsqueeze(0)
-            }
+            EmbedTable::Packed(pe) => pe.gather(ids, device, dtype).map_err(candle::Error::wrap)?.unsqueeze(0),
         }
     }
 }
@@ -666,7 +653,9 @@ impl DsparkDrafter {
         };
 
         Ok(Self {
-            embed_tokens: EmbedTable::Packed(gguf.read_qtensor("token_embd.weight", device)?),
+            embed_tokens: EmbedTable::Packed(crate::quantized_linear::PackedEmbed::new(
+                &gguf.read_qtensor("token_embd.weight", device)?,
+            )?),
             norm: norm("output_norm.weight")?,
             fc: Linear::new(rd("dspark.fc.weight")?, None),
             hidden_norm: norm("dspark.hidden_norm.weight")?,

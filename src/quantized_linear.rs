@@ -621,28 +621,53 @@ mod tests {
     }
 }
 
-/// Gather rows `ids` from a packed `[vocab, hidden]` QTensor and dequantize to
-/// `dtype`, returning `[ids.len(), hidden]`. Rows are contiguous packed blocks
-/// (blocks run along the input/hidden dim), so a row slice is a byte slice —
-/// this dequantizes only the requested rows, keeping a 248k-vocab embedding
-/// packed instead of expanding the whole table to dense.
-pub fn packed_row_gather(
-    qt: &QTensor,
-    ids: &[u32],
-    device: &Device,
-    dtype: DType,
-) -> Result<Tensor> {
-    use candle::quantized::ggml_file::qtensor_from_ggml;
-    let (_vocab, hidden) = qt.shape().dims2()?;
-    let gd = qt.dtype();
-    let row_bytes = (hidden / gd.block_size()) * gd.type_size();
-    let all = qt.data()?;
-    let mut bytes = Vec::with_capacity(ids.len() * row_bytes);
-    for &id in ids {
-        let off = id as usize * row_bytes;
-        bytes.extend_from_slice(&all[off..off + row_bytes]);
+/// A 248k-vocab token embedding kept packed: the packed block bytes are cached
+/// host-side ONCE, and each `gather` slices only the requested rows (rows are
+/// contiguous packed blocks — blocks run along the hidden dim) and dequantizes
+/// just those. This keeps the table off the accelerator's resident budget (a
+/// dense bf16 expansion is ~2.5 GB) without the per-call whole-table `qt.data()`
+/// device->host copy a naive gather would pay.
+pub struct PackedEmbed {
+    bytes: Arc<Vec<u8>>,
+    gd: GgmlDType,
+    hidden: usize,
+    row_bytes: usize,
+}
+
+impl PackedEmbed {
+    pub fn new(qt: &QTensor) -> Result<Self> {
+        let (_vocab, hidden) = qt.shape().dims2()?;
+        let gd = qt.dtype();
+        let row_bytes = (hidden / gd.block_size()) * gd.type_size();
+        Ok(Self {
+            bytes: Arc::new(qt.data()?.into_owned()),
+            gd,
+            hidden,
+            row_bytes,
+        })
     }
-    Ok(qtensor_from_ggml(gd, &bytes, vec![ids.len(), hidden], device)?
-        .dequantize(device)?
-        .to_dtype(dtype)?)
+
+    /// Gather rows `ids` -> `[ids.len(), hidden]` in `dtype`.
+    pub fn gather(&self, ids: &[u32], device: &Device, dtype: DType) -> Result<Tensor> {
+        use candle::quantized::ggml_file::qtensor_from_ggml;
+        let mut bytes = Vec::with_capacity(ids.len() * self.row_bytes);
+        for &id in ids {
+            let off = id as usize * self.row_bytes;
+            bytes.extend_from_slice(&self.bytes[off..off + self.row_bytes]);
+        }
+        Ok(qtensor_from_ggml(self.gd, &bytes, vec![ids.len(), self.hidden], device)?
+            .dequantize(device)?
+            .to_dtype(dtype)?)
+    }
+}
+
+impl Clone for PackedEmbed {
+    fn clone(&self) -> Self {
+        Self {
+            bytes: self.bytes.clone(),
+            gd: self.gd,
+            hidden: self.hidden,
+            row_bytes: self.row_bytes,
+        }
+    }
 }

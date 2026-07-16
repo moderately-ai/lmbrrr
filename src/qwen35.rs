@@ -2616,7 +2616,8 @@ pub struct Qwen35TextModel {
 enum TokenEmbedding {
     Dense(Embedding),
     Packed {
-        qt: std::sync::Arc<candle::quantized::QTensor>,
+        embed: crate::quantized_linear::PackedEmbed,
+        hidden: usize,
         dtype: DType,
     },
 }
@@ -2634,12 +2635,13 @@ impl TokenEmbedding {
     fn forward(&self, ids: &Tensor) -> Result<Tensor> {
         match self {
             TokenEmbedding::Dense(e) => e.forward(ids),
-            TokenEmbedding::Packed { qt, dtype } => {
+            TokenEmbedding::Packed { embed, hidden, dtype } => {
                 let (b, seq) = ids.dims2()?;
                 let idv = ids.flatten_all()?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
-                let rows = crate::quantized_linear::packed_row_gather(qt.as_ref(), &idv, ids.device(), *dtype)
+                let rows = embed
+                    .gather(&idv, ids.device(), *dtype)
                     .map_err(candle::Error::wrap)?;
-                rows.reshape((b, seq, qt.shape().dims2()?.1))
+                rows.reshape((b, seq, *hidden))
             }
         }
     }
@@ -2658,7 +2660,9 @@ impl Qwen35TextModel {
     pub fn new<S: LinearSource>(cfg: &TextConfig, source: &S, ctx: &ModelCtx) -> Result<Self> {
         let embed_tokens = match source.embedding_qtensor("embed_tokens.weight")? {
             Some(qt) => TokenEmbedding::Packed {
-                qt: std::sync::Arc::new(qt),
+                embed: crate::quantized_linear::PackedEmbed::new(&qt)
+                    .map_err(candle::Error::wrap)?,
+                hidden: cfg.hidden_size,
                 dtype: source.dtype(),
             },
             None => {

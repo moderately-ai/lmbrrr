@@ -226,14 +226,6 @@ fn spec_decode(
     let caps = model.take_device_captures();
     let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
     drop(caps);
-    // The captured hidden states alias the target's live forward buffers; a
-    // save+reload fully detaches them onto a fresh host->device round-trip so
-    // the drafter reads stable values (a direct append_context read the buffers
-    // after the target reused them -> collapsed the drafter's residual to 0).
-    ctx_feat.save_safetensors("ctx_feat", "/tmp/dspark_ctx_feat.safetensors")?;
-    let ctx_feat = candle::safetensors::load("/tmp/dspark_ctx_feat.safetensors", device)?
-        ["ctx_feat"]
-        .to_dtype(DType::BF16)?;
     drafter.append_context(&ctx_feat, 0)?;
     if dbg {
         eprintln!("drafter loaded ({drafter_load_s:.1}s), prefill done, offset={}", ids.len());
