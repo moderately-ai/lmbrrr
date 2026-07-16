@@ -85,6 +85,49 @@ impl DsparkConfig {
         serde_json::from_reader(std::io::BufReader::new(file))
             .with_context(|| format!("parse drafter config {}", path.display()))
     }
+
+    /// Derive the drafter config from a `dspark.*`-namespaced GGUF (the shipped
+    /// Bonsai drafter). Mirrors the prism llama.cpp arch key names.
+    pub fn from_gguf(gguf: &crate::gguf::GgufFile) -> Result<Self> {
+        use crate::gguf::{md_bool, md_f64, md_u32, md_u32_array, md_usize};
+        let c = gguf.content();
+        let log_snr = md_bool(c, "dspark.dspark.log_snr_conditioning").unwrap_or(false);
+        Ok(Self {
+            vocab_size: md_usize(c, "dspark.vocab_size")?,
+            hidden_size: md_usize(c, "dspark.embedding_length")?,
+            intermediate_size: md_usize(c, "dspark.feed_forward_length")?,
+            num_hidden_layers: md_usize(c, "dspark.block_count")?,
+            num_attention_heads: md_usize(c, "dspark.attention.head_count")?,
+            num_key_value_heads: md_usize(c, "dspark.attention.head_count_kv")?,
+            head_dim: md_usize(c, "dspark.attention.key_length")?,
+            rms_norm_eps: md_f64(c, "dspark.attention.layer_norm_rms_epsilon")?,
+            block_size: md_usize(c, "dspark.dspark.block_size")?,
+            mask_token_id: md_u32(c, "dspark.dspark.mask_token_id")?,
+            markov_rank: md_usize(c, "dspark.dspark.markov_rank")?,
+            target_layer_ids: md_u32_array(c, "dspark.dspark.target_layers")?
+                .into_iter()
+                .map(|x| x as usize)
+                .collect(),
+            rope_parameters: DsparkRopeParameters {
+                rope_theta: md_f64(c, "dspark.rope.freq_base")?,
+            },
+            markov_head_type: default_markov_head_type(),
+            enable_confidence_head: md_bool(c, "dspark.dspark.confidence_head").unwrap_or(true),
+            confidence_head_with_markov: md_bool(c, "dspark.dspark.confidence_head_with_markov")
+                .unwrap_or(true),
+            log_snr_conditioning: log_snr,
+            min_log_snr: if log_snr {
+                md_f64(c, "dspark.dspark.min_log_snr")?
+            } else {
+                default_min_log_snr()
+            },
+            max_log_snr: if log_snr {
+                md_f64(c, "dspark.dspark.max_log_snr")?
+            } else {
+                default_max_log_snr()
+            },
+        })
+    }
 }
 
 /// Standard Qwen3 RMSNorm (weight * x_hat, no zero-centering), routed through
@@ -293,6 +336,12 @@ fn quantize_or_dense(
     }
 }
 
+/// Read a GGUF tensor by name, dequantize to `dtype`. candle reverses gguf
+/// `ne`, so quantized weights come back `[out, in]` — the port's convention.
+fn read_dense(gguf: &crate::gguf::GgufFile, name: &str, device: &Device, dtype: DType) -> Result<Tensor> {
+    Ok(gguf.read_qtensor(name, device)?.dequantize(device)?.to_dtype(dtype)?)
+}
+
 /// Precompute the GIDD log-SNR conditioning bias [block, hidden] (src/models/
 /// dspark.cpp in the prism llama.cpp fork). Each block's anchor row (pos 0)
 /// takes max_log_snr, the masked rows min_log_snr; a 128-dim sinusoidal embed
@@ -468,6 +517,99 @@ impl DsparkDrafter {
             // The safetensors round-4 drafter has no log-SNR conditioning; the
             // GGUF loader path populates this when the metadata enables it.
             log_snr_bias: None,
+            rotary: Rotary::new(head_dim, config.rope_parameters.rope_theta, dtype, device)?,
+            layers,
+            markov_fused_slots: std::sync::OnceLock::new(),
+            device: device.clone(),
+            dtype,
+            propose_timing,
+            config,
+        })
+    }
+
+    /// Load the shipped Bonsai DSpark drafter from its GGUF. Backbone + heads
+    /// dequantize to `dtype` (dense); the log-SNR conditioning bias is
+    /// precomputed. FR-Spec draft-vocab slicing is not yet supported here.
+    pub fn load_gguf(
+        gguf: &crate::gguf::GgufFile,
+        device: &Device,
+        dtype: DType,
+        _ctx: &crate::model_ctx::ModelCtx,
+        propose_timing: bool,
+    ) -> Result<Self> {
+        let config = DsparkConfig::from_gguf(gguf)?;
+        let head_dim = config.head_dim;
+        let eps = config.rms_norm_eps;
+        let rd = |name: &str| read_dense(gguf, name, device, dtype);
+        let norm = |name: &str| -> Result<RmsNorm> {
+            Ok(RmsNorm { weight: rd(name)?, eps })
+        };
+
+        let mut layers = Vec::with_capacity(config.num_hidden_layers);
+        for i in 0..config.num_hidden_layers {
+            let p = format!("blk.{i}");
+            // Width-fuse [q;k;v] and [gate;up] (row-cat of dense [out,in]).
+            let qkv = Tensor::cat(
+                &[
+                    &rd(&format!("{p}.attn_q.weight"))?,
+                    &rd(&format!("{p}.attn_k.weight"))?,
+                    &rd(&format!("{p}.attn_v.weight"))?,
+                ],
+                0,
+            )?;
+            let gate_up = Tensor::cat(
+                &[&rd(&format!("{p}.ffn_gate.weight"))?, &rd(&format!("{p}.ffn_up.weight"))?],
+                0,
+            )?;
+            layers.push(DraftLayer {
+                qkv_proj: Linear::new(qkv, None),
+                o_proj: Linear::new(rd(&format!("{p}.attn_output.weight"))?, None),
+                q_norm: norm(&format!("{p}.attn_q_norm.weight"))?,
+                k_norm: norm(&format!("{p}.attn_k_norm.weight"))?,
+                gate_up_proj: Linear::new(gate_up, None),
+                down_proj: Linear::new(rd(&format!("{p}.ffn_down.weight"))?, None),
+                input_layernorm: norm(&format!("{p}.attn_norm.weight"))?,
+                post_attention_layernorm: norm(&format!("{p}.ffn_norm.weight"))?,
+                ctx: TruncatableKvCache::new(),
+            });
+        }
+
+        let log_snr_bias = if config.log_snr_conditioning {
+            let fc1 = Linear::new(
+                rd("dspark.log_snr_fc1.weight")?,
+                Some(rd("dspark.log_snr_fc1.bias")?),
+            );
+            let fc2 = Linear::new(
+                rd("dspark.log_snr_fc2.weight")?,
+                Some(rd("dspark.log_snr_fc2.bias")?),
+            );
+            Some(compute_log_snr_bias(
+                config.block_size,
+                config.min_log_snr,
+                config.max_log_snr,
+                &fc1,
+                &fc2,
+                device,
+                dtype,
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            embed_tokens: rd("token_embd.weight")?,
+            norm: norm("output_norm.weight")?,
+            fc: Linear::new(rd("dspark.fc.weight")?, None),
+            hidden_norm: norm("dspark.hidden_norm.weight")?,
+            lm_head: MixedLinear::dense(Linear::new(rd("output.weight")?, None)),
+            markov_w1: rd("dspark.markov_head_a.weight")?,
+            markov_w2: MixedLinear::dense(Linear::new(rd("dspark.markov_head_b.weight")?, None)),
+            draft_vocab_ids: None,
+            confidence: Linear::new(
+                rd("dspark.confidence_head.weight")?,
+                Some(rd("dspark.confidence_head.bias")?),
+            ),
+            log_snr_bias,
             rotary: Rotary::new(head_dim, config.rope_parameters.rope_theta, dtype, device)?,
             layers,
             markov_fused_slots: std::sync::OnceLock::new(),
@@ -1145,4 +1287,48 @@ pub struct DeviceProposal {
     pub packed: Tensor,
     pub tokens_dev: Tensor,
     pub gamma: usize,
+}
+
+#[cfg(test)]
+mod gguf_drafter_tests {
+    use super::*;
+    use crate::model_ctx::ModelCtx;
+
+    // Loads the shipped Bonsai DSpark drafter GGUF and runs one full propose
+    // (backbone + log-SNR conditioning + Markov chain + confidence head) over a
+    // dummy target context, validating the GGUF loader + forward plumbing.
+    #[test]
+    fn bonsai_dspark_drafter_smoke() -> Result<()> {
+        let path = std::path::PathBuf::from(format!(
+            "{}/models/Ternary-Bonsai-27B/Ternary-Bonsai-27B-dspark-Q4_1.gguf",
+            std::env::var("HOME").unwrap_or_default()
+        ));
+        if !path.exists() {
+            eprintln!("skip: drafter not present");
+            return Ok(());
+        }
+        let device = match Device::new_metal(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("skip: no metal device");
+                return Ok(());
+            }
+        };
+        let gguf = crate::gguf::GgufFile::open(&path)?;
+        let ctx = ModelCtx::default();
+        let mut drafter = DsparkDrafter::load_gguf(&gguf, &device, DType::BF16, &ctx, false)?;
+        assert_eq!(drafter.config.block_size, 4);
+        assert_eq!(drafter.config.target_layer_ids, vec![1, 16, 31, 46, 61]);
+        assert!(drafter.config.log_snr_conditioning);
+        assert!(drafter.log_snr_bias.is_some());
+
+        let bs = drafter.config.block_size;
+        let cap = drafter.config.target_layer_ids.len() * drafter.config.hidden_size;
+        let raw_ctx = Tensor::zeros((1, 1, cap), DType::BF16, &device)?;
+        drafter.append_context(&raw_ctx, 0)?;
+        let proposal = drafter.propose(1u32, 1, bs)?;
+        assert_eq!(proposal.tokens.len(), bs);
+        eprintln!("drafter smoke ok: tokens {:?}", proposal.tokens);
+        Ok(())
+    }
 }

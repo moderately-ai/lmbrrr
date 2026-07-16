@@ -103,13 +103,49 @@ impl GgufFile {
             .and_then(|v| v.to_u32().ok())
     }
 
-    fn read_qtensor(&self, gguf_name: &str, device: &Device) -> Result<QTensor> {
+    pub(crate) fn read_qtensor(&self, gguf_name: &str, device: &Device) -> Result<QTensor> {
         let mut reader = self.reader.borrow_mut();
         self.content.tensor(&mut *reader, gguf_name, device)
     }
+
+    pub(crate) fn content(&self) -> &gguf_file::Content {
+        &self.content
+    }
 }
 
-fn md_usize(content: &gguf_file::Content, key: &str) -> Result<usize> {
+pub(crate) fn md_bool(content: &gguf_file::Content, key: &str) -> Result<bool> {
+    let v = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| candle::Error::Msg(format!("gguf missing metadata key {key}")))?;
+    v.to_bool()
+        .or_else(|_| v.to_u32().map(|x| x != 0))
+        .map_err(candle::Error::from)
+}
+
+pub(crate) fn md_u32(content: &gguf_file::Content, key: &str) -> Result<u32> {
+    Ok(md_usize(content, key)? as u32)
+}
+
+pub(crate) fn md_u32_array(content: &gguf_file::Content, key: &str) -> Result<Vec<u32>> {
+    let v = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| candle::Error::Msg(format!("gguf missing metadata key {key}")))?;
+    let items = v
+        .to_vec()
+        .map_err(|_| candle::Error::Msg(format!("gguf metadata {key} is not an array")))?;
+    items
+        .iter()
+        .map(|it| {
+            it.to_u32()
+                .or_else(|_| it.to_i32().map(|x| x as u32))
+                .map_err(candle::Error::from)
+        })
+        .collect()
+}
+
+pub(crate) fn md_usize(content: &gguf_file::Content, key: &str) -> Result<usize> {
     let v = content
         .metadata
         .get(key)
@@ -121,7 +157,7 @@ fn md_usize(content: &gguf_file::Content, key: &str) -> Result<usize> {
         .or_else(|_| v.to_i32().map(|x| x as usize))
 }
 
-fn md_f64(content: &gguf_file::Content, key: &str) -> Result<f64> {
+pub(crate) fn md_f64(content: &gguf_file::Content, key: &str) -> Result<f64> {
     let v = content
         .metadata
         .get(key)
