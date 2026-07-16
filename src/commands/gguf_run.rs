@@ -163,14 +163,14 @@ fn repack(device: &Device, args: &RepackArgs) -> Result<()> {
         for (_name, dims, dtype) in gguf.tensor_infos() {
             if matches!(dtype, GgmlDType::Q2_0)
                 && dims.len() == 2
-                && !(dims[1] % 128 == 0 && dims[1] <= 8192)
+                && !lmbrrr::mm2d::mm2d_q2_k_supported(dims[1])
             {
                 *skipped.entry((dims[0], dims[1])).or_default() += 1;
             }
         }
         for ((n, k), count) in &skipped {
             println!(
-                "skipped {count} x [{n}, {k}]: k={k} exceeds the kernel's 8192 limit; these stay on the GEMV route"
+                "skipped {count} x [{n}, {k}]: k={k} unsupported by the mm2d kernel; these stay on the GEMV route"
             );
         }
     }

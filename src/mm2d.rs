@@ -64,6 +64,13 @@ pub struct Mm2dConfig {
     pub split_target_tgs: usize,
     /// Content-addressed plane cache directory; None disables caching.
     pub plane_cache_dir: Option<std::path::PathBuf>,
+    /// Planar-only Q2_0 weights (the spec-dedicated memory mode): eligible
+    /// weights keep ONLY their planes resident — the raw ggml copy is dropped
+    /// at load — and every m (decode, verify, chunked prefill) runs on the
+    /// tensor-op kernel. Fits the full plane set in the M3's GPU budget at
+    /// the cost of slower m=1 (~0.55 ms vs the GEMV's ~0.21 ms per big
+    /// matmul) and slow long prefill; plain-decode runs leave this off.
+    pub planar_only: bool,
     /// Fused verify-head argmax. Opt-in: falsified in-loop 2026-07-15
     /// (byte-identical but 11.71 -> 11.82 ms/round — the saved logits write
     /// is ~0.02ms while the threadgroup argmax epilogue costs more than the
@@ -83,6 +90,7 @@ impl Default for Mm2dConfig {
             // Pure default: no caching. from_env (the entrypoint path)
             // supplies the ~/.cache location so tests stay deterministic.
             plane_cache_dir: None,
+            planar_only: false,
             fused_verify_argmax: false,
         }
     }
@@ -115,6 +123,7 @@ impl Mm2dConfig {
                     .ok()
                     .or_else(default_plane_cache_dir)
             },
+            planar_only: std::env::var(k::MM2D_PLANAR).is_ok_and(|v| v == "1"),
             fused_verify_argmax: std::env::var(k::FUSED_VERIFY_ARGMAX).is_ok_and(|v| v == "1"),
         }
     }
@@ -268,15 +277,29 @@ pub struct Mm2dQ2Planes {
 }
 
 /// Whether a Q2_0 weight can ride the mm2d kernel at all: 2D, k a multiple of
-/// 128 (the block size) and k <= 8192 (the kernel's threadgroup row-sum
-/// staging). Ineligible weights (this model: ffn_down, k=17408) stay on the
-/// GEMV route BY DESIGN — callers skip the plane build without warning.
+/// 128 (the block size) and k within the deepest instantiation's KMAX
+/// (17408 covers ffn_down). Ineligible weights stay on the GEMV route BY
+/// DESIGN — callers skip the plane build without warning.
 pub fn mm2d_q2_plane_eligible(weight: &QTensor) -> bool {
     let dims = weight.shape().dims();
-    weight.dtype() == GgmlDType::Q2_0
-        && dims.len() == 2
-        && dims[1] % 128 == 0
-        && dims[1] <= 8192
+    weight.dtype() == GgmlDType::Q2_0 && dims.len() == 2 && mm2d_q2_k_supported(dims[1])
+}
+
+/// The K side of eligibility, shared with the repack command's report so the
+/// two can never disagree: a multiple of 128 within the deepest
+/// instantiation's KMAX.
+pub fn mm2d_q2_k_supported(k: usize) -> bool {
+    k % 128 == 0 && k <= Mm2dQ2Variant::T64_K128_K17408.max_k
+}
+
+/// The kernel instantiation for a plane depth: the default (KMAX 8192, 2 KB
+/// rs_tg) wherever it fits, the deep-K one (ffn_down) above it.
+fn q2_variant_for_k(k: usize) -> Mm2dQ2Variant {
+    if k <= Mm2dQ2Variant::DEFAULT.max_k {
+        Mm2dQ2Variant::DEFAULT
+    } else {
+        Mm2dQ2Variant::T64_K128_K17408
+    }
 }
 
 impl Mm2dQ2Planes {
@@ -295,7 +318,11 @@ impl Mm2dQ2Planes {
         let dims = weight.shape().dims();
         anyhow::ensure!(dims.len() == 2, "mm2d planes need [n, k]; got {dims:?}");
         let (n, k) = (dims[0], dims[1]);
-        anyhow::ensure!(k % 128 == 0 && k <= 8192, "q2 mm2d needs k%128==0, k<=8192 (k={k})");
+        anyhow::ensure!(
+            k % 128 == 0 && k <= Mm2dQ2Variant::T64_K128_K17408.max_k,
+            "q2 mm2d needs k%128==0, k<={} (k={k})",
+            Mm2dQ2Variant::T64_K128_K17408.max_k
+        );
         let data = weight.data().context("read ggml blocks")?;
         anyhow::ensure!(
             data.len() % std::mem::size_of::<BlockQ2_0>() == 0,
@@ -385,7 +412,10 @@ impl Mm2dQ2Planes {
 }
 
 /// One Q2_0 matmul through the tensor-op verify kernel: xs `[.., m, k]` BF16 ->
-/// `[.., m, n]` BF16. Mirrors [`mm2d_q4k_forward`]; the DSpark verify route.
+/// `[.., m, n]` BF16. Mirrors [`mm2d_q4k_forward`] for verify chunks (m <= 8,
+/// one dispatch); larger m (planar-only prefill) tiles the rows in slices of 8
+/// through the same kernel — each extra slice re-reads the weights, so this is
+/// a fit-the-memory route, not a prefill-throughput one.
 pub fn mm2d_q2_0_forward(xs: &Tensor, planes: &Mm2dQ2Planes, cfg: &Mm2dConfig) -> Result<Tensor> {
     anyhow::ensure!(planes.n >= cfg.min_n, "below the configured mm2d min_n");
     let candle::Device::Metal(device) = xs.device() else {
@@ -395,7 +425,7 @@ pub fn mm2d_q2_0_forward(xs: &Tensor, planes: &Mm2dQ2Planes, cfg: &Mm2dConfig) -
     let k = *dims.last().context("empty activation shape")?;
     let m: usize = dims[..dims.len() - 1].iter().product();
     anyhow::ensure!(k == planes.k, "activation k={k} vs planes k={}", planes.k);
-    anyhow::ensure!((1..=8).contains(&m), "mm2d m={m} out of tile range");
+    anyhow::ensure!(m >= 1, "empty activation");
 
     let xs = if xs.is_contiguous() {
         xs.clone()
@@ -412,28 +442,35 @@ pub fn mm2d_q2_0_forward(xs: &Tensor, planes: &Mm2dQ2Planes, cfg: &Mm2dConfig) -
         .with_size(m * planes.n * 2)
         .with_label("mm2d_q2_dst")
         .build()?;
+    let variant = q2_variant_for_k(planes.k);
     let dispatch = || -> Result<()> {
         let encoder = device.command_encoder().context("mm2d q2 encoder")?;
-        call_quantized_matmul_mm2d_q2_0(
-            device.metal_device(),
-            &encoder,
-            device.kernels(),
-            (m, planes.n, planes.n_pad, planes.k),
-            ms.buffer(),
-            lhs_offset,
-            &planes.codes,
-            &planes.d,
-            0,
-            &dst,
-            Mm2dQ2Variant::DEFAULT,
-        )
-        .context("mm2d q2_0 dispatch")
+        let mut row = 0usize;
+        while row < m {
+            let mc = (m - row).min(8);
+            call_quantized_matmul_mm2d_q2_0(
+                device.metal_device(),
+                &encoder,
+                device.kernels(),
+                (mc, planes.n, planes.n_pad, planes.k),
+                ms.buffer(),
+                lhs_offset + row * planes.k * 2,
+                &planes.codes,
+                &planes.d,
+                row * planes.n * 2,
+                &dst,
+                variant,
+            )
+            .context("mm2d q2_0 dispatch")?;
+            row += mc;
+        }
+        Ok(())
     };
     if let Err(err) = dispatch() {
         if !MM2D_BROKEN.swap(true, Ordering::Relaxed) {
-            eprintln!("warning: mm2d Q2_0 route unavailable, using wide kernels ({err})");
+            eprintln!("warning: mm2d Q2_0 route unavailable, using wide kernels ({err:#})");
         }
-        anyhow::bail!("mm2d q2 dispatch failed: {err}");
+        anyhow::bail!("mm2d q2 dispatch failed: {err:#}");
     }
     drop(storage);
 

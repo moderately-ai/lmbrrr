@@ -33,6 +33,15 @@ pub enum MixedLinear {
         // at construction — modules never read the environment.
         mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
     },
+    /// Planar-only Q2_0 weight (cfg.planar_only): ONLY the mm2d planes are
+    /// resident — the raw ggml copy was dropped at load, halving the target's
+    /// footprint so the full plane set fits the M3's GPU budget. Every m runs
+    /// on the tensor-op kernel (m > 8 tiles by 8); there is no GEMV fallback,
+    /// so a dispatch failure here is an error, not a reroute.
+    Mm2dOnly {
+        planes: Arc<crate::mm2d::Mm2dQ2Planes>,
+        mm2d_cfg: Arc<crate::mm2d::Mm2dConfig>,
+    },
 }
 
 impl MixedLinear {
@@ -62,7 +71,35 @@ impl MixedLinear {
         // resident buffers (measured: the spec prefill read f32 1.0 bit
         // patterns as token ids with all ~5.3 GB of Q2_0 planes resident).
         let n_rows = weight.shape().dims().first().copied().unwrap_or(0);
-        if mm2d_cfg.enabled && n_rows >= mm2d_cfg.min_n {
+        // Planar-only: build the planes and DROP the raw weight — return the
+        // planes-only variant. A build failure falls through to the normal
+        // QMatMul construction below (raw stays, GEMV route).
+        if mm2d_cfg.enabled
+            && mm2d_cfg.planar_only
+            && n_rows >= mm2d_cfg.min_n
+            && crate::mm2d::mm2d_q2_plane_eligible(&weight)
+        {
+            if let candle::Device::Metal(dev) = weight.device() {
+                match crate::mm2d::Mm2dQ2Planes::from_qtensor(
+                    &weight,
+                    &dev,
+                    mm2d_cfg.plane_cache_dir.as_deref(),
+                ) {
+                    Ok(p) => {
+                        return Ok(Self::Mm2dOnly {
+                            planes: Arc::new(p),
+                            mm2d_cfg,
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "warning: planar-only q2 repack failed, keeping the raw weight ({err})"
+                        );
+                    }
+                }
+            }
+        }
+        if mm2d_cfg.enabled && !mm2d_cfg.planar_only && n_rows >= mm2d_cfg.min_n {
             if let candle::Device::Metal(dev) = weight.device() {
                 match weight.dtype() {
                     GgmlDType::Q4K => match crate::mm2d::Mm2dPlanes::from_qtensor(
@@ -121,7 +158,7 @@ impl MixedLinear {
                 QMatMul::QTensor(q) => Some(q),
                 _ => None,
             },
-            Self::Dense(_) => None,
+            Self::Dense(_) | Self::Mm2dOnly { .. } => None,
         }
     }
 
@@ -129,7 +166,7 @@ impl MixedLinear {
     pub fn mm2d_planes(&self) -> Option<&crate::mm2d::Mm2dPlanes> {
         match self {
             Self::QMatMul { mm2d, .. } => mm2d.get().and_then(|p| p.as_ref()),
-            Self::Dense(_) => None,
+            Self::Dense(_) | Self::Mm2dOnly { .. } => None,
         }
     }
 
@@ -141,12 +178,30 @@ impl MixedLinear {
                 QMatMul::Tensor(t) => Some(t),
                 _ => None,
             },
+            Self::Mm2dOnly { .. } => None,
         }
     }
 
     pub fn forward(&self, xs: &Tensor) -> candle::Result<Tensor> {
         match self {
             Self::Dense(linear) => linear.forward(xs),
+            Self::Mm2dOnly { planes, mm2d_cfg } => {
+                // The tensor-op kernel reads BF16 activations; F32 callers
+                // pay the cast both ways (margin-class either way — the
+                // planar route is not bit-compatible with the GEMV one).
+                let x = if xs.dtype() == DType::BF16 {
+                    xs.clone()
+                } else {
+                    xs.to_dtype(DType::BF16)?
+                };
+                let out = crate::mm2d::mm2d_q2_0_forward(&x, planes, mm2d_cfg)
+                    .map_err(|e| candle::Error::Msg(format!("mm2d planar-only: {e:#}")))?;
+                if xs.dtype() == DType::BF16 {
+                    Ok(out)
+                } else {
+                    out.to_dtype(xs.dtype())
+                }
+            }
             Self::QMatMul {
                 matmul,
                 force_f32_input,
@@ -201,6 +256,7 @@ impl fmt::Debug for MixedLinear {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dense(_) => f.write_str("MixedLinear::Dense"),
+            Self::Mm2dOnly { .. } => f.write_str("MixedLinear::Mm2dOnly"),
             Self::QMatMul {
                 force_f32_input, ..
             } => f

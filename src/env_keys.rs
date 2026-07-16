@@ -17,6 +17,7 @@ pub const MM2D_SPLITK: &str = "LMBRRR_MM2D_SPLITK";
 pub const MM2D_SPLIT_TGS: &str = "LMBRRR_MM2D_SPLIT_TGS";
 pub const MM2D_PLANE_CACHE: &str = "LMBRRR_MM2D_PLANE_CACHE";
 pub const MM2D_CACHE_DIR: &str = "LMBRRR_MM2D_CACHE_DIR";
+pub const MM2D_PLANAR: &str = "LMBRRR_MM2D_PLANAR";
 pub const FUSED_VERIFY_ARGMAX: &str = "LMBRRR_FUSED_VERIFY_ARGMAX";
 
 // --- Kernel-fusion route gates — KernelRouteConfig (qwen35 tree) ---
@@ -62,6 +63,7 @@ pub const KNOWN_LMBRRR_KEYS: &[&str] = &[
     MM2D_SPLIT_TGS,
     MM2D_PLANE_CACHE,
     MM2D_CACHE_DIR,
+    MM2D_PLANAR,
     FUSED_VERIFY_ARGMAX,
     UNFUSED_RMSNORM,
     UNFUSED_SDPA,
