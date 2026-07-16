@@ -1392,11 +1392,27 @@ mod gguf_drafter_tests {
 
         let bs = drafter.config.block_size;
         let cap = drafter.config.target_layer_ids.len() * drafter.config.hidden_size;
-        let raw_ctx = Tensor::zeros((1, 1, cap), DType::BF16, &device)?;
+        // Realistic-ish context: a few rows of unit-scale hidden states (the
+        // target residual stream is O(1) after norm), not zeros — zeros give a
+        // degenerate forward that hides loader bugs.
+        let raw_ctx = Tensor::randn(0f32, 1f32, (1, 4, cap), &device)?.to_dtype(DType::BF16)?;
         drafter.append_context(&raw_ctx, 0)?;
-        let proposal = drafter.propose(1u32, 1, bs)?;
+        let proposal = drafter.propose_with_diagnostics(100u32, 4, bs)?;
         assert_eq!(proposal.tokens.len(), bs);
-        eprintln!("drafter smoke ok: tokens {:?}", proposal.tokens);
+        if let Some(bl) = &proposal.base_logits {
+            let bl = bl.to_dtype(DType::F32)?;
+            let per_pos_argmax = bl.argmax(candle::D::Minus1)?.flatten_all()?.to_vec1::<u32>()?;
+            let max = bl.max(candle::D::Minus1)?.flatten_all()?.to_vec1::<f32>()?;
+            let mean = bl.mean_all()?.to_scalar::<f32>()?;
+            eprintln!(
+                "base_logits shape {:?} per-pos argmax {:?} max {:?} mean {:.3}",
+                bl.dims(),
+                per_pos_argmax,
+                max,
+                mean
+            );
+        }
+        eprintln!("drafter smoke: tokens {:?}", proposal.tokens);
         Ok(())
     }
 }
