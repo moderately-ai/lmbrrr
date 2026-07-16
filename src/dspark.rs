@@ -1402,7 +1402,16 @@ mod gguf_drafter_tests {
             .map(|s| Tensor::randn(0f32, *s as f32, (1, 4, hidden), &device))
             .collect::<candle::Result<_>>()?;
         let refs: Vec<&Tensor> = parts.iter().collect();
-        let raw_ctx = Tensor::cat(&refs, candle::D::Minus1)?.to_dtype(DType::BF16)?;
+        let mut raw_ctx = Tensor::cat(&refs, candle::D::Minus1)?;
+        // Inject massive-activation outliers (real captures had maxabs ~50-81)
+        // into a few feature dims — these overflow a naive bf16 forward.
+        let cap = drafter.config.target_layer_ids.len() * hidden;
+        let mut spike = vec![0f32; cap];
+        for d in [37usize, 512, 4096, cap - 3] {
+            spike[d] = 80.0;
+        }
+        let spike = Tensor::from_vec(spike, (1, 1, cap), &device)?.broadcast_as((1, 4, cap))?;
+        raw_ctx = raw_ctx.add(&spike)?.to_dtype(DType::BF16)?;
         drafter.append_context(&raw_ctx, 0)?;
         let proposal = drafter.propose_with_diagnostics(100u32, 4, bs)?;
         assert_eq!(proposal.tokens.len(), bs);
