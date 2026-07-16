@@ -1486,6 +1486,10 @@ fn spec_decode(
     let mut anchor = argmax_row(&logits.narrow(1, ids.len() - 1, 1)?)?;
     drop(logits);
     drop(ctx_feat);
+    // The anchor IS the first generated token (the prefill argmax): commit
+    // it. It was silently dropped — spec output was greedy's shifted by one,
+    // invisible to the eye (token 1 is usually whitespace) and caught only by
+    // the teacher-forced score gate (pos-0 logprob -10 on every run).
     // Prompt-lookup drafting (PLD): zero-cost copy proposals from verbatim
     // n-gram matches over prompt+committed text. Fires only when the match
     // is at least drafter-width wide — ungated PLD preempts strong drafter
@@ -1496,7 +1500,7 @@ fn spec_decode(
     let mut pld_rounds = 0usize;
     let mut pld_accepted = 0usize;
     let mut offset = ids.len();
-    let mut committed: Vec<u32> = Vec::new();
+    let mut committed: Vec<u32> = vec![anchor];
     let mut rounds = 0usize;
     let mut accepted_total = 0usize;
     let mut propose_s = 0.0f64;
@@ -1504,7 +1508,7 @@ fn spec_decode(
     let mut rollback_s = 0.0f64;
 
     let decode = Instant::now();
-    while committed.len() < max_new_tokens {
+    while committed.len() < max_new_tokens && committed.last() != Some(&eos) {
         if dbg {
             eprintln!("round {}: snapshot...", rounds + 1);
         }
