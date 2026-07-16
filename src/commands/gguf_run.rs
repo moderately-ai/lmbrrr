@@ -205,7 +205,11 @@ fn spec_decode(
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
     let dgguf = GgufFile::open(drafter_path)?;
-    let mut drafter = DsparkDrafter::load_gguf(&dgguf, device, DType::BF16, ctx, false)?;
+    // The drafter gets its OWN ModelCtx: sharing the target's mm2d scratch made
+    // the drafter's quantized backbone read corrupted state (block_hidden -> 0).
+    let drafter_ctx = ModelCtx::default();
+    let mut drafter = DsparkDrafter::load_gguf(&dgguf, device, DType::BF16, &drafter_ctx, false)?;
+    let _ = ctx;
     let layers = drafter.config.target_layer_ids.clone();
     let width = drafter.config.block_size;
     let drafter_load_s = load.elapsed().as_secs_f64();
