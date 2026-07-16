@@ -285,6 +285,7 @@ def regenerate_sharded(
     batch_size: int = 32,
     input_name: str = "perfectblend_train.jsonl",
     output_prefix: str = "regen-round1",
+    model: str = TARGET_MODEL,
 ) -> None:
     """Fan regeneration across parallel GPU containers, then merge shards."""
     per_shard = (total_samples + shards - 1) // shards
@@ -296,6 +297,7 @@ def regenerate_sharded(
             "batch_size": batch_size,
             "input_name": input_name,
             "output_name": f"{output_prefix}-shard{shard:02d}.jsonl",
+            "model": model,
         }
         for shard in range(shards)
     ]
