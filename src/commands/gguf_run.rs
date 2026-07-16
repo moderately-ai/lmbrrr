@@ -579,6 +579,54 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
         "mm2d-k128" => Some(Mm2dQ2Variant::T64_K128),
         _ => None,
     };
+    if which == "mct" {
+        // Transposed-activation verify GEMV, isolated for counter capture.
+        use candle_metal_kernels::call_quantized_matmul_mv_q2_0_mct;
+        let qtm = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+        let data = qtm.data()?;
+        let wbuf = mdev
+            .new_buffer_builder()
+            .with_data(&data)
+            .with_label("pk_mct_w")
+            .build()?;
+        let x = Tensor::randn(0f32, 1f32, (m, k), device)?.to_dtype(DType::BF16)?;
+        let xt = x.t()?.contiguous()?;
+        let (xs, xl) = xt.storage_and_layout();
+        let xtbuf = match &*xs {
+            candle::Storage::Metal(ms) => ms.buffer().clone(),
+            _ => anyhow::bail!("xt not metal"),
+        };
+        let xoff = xl.start_offset() * 2;
+        let dst = mdev
+            .new_buffer_builder()
+            .with_size(m * n * 4)
+            .with_label("pk_mct_dst")
+            .build()?;
+        let dispatch = || -> Result<()> {
+            let enc = mdev.command_encoder()?;
+            call_quantized_matmul_mv_q2_0_mct(
+                mdev.metal_device(),
+                &enc,
+                mdev.kernels(),
+                (m, n, k),
+                &wbuf,
+                &xtbuf,
+                xoff,
+                &dst,
+            )?;
+            Ok(())
+        };
+        for _ in 0..8 {
+            dispatch()?;
+        }
+        device.synchronize()?;
+        for _ in 0..iters {
+            dispatch()?;
+        }
+        device.synchronize()?;
+        eprintln!("profile-kernel: done ({iters} dispatches)");
+        return Ok(());
+    }
     if which == "mv" || which == "mc" {
         // GEMV path via MixedLinear: "mv" = decode m=1 (bandwidth baseline);
         // "mc" = verify at width m (the weight-shared-columns kernel). Set
