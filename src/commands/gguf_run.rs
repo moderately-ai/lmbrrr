@@ -77,6 +77,41 @@ fn bench_gemv(device: &Device) -> Result<()> {
             );
         }
     }
+
+    // Verify-width path (DSpark spec verify): Q2_0 at m in {1,2,4,8}. The mc
+    // kernel shares the weight read across the draft chunk, so m=8 should cost
+    // ~1x the weight bandwidth (near m=1 ms/call) instead of ~8x.
+    let (n, k) = (17408usize, 5120usize);
+    let w = Tensor::randn(0f32, 1f32, (n, k), device)?;
+    let qt = QTensor::quantize(&w, GgmlDType::Q2_0)?;
+    let bytes = qt.storage_size_in_bytes();
+    let wdeq = qt.dequantize(device)?; // (n, k) f32 reference weight
+    let lin = MixedLinear::from_qtensor(qt, ctx.mm2d.clone())?;
+    for m in [1usize, 2, 4, 8] {
+        let x = Tensor::randn(0f32, 1f32, (1, m, k), device)?.to_dtype(DType::BF16)?;
+        for _ in 0..8 {
+            let _ = lin.forward(&x)?;
+        }
+        device.synchronize()?;
+        let iters = 200;
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = lin.forward(&x)?;
+        }
+        device.synchronize()?;
+        let s = t.elapsed().as_secs_f64();
+        // correctness: mc output vs dense f32 reference (ternary noise bound).
+        let got = lin.forward(&x)?.to_dtype(DType::F32)?.reshape((m, n))?;
+        let refr = x.to_dtype(DType::F32)?.reshape((m, k))?.matmul(&wdeq.t()?)?;
+        let denom = refr.abs()?.mean_all()?.to_scalar::<f32>()?.max(1e-6);
+        let rel = got.sub(&refr)?.abs()?.mean_all()?.to_scalar::<f32>()? / denom;
+        println!(
+            "Q2_0 VERIFY {n}x{k} m={m}: {:.3} ms/call ({:.1} GB/s eff), rel_err {:.4}",
+            1000.0 * s / iters as f64,
+            (bytes as f64 * iters as f64) / s / 1e9,
+            rel
+        );
+    }
     Ok(())
 }
 
