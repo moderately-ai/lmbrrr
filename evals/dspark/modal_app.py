@@ -693,7 +693,11 @@ def train8(
     )
 
 
-@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=3 * 1024 * 1024)
+# GPU fallback list: when H100s are exhausted the scheduler takes the next
+# entry instead of stalling the launch. A100-80GB is the compatibility floor —
+# each rank holds the full 27B target in bf16 (~54 GB), so 40/48 GB cards are
+# out. The function logs the card it actually landed on.
+@app.function(image=image, gpu=["H100:4", "A100-80GB:4"], volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=3 * 1024 * 1024)
 def prep_and_train(
     train_data: str = "data/regen-bonsai-r1b.jsonl",
     cache_name: str = "target-cache-bonsai-r1b",
@@ -711,6 +715,12 @@ def prep_and_train(
     directly from it — the volume receives only checkpoints. Spawns the
     evaluator on the final checkpoint. Same fused design as the round-3/4
     chains, parameterized for any lane."""
+    import torch
+
+    print(
+        f"gpu: {torch.cuda.get_device_name(0)} x {torch.cuda.device_count()}",
+        flush=True,
+    )
     final_ckpt = f"/vol/runs/checkpoints/lmbrrr/{exp_name}/step_latest"
     if os.path.exists(f"{final_ckpt}/model.safetensors"):
         print(f"{exp_name} final checkpoint exists; skipping prep+train", flush=True)
