@@ -1311,6 +1311,27 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
                 p.static_threadgroup_memory_length()
             );
         }
+        // DeltaNet recurrence kernels (occupancy-cap diagnosis: staticTgMem
+        // ~26KB -> ~1 threadgroup/core on the 32KB M3; maxTPT < 1024 -> also
+        // register-limited). These run the hot verify + prefill.
+        for (src, name) in [
+            (
+                candle_metal_kernels::source::Source::GatedDeltaChunk,
+                "gated_delta_chunk_bf16",
+            ),
+            (
+                candle_metal_kernels::source::Source::GatedDeltaPrefill,
+                "gated_delta_prefill_bf16",
+            ),
+        ] {
+            let p = kernels.load_pipeline(dev, src, name)?;
+            println!(
+                "{:<42} {:>8} {:>14}",
+                name,
+                p.max_total_threads_per_threadgroup(),
+                p.static_threadgroup_memory_length()
+            );
+        }
         return Ok(());
     }
 
