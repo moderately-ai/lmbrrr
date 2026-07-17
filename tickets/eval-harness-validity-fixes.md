@@ -4,7 +4,7 @@ title: "EVAL INFRA p1: fix the measurement harness — two HIGH-severity metric 
 status: todo
 priority: p1
 dependencies: []
-related: []
+related: [verify-spec-acceleration-routemap]
 scopes: [runtime/candle, evals]
 shared_scopes: []
 paths: []

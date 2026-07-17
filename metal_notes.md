@@ -2,6 +2,8 @@
 
 This guide describes the new macOS 27 GPU command-line workflow for coding agents, scripts, CI experiments, and human-driven performance investigations. It incorporates an end-to-end validation on an Apple M3 Pro using a candle/Metal LLM decode engine, including a one-token GPU capture analyzed entirely without the Xcode GPU debugger UI.
 
+> This is the Metal-specific mechanics. The general method that governs how a measurement becomes a *finding* (regime-match, confounds-cleared, triangulate, move-the-number) is `docs/research/rigor-protocol.md`; the runnable capture harness is `evals/profiling/`; project orientation is `AGENTS.md`.
+
 ## What macOS 27 adds
 
 macOS 27 ships three GPU tools as OS-level binaries in `/usr/bin`:
@@ -163,6 +165,24 @@ MTL_CAPTURE_ENABLED=1 \
   /path/MyApp.app/Contents/MacOS/MyApp [arguments] &
 ```
 
+### Capture a Python / MLX (or any non-Rust) Metal workload
+
+`gpucapture` refuses any target that is not **debuggable** — `error: invalid PID … Processes must be debuggable … entitled with com.apple.security.get-task-allow`. A `cargo`-built binary has this for free (ad-hoc debuggable), which is why the lmbrrr kernels capture directly. Stock `/usr/bin/python3` (an Xcode/CommandLineTools shim), Homebrew python, and system frameworks are signed **without** `get-task-allow`, so gpucapture rejects them. MLX's in-process `mx.metal.start_capture()` needs no entitlement (a process capturing itself is allowed) **but it writes a streaming bundle gpudebug cannot open** (`cannot open trace: Assertion failed: archive != NULL` — loose `MTLBuffer-*` files, not the sealed `capture`/`index`/`metadata`/`store0` archive gpucapture produces). So the only route to a gpudebug-openable MLX trace is the external `gpucapture` flow against a **debuggable python**.
+
+Make a uv-managed CPython debuggable (no sudo, one-time). uv's `python-build-standalone` interpreters are `adhoc, linker-signed`, **no hardened runtime, no library validation** (`codesign -dv` → `flags=0x20002`) — the easy case: re-signing with `get-task-allow` does not break MLX's dylib loading (there's no library validation to violate).
+
+```sh
+# get-task-allow.plist: a <dict> with com.apple.security.get-task-allow = <true/>
+P=~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12   # the real Mach-O the venv symlinks to
+codesign -f -s - --entitlements get-task-allow.plist "$P"      # re-sign in place; adhoc keeps working
+codesign -d --entitlements - "$P"                             # verify the key is present
+python -c 'import mlx.core as mx; mx.eval(mx.zeros((8,8))@mx.zeros((8,8)))'  # verify import still works
+```
+
+Re-signing the shared uv interpreter makes every venv built from it debuggable (harmless — `get-task-allow` only permits task-port access for debugging). This is set up on the M3: the `~/lmbrrr-work/lmbrrr` workspace venv (`.venv/bin/python`, MLX 0.32.0) points at the re-signed cpython-3.12.13.
+
+**Isolate the kernel — gpudebug counters are timeline-GLOBAL, so the captured region must contain ONLY the kernel of interest.** A naive `mx.random.normal(...)` + `mx.quantize(...)` + qmm-loop capture is ~80% Box-Muller RNG (`rbitsc`/`ErfInv`/`Divide`/`Multiply`) and ~6% `affine_quantize`, with the `affine_qmm_t` matmul only ~14% — and the aggregated counters then read the RNG, not the matmul (the tell: `gpu_write_bandwidth ≈ gpu_read_bandwidth`, wrong for a weight-heavy GEMM). Use **two phases**: phase 1 (uncaptured) generates + quantizes + `mx.save_safetensors` the inputs; phase 2 (captured) does `mx.load` + a warmup + an N-iteration kernel loop only. A clean qmm-only capture reads `gpu_write_bandwidth ≪ gpu_read_bandwidth` and a single dominant compute limiter (see §15.E).
+
 ## 3. Analyze a capture using a persistent `gpudebug` session
 
 Large captures can take seconds or minutes to load and prepare for replay. Create one persistent session and reuse it; do not repeatedly invoke one-shot mode for a multi-command investigation.
@@ -270,6 +290,13 @@ On M3/A17-class hardware or newer, `gpudebug` collects a GPU replay profile. **V
 2. **`go performance` + `info --all` errors (`'performance' has no info handler`)** — ignore the "inspect the performance root via info" step from older notes; go straight to the counter groups.
 
 Also: after opening a session, `status` shows `replayer.state: loading` → `ready`; **wait for `ready` before `profile run`** (poll `status`). Use a persistent session for a multi-step investigation (open once, reuse `-s N`); `--oneshot` DOES work for a self-contained run **as long as the same invocation chains `profile run` → `profile load 0` → the `go` queries** (state does not survive across separate `--oneshot` processes).
+
+**DEADLOCK WARNING (2026-07-17, MLX qmm trace, M3 Pro) — do NOT `--embed`, and do NOT re-`profile run` a dirty session.** On a ~1.2 GB external `gpucapture` trace, `profile run --gpu-state default --exec overlapping --embed` **hung indefinitely** and held the session's command-queue lock. Symptom to recognize: the `profile run` client sits at 0% CPU, a *separate* `gpudebug -s N -c status` client **also blocks** (status normally answers during load — a blocked status is the tell that the session command-queue lock is held), and `GPUToolsReplayService.xpc` is idle at 0% CPU (a deadlock in the embed write-back, not slow I/O). Two triggers, both avoidable:
+1. `--embed` serializes the collected profile back INTO the trace bundle; on a multi-hundred-MB-buffer trace this write-back deadlocked. The §5 recipe does **not** use `--embed` — the "`--embed` alone is NOT enough" note above means *don't reach for it*, not *add it*. Use plain `profile run`, then `profile load <idx>`.
+2. If the first `profile load 0` fails, **open a FRESH session on the trace — never fire a second `profile run` at a session that already collected.** The second run on the dirty session is what wedged.
+- **`profile load 0` can legitimately fail with `no profiling sessions in trace`** on a fresh external capture (no *embedded* profile). `profile load` reads embedded sessions; a just-collected `profile run` result may be at a different index — run `profile list` (or `profile` with no arg) to find the real index, then `profile load <idx>`.
+- **Recovery from a wedged session:** `kill -9` the blocked `gpudebug -s N` client(s) AND `kill -9` the `GPUToolsReplayService.xpc` process (it leaks the locked session; launchd respawns it on the next open). The trace bundle is unharmed — verify with `find <trace> -iname '*lock*' -o -iname '*.tmp'` (empty) and all files still at capture time.
+- **Never `run_in_background` a `profile run`.** Run it foreground with a bounded timeout so a hang is immediately visible instead of masquerading as "still working."
 
 ```sh
 # 1. open (slow: ~1 GB/trace); grab "Session N created." and wait for ready
@@ -737,6 +764,17 @@ Roofline says M=8 verify *could* be weight-bound at ~0.22 ms / ~106 GB/s. It is 
 **Do NOT retry these (all measured-refuted):** occupancy right-sizing (moved occupancy, not speed); ILP/independent-accumulators (`mc2`, slower); transposed `[K][M]` activation (`mct`, slower — breaks cross-thread coalescing); NR row-amortization (monotonically slower — register cost); int8 integer matmul2d (no integer datapath before M5); K-tile > 128 or `relaxed_precision` (no/marginal). Every production Apple LLM stack (llama.cpp/MLX/BaseRT) uses a GEMV at small M and reserves `matmul2d` for large-M prefill — our result reproduces that consensus.
 
 **Consequence:** the DSpark verify per-matmul cannot go below mm2d's 0.55 ms on M3, so the speculative-decode multiplier is NOT in the verify kernel — it comes from **wiring mm2d into the verify** (bank the 2.1×), **`block_size`** (fill mm2d's flat-to-M=8 tile), and **CUDA/M5** (where int8 + the tensor unit engage). The utilization limit itself is architectural on this GPU.
+
+### E. Cross-check against MLX's qmm — the same wall, reached a different way (2026-07-17)
+
+Independent corroboration that mm2d is the right verify kernel at M≤8, from profiling MLX's own 2-bit path on the same M3 (debuggable-python capture per §2). Two settled facts:
+
+1. **MLX doesn't even use its dequant-once QMM kernel at our width.** MLX dispatches the memory-bound `qmv` GEMV until `M ≥ get_qmv_batch_limit == 10` (M3 tier 'g', big mats); the compute-bound `qmm` simdgroup path engages only at M≥10. So m=5–8 (our verify) runs `qmv`, which is **~2× slower than our mm2d** on every shape (gate_up m=5: 23.8 vs 42.9 eff GB/s). MLX's `qmv` barely amortizes weight reuse across rows — ms/call grows ~linearly (0.56→3.05 ms, m=1→8) vs our mm2d flat at 1.10 ms to m=8. This *refuted* a research-agent prediction that MLX `qmv` would stay ~memory-bound at 100–125 GB/s; measurement said the opposite.
+2. **When forced (m=32), MLX's `qmm` is f32-datapath-bound, and that floor is fundamental.** Clean qmm-only gpudebug profile (`affine_qmm_t_bfloat16_t_gs_128_b_2`, gate_up 34816×5120, m=32), limiters clock-independent (identical at `--gpu-state default` and `high`): **`f32_limiter 91.55%`** (util 84.13%), `instruction_throughput_limiter 85.08%`, `alu_util 48.28%`, occupancy 32.23% (manager_target 39.43%, L1-evict 0.13), `gpu_bandwidth 12.93` (read 11.17 / write 1.76 — nowhere near DRAM). qmm dequants the 2-bit weights to a **dense bf16** tile in threadgroup memory, then runs a dense bf16 simdgroup GEMM; bf16 executes on the **f32 pipe** (the f16 counters are empty), so it pays full dense-GEMM FLOPs and saturates f32 at ~91%. That is why its wall floor (~3.1 ms gate_up, flat m=10→32) is 2.8× our mm2d's 1.10 ms and cannot drop without abandoning the dequant-to-dense structure.
+
+**The two kernels hit DIFFERENT walls, and ours is the cheaper one at low M:** our mm2d (`matmul2d` on the packed `uint2b` operand) is **instruction-throughput-bound at 73%** (§D — the 2-bit unpack), consuming the compressed operand directly; MLX qmm is **f32/bf16-datapath-bound at 91%** (a genuine dense GEMM after dequant). MLX has no fixable headroom that would beat mm2d at M≤8 — already ~91% f32-limited at M=32, and it doesn't use qmm below M=10 at all. Independently confirms §D: at the M=5–8 verify width the mm2d tensor-op route is the best available on M3; the spec-decode multiplier is not in the verify kernel.
+
+**Method correction recorded:** my first MLX capture's counters were RNG-polluted (§2 two-phase lesson) and I *mis*-read them as "not saturated, has headroom." The clean isolated capture inverted that to "f32-saturated at 91%." Believe only the isolated-kernel capture; a `write≈read` bandwidth split is the tell that setup/RNG is in-frame.
 
 ## Bottom line
 

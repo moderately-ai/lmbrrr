@@ -1,3 +1,16 @@
+---
+id: dspark-bonsai-integration
+title: DSpark speculative decoding — Ternary-Bonsai-27B integration
+status: in-progress
+priority: p1
+dependencies: []
+related: [ternary-bonsai-27b-support, ternary-decode-profile-optimize, gguf-loader-qwen35-hybrid, verify-spec-acceleration-routemap]
+scopes: [inference/speculative, runtime/candle]
+shared_scopes: [docs/research]
+paths: [src/dspark.rs, src/commands/gguf_run.rs, docs/research/dspark-verify-weightbound-gemm.md]
+tags: [dspark, bonsai, spec-decode, metal]
+---
+
 # DSpark speculative decoding — Ternary-Bonsai-27B integration
 
 Wire the shipped Bonsai DSpark drafter into lmbrrr's (already complete, Qwen35-native) spec-decode loop so `gguf spec` runs speculative decode on the ternary Bonsai target. NOT blocked — the drafter is shipped.
