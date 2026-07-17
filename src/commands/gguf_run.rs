@@ -91,6 +91,13 @@ struct DecodeArgs {
 
     #[arg(long, default_value_t = 128)]
     max_new_tokens: usize,
+
+    /// Run one untimed warmup forward (prefill + a decode step) before the
+    /// timed prefill, so prefill_seconds/TTFT reflect warm compute instead of
+    /// the process's first-forward shader-compile cost. Reports both the cold
+    /// (compile-inclusive) and warm prefill so the compile share is explicit.
+    #[arg(long)]
+    warmup: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2070,7 +2077,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
         GgufCmd::ProfileKernel(a) => profile_kernel(&device, &a.which, a.iters, a.m),
         GgufCmd::Decode(a) => {
             let (mut model, ids, eos, _ctx, tok, load_seconds) = load_gguf_model(&a.model, &device)?;
-            decode(&mut model, &device, &ids, eos, a.max_new_tokens, &tok, load_seconds)
+            decode(&mut model, &device, &ids, eos, a.max_new_tokens, &tok, load_seconds, a.warmup)
         }
         GgufCmd::Spec(a) => {
             let spec_run = lmbrrr::runtime_config::SpecRunConfig::from_env();
@@ -2142,6 +2149,7 @@ fn load_gguf_model(
 
 /// Greedy decode with a per-token sync; prints the generated text and a JSON
 /// throughput summary (steady-state = median inter-token gap after 3 warm-ups).
+#[allow(clippy::too_many_arguments)]
 fn decode(
     model: &mut Qwen35CausalLM,
     device: &Device,
@@ -2150,7 +2158,26 @@ fn decode(
     max_new_tokens: usize,
     tok: &Tokenizer,
     load_seconds: f64,
+    warmup: bool,
 ) -> Result<()> {
+    // Cold-compile isolation: the process's FIRST forward JIT-compiles every
+    // pipeline it touches, so an unwarmed prefill_seconds is TTFT + shader
+    // compile, not steady prefill. One untimed warmup forward (+ one decode
+    // step, to compile the seq=1 pipelines too) moves that cost out of the
+    // measured window; cold_prefill_seconds records what it was.
+    let mut cold_prefill_seconds = None;
+    if warmup {
+        let cold = Instant::now();
+        let winput = Tensor::from_slice(ids, (1, ids.len()), device)?;
+        let wlogits = model.forward(&winput, 0)?;
+        device.synchronize()?;
+        cold_prefill_seconds = Some(cold.elapsed().as_secs_f64());
+        let wnext = wlogits.argmax(D::Minus1)?.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?[0];
+        let wstep = Tensor::from_slice(&[wnext], (1, 1), device)?;
+        let _ = model.forward(&wstep, ids.len())?;
+        device.synchronize()?;
+        model.clear_cache();
+    }
     let prefill = Instant::now();
     let input = Tensor::from_slice(ids, (1, ids.len()), device)?;
     let mut logits = model.forward(&input, 0)?;
@@ -2212,6 +2239,7 @@ fn decode(
             "prompt_tokens": ids.len(),
             "prefill_seconds": prefill_seconds,
             "prefill_tokens_per_second": ids.len() as f64 / prefill_seconds,
+            "cold_prefill_seconds": cold_prefill_seconds,
             "generated_tokens": out.len(),
             "ids": out.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
             "decode_seconds": decode_seconds,
