@@ -1588,15 +1588,15 @@ impl GatedDeltaNet {
             ksz: self.conv_kernel_size,
             num_k_heads: self.num_k_heads,
         };
-        // Matches the kernel's GDC_MAX_L (threadgroup-bounded); fewer, larger
-        // sub-chunks than the old 12 cut dispatch overhead on long prefill.
-        const CAP: usize = 15;
+        // Sub-chunk size, <= the chunk kernel's GDC_MAX_L (threadgroup-bounded).
+        // Configurable to sweep the dispatch-count vs intra-chunk-work tradeoff.
+        let cap = self.routes.deltanet_prefill_cap.clamp(2, 12);
         let dt_bias = self.dt_bias_f32.flatten_all()?;
         let a_log_exp = self.a_log_exp_f32.flatten_all()?;
-        let mut outs = Vec::with_capacity(l.div_ceil(CAP));
+        let mut outs = Vec::with_capacity(l.div_ceil(cap));
         let mut start = 0usize;
         while start < l {
-            let mut c = CAP.min(l - start);
+            let mut c = cap.min(l - start);
             // The fused chunk kernel wants 2 <= c; never leave a size-1 tail.
             if l - start - c == 1 {
                 c -= 1;

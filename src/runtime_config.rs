@@ -49,6 +49,10 @@ pub struct KernelRouteConfig {
     /// kernel, looped over sub-chunks carrying state, instead of the unfused
     /// tensor-path scan. Opt-in until the byte-parity gate ships it on.
     pub deltanet_prefill_fused: bool,
+    /// Sub-chunk size for the fused-prefill loop (experiment knob: sweeps the
+    /// dispatch-count vs intra-chunk-work tradeoff). Clamped to the kernel's
+    /// GDC_MAX_L=12; 0/unset uses 12.
+    pub deltanet_prefill_cap: usize,
 }
 
 impl Default for KernelRouteConfig {
@@ -63,6 +67,7 @@ impl Default for KernelRouteConfig {
             deltanet_v2: true,
             deltanet_sequential_fallback: false,
             deltanet_prefill_fused: false,
+            deltanet_prefill_cap: 12,
         }
     }
 }
@@ -87,6 +92,11 @@ impl KernelRouteConfig {
             // Any presence enables the fallback (historical `is_ok()` sense).
             deltanet_sequential_fallback: std::env::var(k::DELTANET_SEQUENTIAL).is_ok(),
             deltanet_prefill_fused: std::env::var(k::DELTANET_PREFILL_FUSED).is_ok(),
+            deltanet_prefill_cap: std::env::var(k::DELTANET_PREFILL_CAP)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&c| (2..=12).contains(&c))
+                .unwrap_or(12),
         }
     }
 }
