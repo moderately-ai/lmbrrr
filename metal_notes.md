@@ -776,6 +776,15 @@ Independent corroboration that mm2d is the right verify kernel at M≤8, from pr
 
 **Method correction recorded:** my first MLX capture's counters were RNG-polluted (§2 two-phase lesson) and I *mis*-read them as "not saturated, has headroom." The clean isolated capture inverted that to "f32-saturated at 91%." Believe only the isolated-kernel capture; a `write≈read` bandwidth split is the tell that setup/RNG is in-frame.
 
+### F. Live whole-loop triangulation + the strip-probe closure (2026-07-17)
+
+Two additions that finish the §D/§E arc at the SYSTEM level (details: `docs/research/dspark-verify-weightbound-gemm.md` §strip-probe; ledger: ticket `eval-harness-validity-fixes` comments):
+
+1. **The in-loop spec verify wall (192 ms/round at m=5 = 84% of the 229 ms round) is pure kernel time.** Eliminated by direct measurement on the LIVE loop (not replay): host CPU 1.5% during steady decode (ps probe); tap-layer capture cost nil (A/B/A profile, 265.7 vs 266.3 vs 266.0 ms/step); xctrace 15 s attach → depth-0 Compute intervals: **GPU 98.6% busy, gaps 213 ms/15.5 s (mostly 100 µs–1 ms), perf-state Maximum 100.0%**. No DVFS, no bubbles, no host — composing the per-shape bench-gemv kernel times reproduces the wall exactly. The xctrace XML parser for this lives at the M3's /tmp/parse_trace.py (id/ref-interned rows, positional columns).
+2. **The §D "two instruction-reduction levers" are now MEASURED via the strip-probes** (built 2026-07-16, first run today): fold epilogue −7%, whole discrete K-loop −15–18% (probe_fullk t32 = 0.451 ms / 52.5 GB/s = the op's small-M ceiling; bigger M-tiles NEGATIVE). The "scalar epilogue is the limiter" hypothesis in the research doc is refuted; the cost is inside `matmul2d` (consistent with §D's no-matrix-unit account). `tensor_blockwise` remains worth ≤ ~15–18% on mm2d shapes (~+10–12% tok/s end-to-end); beyond that, only B3 bitplane/popcount (structure change) or M5.
+
+Profiler caveat quantified in passing: the in-binary per-op profiler (`gguf profile`) reads ~253 ms/step for a loop whose true wall is 192 ms (and 235 vs 69 ms at m=1) — per-component sync bias swamps small ops (norms read 28 ms/step; they are ~µs kernels). Use it to enumerate calls, never for absolute walls; walls come from the in-loop timers + xctrace.
+
 ## Bottom line
 
 macOS 27 removes the Xcode GUI from most GPU capture and replay-analysis loops. For applications you control, the strongest workflow is:

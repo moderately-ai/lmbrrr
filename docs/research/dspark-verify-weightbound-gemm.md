@@ -114,3 +114,21 @@ Isolated single-kernel captures (`gguf profile-kernel --which …`), timeline co
 **Kernel-audit note (do NOT mass-apply the occupancy fix):** the same oversized-`rs_tg` / small-`max_total_threads` footgun exists in `mm2d_q4k.metal` (3 kernels, argmax one ~16 KB), `skinny_gemm.metal` (24 KB `a_sh` worst-cased on `SK_MAX_M`), and the deltanet chunk kernels. It's real hygiene, but the measurement above shows it is **not a speed lever** for the matmul2d path — so treat it as cleanup, verified per-kernel with counters, not a throughput fix.
 
 **Method lesson (also in metal_notes §5):** a high `_limiter` names a *candidate*; the limiter ladder must be *validated by moving the number*. Occupancy at 39% looked like the bottleneck and wasn't — raising it to 51% with no speed change is what proved it. Measure the fix, don't infer it from the diagnosis.
+
+## Strip-probe results (2026-07-17): the epilogue hypothesis is REFUTED — the op itself is the wall
+
+The two diagnostic probes built for exactly this question (committed at candle 8e8f3045, wired into `Mm2dQ2Variant::ALL`, never previously run) were measured on the M3 via `gguf bench-gemv` (17408×5120, flat across m=1..8):
+
+| kernel | ms/call | eff GB/s | what it proves |
+|---|---|---|---|
+| t64_k128 (real, shipped) | 0.553 | 42.8 | baseline |
+| **probe_nofold** (fold epilogue stripped: no d load, no rowsum, no in-loop `get_multidimensional_index`) | 0.513 | 46.2 | **the scalar fold costs only ~7%** — the "instruction-bound on the scalar epilogue" leading hypothesis above is WRONG |
+| **probe_fullk t64** (single `op.run`, dynamic-extent K: no host K-loop, no per-tile coop alloc, no fold) | 0.472 | 50.1 | the entire discrete-loop machinery is worth ~15% |
+| probe_fullk **t32** | 0.451 | 52.5 | best config of the op, ~53 GB/s = the `matmul2d` small-M ceiling |
+| probe_fullk t64_**m16** / **m32** | 0.739 / 1.429 | 32 / 16.6 | bigger M-tiles are NEGATIVE (more MMA over the same stream) |
+
+Per the strip-probe rule (metal_notes §15.B.4): these prove the *stripped* parts are small. Everything left in probe_fullk is one `matmul2d` op streaming B — and it still runs at **~50–53 GB/s, half the mv's 106 GB/s** (the same ~0.5× ratio q4_K mm2d shows vs its mv). Combined with §15.D's architectural account (no matrix unit pre-M5; `matmul2d` lowers onto simdgroup+ALU), the wall is **inside the op**, not in our kernel code.
+
+**Consequences for the ranked paths:** lever (1) hoist-the-index is dead (≤7% bundled with the whole fold); lever (2) `tensor_blockwise` hardware block-scaling is *bounded* by probe_fullk at **≤ ~15–18%** on mm2d-routed shapes (≈ +10–12% end-to-end tok/s at the margin-3.0 operating point) — worth taking (it also simplifies the kernel), but it is the last in-family win. Beyond it, only structure-changing routes remain on M3: the B3 bitplane/popcount reformulation (ternary dot = two masked adds, abandoning the MAC/MMA structure — the one software family not covered by the refuted list) and the M5 tensor unit (D1).
+
+**System-level closure (same day):** the in-loop verify wall (192 ms/round at m=5, 84% of the 229 ms round) is fully accounted by these kernel bandwidths — xctrace live shows 98.6% GPU busy at 100% Maximum perf-state, host 1.5% CPU, tap-capture cost nil (A/B/A). Verify runs AT this ceiling today; the whole-pipeline v2 baseline is 19.18 tok/s (margin 3.0). See the route-map epic + eval-harness ticket comments for the baseline ledger.
