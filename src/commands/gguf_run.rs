@@ -113,6 +113,14 @@ struct SpecArgs {
     #[arg(long)]
     accept_margin: Option<f32>,
 
+    /// Peakedness gate for --accept-margin: apply the margin only on rows
+    /// whose top LOGPROB >= -this value; flat rows fall back to exact argmax
+    /// match. Motivated by the per-class PPL gate: margin drift concentrates
+    /// on flat next-token distributions (factual +21.4% PPL vs +4-5% on
+    /// peaked classes), where a logit margin does not bound logprob.
+    #[arg(long, requires = "accept_margin")]
+    margin_peak: Option<f32>,
+
     /// Prompt-lookup drafting. Default OFF: measured a net LOSS against this
     /// drafter on both prose (18.3 -> 15.2 tok/s, 0 copy tokens accepted) and
     /// code (20.0 -> 16.1 — copy rounds preempt stronger drafter rounds),
@@ -1466,6 +1474,7 @@ fn spec_decode(
     tok: &tokenizers::Tokenizer,
     readvance_rollback: bool,
     accept_margin: Option<f32>,
+    margin_peak: Option<f32>,
     use_pld: bool,
     use_tree: bool,
 ) -> Result<()> {
@@ -1550,6 +1559,7 @@ fn spec_decode(
     let mut rollback_s = 0.0f64;
     let mut round_wall_ms: Vec<f64> = Vec::new();
     let mut round_accepted: Vec<usize> = Vec::new();
+    let mut flat_rows = 0usize;
 
     let decode = Instant::now();
     while committed.len() < max_new_tokens && committed.last() != Some(&eos) {
@@ -1735,10 +1745,40 @@ fn spec_decode(
                     .squeeze(2)?
                     .squeeze(0)?
                     .to_vec1::<f32>()?;
-                draft_vals
-                    .iter()
-                    .zip(max_vals.iter())
-                    .take_while(|(draft, top)| **draft >= **top - margin)
+                // Peakedness gate: top logprob per row = top - logsumexp(row).
+                // Only computed when the gate is on (one exp+sum over the
+                // verify rows, ~µs against a 190 ms verify).
+                let top_lps: Option<Vec<f32>> = match margin_peak {
+                    None => None,
+                    Some(_) => {
+                        let x = verify_logits.to_dtype(DType::F32)?;
+                        let mx = x.max_keepdim(D::Minus1)?;
+                        let lse = x
+                            .broadcast_sub(&mx)?
+                            .exp()?
+                            .sum(D::Minus1)?
+                            .log()?
+                            .squeeze(0)?
+                            .to_vec1::<f32>()?;
+                        // top_lp = max - (max + log sum exp(x - max)) = -log-sum term
+                        Some(lse.iter().map(|s| -s).collect())
+                    }
+                };
+                if let (Some(peak), Some(lps)) = (margin_peak, &top_lps) {
+                    flat_rows += lps.iter().filter(|lp| **lp < -peak).count();
+                }
+                (0..round_width)
+                    .take_while(|&i| {
+                        let within = draft_vals[i] >= max_vals[i] - margin;
+                        match (margin_peak, &top_lps) {
+                            // Flat row: the margin does not bound logprob
+                            // there — require the exact argmax instead.
+                            (Some(peak), Some(lps)) if lps[i] < -peak => {
+                                drafts[i] == targets[i]
+                            }
+                            _ => within,
+                        }
+                    })
                     .count()
             }
             Some(_) => 0,
@@ -1848,6 +1888,8 @@ fn spec_decode(
             "verify_seconds": verify_s,
             "rollback_seconds": rollback_s,
             "accept_margin": accept_margin,
+            "margin_peak": margin_peak,
+            "flat_rows": flat_rows,
             "pld_rounds": pld_rounds,
             "pld_accepted": pld_accepted,
             "tree_rounds": tree_rounds,
@@ -1900,6 +1942,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 &tok,
                 spec_run.readvance_rollback,
                 a.accept_margin,
+                a.margin_peak,
                 a.pld,
                 a.tree,
             )

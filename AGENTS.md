@@ -92,7 +92,9 @@ decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
 
 - Best stable config = **19.18 tok/s** (margin-3.0 + Q8_0 drafter + planar mm2d verify + GQA v1
   chunk + capture rollback; v2 median of 3 rotated reps). Exact (byte-match) is 14.67 vs plain
-  14.42; margin 1.0 is quality-free; margin 3.0 is the speed point (PPL +8–16%).
+  14.42; margin 1.0 is quality-free; margin 3.0 is the speed point — PPL cost is CLASS-DEPENDENT
+  (prose +5.4% / code +4.4% / math +3.9% / **factual +21.4%** — flat-distribution rows are where
+  margin drift concentrates; per-row peakedness gate is the targeted fix).
 - **Measured round anatomy (margin arm): ~229 ms/round FLAT in accepted-count** — verify 192 ms
   (84%), propose 30 ms (13%), rollback+overhead ~7 ms. tok/s = (accept+1)/round_wall closes the
   identity. **18/29 rounds saturate the width-4 cap** — acceptance is cap-truncated, so the
