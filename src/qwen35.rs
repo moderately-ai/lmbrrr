@@ -1588,7 +1588,9 @@ impl GatedDeltaNet {
             ksz: self.conv_kernel_size,
             num_k_heads: self.num_k_heads,
         };
-        const CAP: usize = 12;
+        // Matches the kernel's GDC_MAX_L (threadgroup-bounded); fewer, larger
+        // sub-chunks than the old 12 cut dispatch overhead on long prefill.
+        const CAP: usize = 15;
         let dt_bias = self.dt_bias_f32.flatten_all()?;
         let a_log_exp = self.a_log_exp_f32.flatten_all()?;
         let mut outs = Vec::with_capacity(l.div_ceil(CAP));
