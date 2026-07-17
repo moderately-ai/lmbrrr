@@ -1528,6 +1528,57 @@ impl GatedDeltaNet {
         Ok(state)
     }
 
+    /// Long prefill (l past the fused-chunk cap) routed through the fused
+    /// chunk kernel, looped over sub-chunks, instead of the unfused tensor
+    /// scan. conv_state may be None here (the first sub-chunk seeds it). Same
+    /// arch constraints as the fused chunk; opt-in via the route flag.
+    fn prefill_fused_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
+        self.routes.deltanet_prefill_fused
+            && self.routes.fused_deltanet
+            && b == 1
+            && l > 12
+            && matches!(xs.device(), Device::Metal(_))
+            && xs.dtype() == DType::BF16
+            && self.num_v_heads.is_multiple_of(self.num_k_heads)
+            && self.head_k_dim == 128
+            && self.head_v_dim == 128
+    }
+
+    /// Sub-chunk the sequence through the per-chunk fused path (via `forward`,
+    /// which routes each <=12-token sub-chunk to the fused chunk/decode kernel
+    /// and carries conv_state + recurrent_state between them). The first
+    /// sub-chunk seeds conv_state through whatever path `forward` selects (the
+    /// tensor path when conv_state is None — small and correct). Capture is
+    /// forced off: prefill's rollback capture is never consumed (the first
+    /// verify round overwrites it), and staging it per sub-chunk would leave a
+    /// stale window.
+    fn forward_fused_prefill(
+        &mut self,
+        xs: &Tensor,
+        l: usize,
+        layer_index: usize,
+        offset: usize,
+        profiler: Option<&Qwen35Profiler>,
+    ) -> Result<Tensor> {
+        const CAP: usize = 12;
+        let saved_capture = self.verify_capture;
+        self.verify_capture = false;
+        let result = (|| {
+            let mut outs = Vec::with_capacity(l.div_ceil(CAP));
+            let mut start = 0usize;
+            while start < l {
+                let c = CAP.min(l - start);
+                let chunk = xs.narrow(1, start, c)?;
+                outs.push(self.forward(&chunk, layer_index, offset + start, profiler)?);
+                start += c;
+            }
+            let refs: Vec<&Tensor> = outs.iter().collect();
+            Tensor::cat(&refs, 1)
+        })();
+        self.verify_capture = saved_capture;
+        result
+    }
+
     fn fused_v2_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
         // Chunks only: the re-gridded core wins there and compounds with l
         // (measured -7%/-8% at l=8/12), but the three-dispatch structure
@@ -1840,6 +1891,17 @@ impl GatedDeltaNet {
                 l,
                 offset,
                 || self.forward_fused_chunk(xs, l),
+            );
+        }
+        if self.prefill_fused_eligible(xs, b, l) {
+            return profiled(
+                profiler,
+                &device,
+                Some((layer_index, "linear_attention")),
+                "deltanet_fused_prefill",
+                l,
+                offset,
+                || self.forward_fused_prefill(xs, l, layer_index, offset, profiler),
             );
         }
         // One fused qkv+z projection; the z slice is consumed later at the

@@ -45,6 +45,10 @@ pub struct KernelRouteConfig {
     /// Sequential (per-step) DeltaNet recurrence instead of the chunked
     /// WY/UT path — a reference fallback for seq_len > 1.
     pub deltanet_sequential_fallback: bool,
+    /// Route long prefill (l > the fused-chunk cap) through the fused chunk
+    /// kernel, looped over sub-chunks carrying state, instead of the unfused
+    /// tensor-path scan. Opt-in until the byte-parity gate ships it on.
+    pub deltanet_prefill_fused: bool,
 }
 
 impl Default for KernelRouteConfig {
@@ -58,6 +62,7 @@ impl Default for KernelRouteConfig {
             fused_mtp_fc: true,
             deltanet_v2: true,
             deltanet_sequential_fallback: false,
+            deltanet_prefill_fused: false,
         }
     }
 }
@@ -81,6 +86,7 @@ impl KernelRouteConfig {
             deltanet_v2: opt_out(k::DELTANET_V2, base.deltanet_v2),
             // Any presence enables the fallback (historical `is_ok()` sense).
             deltanet_sequential_fallback: std::env::var(k::DELTANET_SEQUENTIAL).is_ok(),
+            deltanet_prefill_fused: std::env::var(k::DELTANET_PREFILL_FUSED).is_ok(),
         }
     }
 }

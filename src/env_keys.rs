@@ -29,6 +29,7 @@ pub const FUSED_ATTN_PREP: &str = "LMBRRR_FUSED_ATTN_PREP";
 pub const FUSED_MTP_FC: &str = "LMBRRR_FUSED_MTP_FC";
 pub const DELTANET_V2: &str = "LMBRRR_DELTANET_V2";
 pub const DELTANET_SEQUENTIAL: &str = "LMBRRR_DELTANET_SEQUENTIAL";
+pub const DELTANET_PREFILL_FUSED: &str = "LMBRRR_DELTANET_PREFILL_FUSED";
 
 // --- Decode-loop path selection — DecodeConfig (generate.rs) ---
 pub const ASYNC_READBACK: &str = "LMBRRR_ASYNC_READBACK";
@@ -73,6 +74,7 @@ pub const KNOWN_LMBRRR_KEYS: &[&str] = &[
     FUSED_MTP_FC,
     DELTANET_V2,
     DELTANET_SEQUENTIAL,
+    DELTANET_PREFILL_FUSED,
     ASYNC_READBACK,
     FUSED_ARGMAX,
     PACK,
