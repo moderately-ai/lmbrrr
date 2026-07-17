@@ -1425,10 +1425,21 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
             let _ = lin.forward(&x)?;
         }
         device.synchronize()?;
+        let t = Instant::now();
         for _ in 0..iters {
             let _ = lin.forward(&x)?;
         }
         device.synchronize()?;
+        // Q2_0 weight bytes/dispatch = n*k*2.125/8; the dominant read at m=1.
+        let secs = t.elapsed().as_secs_f64();
+        let wbytes = (n * k) as f64 * 2.125 / 8.0;
+        let gbps = wbytes * iters as f64 / secs / 1e9;
+        eprintln!(
+            "profile-kernel mv timing: {iters} disp in {:.3}s = {:.3} ms/disp, {:.1} GB/s (weight-read, m={mrows})",
+            secs,
+            secs * 1e3 / iters as f64,
+            gbps
+        );
     } else if let Some(variant) = q2_variant {
         let qt = QTensor::quantize(&w, GgmlDType::Q2_0)?;
         let data = qt.data()?;
