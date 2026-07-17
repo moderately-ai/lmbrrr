@@ -1317,7 +1317,15 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
         for (src, name) in [
             (
                 candle_metal_kernels::source::Source::GatedDeltaChunk,
-                "gated_delta_chunk_bf16",
+                "gated_delta_chunk_bf16_l5",
+            ),
+            (
+                candle_metal_kernels::source::Source::GatedDeltaChunk,
+                "gated_delta_chunk_bf16_l8",
+            ),
+            (
+                candle_metal_kernels::source::Source::GatedDeltaChunk,
+                "gated_delta_chunk_bf16_l12",
             ),
             (
                 candle_metal_kernels::source::Source::GatedDeltaPrefill,
