@@ -520,21 +520,26 @@ def _train_impl(
     lr: float | None,
     target_model: str,
     config: str = TRAIN_CONFIG,
+    cache_path: str | None = None,
 ) -> None:
     """Shared trainer invocation for the H100:4 and H100:8 entrypoints.
 
     Rightsizing (2026-07-11): volume random reads starve the GPU (180 s/step
     at gb=64); staging the cache to container NVMe (694 MB/s copy) plus
     micro-batching gives ~5 s/step. lbs=4 peaked at 76.7/79.7 GiB, so 2 is
-    the safe default for 4k-token tails."""
-    cache_path = f"/vol/cache/{cache_name}"
-    if stage_local:
-        import time
+    the safe default for 4k-token tails.
 
-        started = time.monotonic()
-        _run(["cp", "-r", cache_path, "/tmp/cache-staged"])
-        print(f"staged cache in {time.monotonic()-started:.0f}s", flush=True)
-        cache_path = "/tmp/cache-staged"
+    cache_path overrides the /vol/cache/{cache_name} + staging path for fused
+    prep+train callers whose cache already lives on container NVMe."""
+    if cache_path is None:
+        cache_path = f"/vol/cache/{cache_name}"
+        if stage_local:
+            import time
+
+            started = time.monotonic()
+            _run(["cp", "-r", cache_path, "/tmp/cache-staged"])
+            print(f"staged cache in {time.monotonic()-started:.0f}s", flush=True)
+            cache_path = "/tmp/cache-staged"
     opts = [
         f"data.target_cache_path={cache_path}",
         f"train.local_batch_size={local_batch_size}",
@@ -685,6 +690,69 @@ def train8(
         lr,
         target_model,
         config,
+    )
+
+
+@app.function(image=image, gpu="H100:8", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=3 * 1024 * 1024)
+def prep_and_train(
+    train_data: str = "data/regen-bonsai-r1b.jsonl",
+    cache_name: str = "target-cache-bonsai-r1b",
+    config: str = "/deepspec/config/dspark/dspark_bonsai.py",
+    target_model: str = "prism-ml/Ternary-Bonsai-27B-unpacked",
+    num_train_epochs: int = 6,
+    lr: float | None = None,
+    exp_name: str = "dspark_block7_bonsai_r1",
+    local_batch_size: int = 2,
+    cache_batch_size: int = 8,
+) -> None:
+    """Fused prep+train at the 3.0 TiB ephemeral ceiling, for caches that bust
+    prepare_cache's 1 TiB single-stage disk (the 38k Bonsai cache filled it at
+    ~60% of the build): build the target cache on container NVMe and train
+    directly from it — the volume receives only checkpoints. Spawns the
+    evaluator on the final checkpoint. Same fused design as the round-3/4
+    chains, parameterized for any lane."""
+    final_ckpt = f"/vol/runs/checkpoints/lmbrrr/{exp_name}/step_latest"
+    if os.path.exists(f"{final_ckpt}/model.safetensors"):
+        print(f"{exp_name} final checkpoint exists; skipping prep+train", flush=True)
+    else:
+        build_dir = f"/tmp/cache-build/{cache_name}"
+        _run(
+            [
+                "python",
+                "/deepspec/scripts/data/prepare_target_cache.py",
+                "--config",
+                config,
+                "--train-data-path",
+                f"/vol/{train_data}",
+                "--output-dir",
+                build_dir,
+                "--local-batch-size",
+                str(cache_batch_size),
+                "--num-workers",
+                "2",
+                "--opts",
+                f"model.target_model_name_or_path={target_model}",
+            ],
+            cwd="/deepspec",
+        )
+        _train_impl(
+            cache_name=cache_name,
+            global_batch_size=None,
+            num_train_epochs=num_train_epochs,
+            logging_steps=1,
+            torch_compile=True,
+            exp_name=exp_name,
+            local_batch_size=local_batch_size,
+            stage_local=False,
+            draft_init_checkpoint=None,
+            lr=lr,
+            target_model=target_model,
+            config=config,
+            cache_path=build_dir,
+        )
+    evaluate.spawn(
+        checkpoint=f"runs/checkpoints/lmbrrr/{exp_name}/step_latest",
+        target_model=target_model,
     )
 
 
