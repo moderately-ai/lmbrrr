@@ -1,7 +1,7 @@
 ---
 id: drafter-width7-retrain-bonsai
 title: Width-7 Bonsai DSpark drafter retrain (fill the flat m=8 verify tile)
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [ternary-bonsai-27b-support, ternary-decode-profile-optimize, dspark-cache-redesign-beyond-400k]
