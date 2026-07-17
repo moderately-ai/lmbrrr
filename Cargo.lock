@@ -1838,6 +1838,7 @@ dependencies = [
  "crossterm",
  "hf-hub",
  "image",
+ "libc",
  "memmap2",
  "ratatui",
  "safetensors 0.8.0",

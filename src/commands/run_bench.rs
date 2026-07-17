@@ -23,17 +23,39 @@ fn benchmark_writer(path: Option<&PathBuf>, append: bool) -> Result<Box<dyn Writ
 
 /// Build provenance + machine state stamped into every report row: without
 /// it, cross-day comparisons rely on filename discipline alone.
-fn report_provenance_json() -> serde_json::Value {
+pub(crate) fn report_provenance_json() -> serde_json::Value {
     let loadavg = std::process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    // Apple Silicon has no thermal sysctl; pmset reports the recorded
+    // throttle levels ("Note: ..." lines when the machine never throttled).
+    let thermal = std::process::Command::new("pmset")
+        .args(["-g", "therm"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        });
+    // macOS ru_maxrss is bytes (Linux reports KiB); this crate is Metal-only.
+    let ru_maxrss_bytes = unsafe {
+        let mut ru: libc::rusage = std::mem::zeroed();
+        (libc::getrusage(libc::RUSAGE_SELF, &mut ru) == 0).then(|| ru.ru_maxrss as u64)
+    };
     serde_json::json!({
         "lmbrrr_git_rev": env!("LMBRRR_GIT_REV"),
         "candle_pin": env!("LMBRRR_CANDLE_PIN"),
         "loadavg_at_start": loadavg,
+        "thermal": thermal,
+        "ru_maxrss_bytes": ru_maxrss_bytes,
     })
 }
 

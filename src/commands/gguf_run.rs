@@ -1510,15 +1510,21 @@ fn spec_decode(
     let mut tree_rounds = 0usize;
     let mut alt_wins = 0usize;
     let mut offset = ids.len();
+    // The anchor is prefill-produced but counted in the decode window —
+    // symmetric with plain decode, whose first token is also the prefill argmax.
     let mut committed: Vec<u32> = vec![anchor];
+    let mut committed_raw = 1usize;
     let mut rounds = 0usize;
     let mut accepted_total = 0usize;
     let mut propose_s = 0.0f64;
     let mut verify_s = 0.0f64;
     let mut rollback_s = 0.0f64;
+    let mut round_wall_ms: Vec<f64> = Vec::new();
+    let mut round_accepted: Vec<usize> = Vec::new();
 
     let decode = Instant::now();
     while committed.len() < max_new_tokens && committed.last() != Some(&eos) {
+        let round_t = Instant::now();
         if dbg {
             eprintln!("round {}: snapshot...", rounds + 1);
         }
@@ -1612,9 +1618,12 @@ fn spec_decode(
                 offset += accepted + 1;
                 committed.extend_from_slice(&winner[..accepted]);
                 committed.push(bonus);
+                committed_raw += accepted + 1;
                 accepted_total += accepted;
                 rounds += 1;
                 tree_rounds += 1;
+                round_wall_ms.push(round_t.elapsed().as_secs_f64() * 1000.0);
+                round_accepted.push(accepted);
                 if on_alt {
                     alt_wins += 1;
                 }
@@ -1759,10 +1768,13 @@ fn spec_decode(
 
         committed.extend_from_slice(&drafts[..accepted]);
         committed.push(bonus);
+        committed_raw += accepted + 1;
         accepted_total += accepted;
         rounds += 1;
         anchor = bonus;
         device.synchronize()?;
+        round_wall_ms.push(round_t.elapsed().as_secs_f64() * 1000.0);
+        round_accepted.push(accepted);
         if dbg {
             eprintln!(
                 "round {rounds}: offset={offset} accepted={accepted}/{width} committed={}",
@@ -1781,7 +1793,12 @@ fn spec_decode(
         }
     }
     let decode_seconds = decode.elapsed().as_secs_f64();
+    let eos_reached = committed.last() == Some(&eos);
     committed.truncate(max_new_tokens);
+    // Tokens committed by in-window verify work but dropped by EOS/cap
+    // truncation: their GPU cost stays in decode_seconds. Surfaced so the
+    // (anti-spec) bias is visible instead of silently absorbed.
+    let discarded_tokens = committed_raw - committed.len();
     let text = tok
         .decode(&committed, true)
         .map_err(|e| anyhow::anyhow!("decode: {e}"))?;
@@ -1806,7 +1823,12 @@ fn spec_decode(
             "pld_accepted": pld_accepted,
             "tree_rounds": tree_rounds,
             "alt_wins": alt_wins,
-            "overhead_seconds": decode_seconds - propose_s - verify_s,
+            "eos_reached": eos_reached,
+            "discarded_tokens": discarded_tokens,
+            "round_wall_ms": round_wall_ms,
+            "round_accepted": round_accepted,
+            "overhead_seconds": decode_seconds - propose_s - verify_s - rollback_s,
+            "provenance": super::run_bench::report_provenance_json(),
         })
     );
     Ok(())
@@ -1922,6 +1944,8 @@ fn decode(
     let mut offset = ids.len();
     let mut out = Vec::new();
     let mut gaps = Vec::new();
+    let mut forwards = 0usize;
+    let mut eos_reached = false;
     let decode = Instant::now();
     for _ in 0..max_new_tokens {
         let t0 = Instant::now();
@@ -1933,11 +1957,19 @@ fn decode(
             .flatten_all()?
             .to_vec1::<u32>()?[0];
         if next == eos {
+            eos_reached = true;
             break;
         }
         out.push(next);
+        // Never encode a forward whose logits nothing will read: the old tail
+        // forward leaked unsynchronized GPU time into decode_seconds (a ~1/N
+        // pro-baseline bias) while doing no useful work.
+        if out.len() == max_new_tokens {
+            break;
+        }
         let step = Tensor::from_slice(&[next], (1, 1), device)?;
         logits = model.forward(&step, offset)?;
+        forwards += 1;
         offset += 1;
         gaps.push(t0.elapsed().as_secs_f64());
     }
@@ -1968,7 +2000,14 @@ fn decode(
             "ids": out.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
             "decode_seconds": decode_seconds,
             "decode_tokens_per_second": out.len() as f64 / decode_seconds.max(f64::EPSILON),
+            // The first token is prefill-produced (its forward is paid in
+            // prefill_seconds); decode_forwards is the in-window forward count
+            // so offline analysis can separate per-forward cost from the
+            // token-count definition.
+            "decode_forwards": forwards,
+            "eos_reached": eos_reached,
             "steady_state_tokens_per_second": steady_tps,
+            "provenance": super::run_bench::report_provenance_json(),
             "device": format!("{device:?}"),
             "dtype": "BF16",
         })
