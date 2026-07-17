@@ -1,7 +1,7 @@
 ---
 id: eval-harness-validity-fixes
 title: "EVAL INFRA p1: fix the measurement harness — two HIGH-severity metric bugs + observability (all standings ride on this)"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [verify-spec-acceleration-routemap]

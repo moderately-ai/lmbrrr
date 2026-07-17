@@ -43,13 +43,16 @@ tickets, `docs/research/`, and `metal_notes.md`.)
 > faster but understanding why, and shipping only what is correct, proven-in-our-regime, and
 > mechanistically understood.
 
-## TASK-0 — the ruler is broken; fix it before trusting any number
+## TASK-0 — DONE (2026-07-17): the ruler is fixed and the standings survived it
 
-The tok/s metrics are **v1 and known-biased**: a ~+6% device-chain steady-state inflation
-and EOS-overshoot phantom token-times. The 19.17 tok/s "best config" and every recorded A/B
-carry this bias. Under the rigor protocol, **no throughput number is a finding until the
-harness is fixed, metrics are v2-versioned, and a fresh quiet/rotated baseline is set.**
-Ticket: **`eval-harness-validity-fixes`** (p1). Start here.
+The harness fixes are landed and the fresh quiet/rotated v2 baseline is set (ticket
+`eval-harness-validity-fixes`, closed — full ledger in its comments). Key reconciliation:
+the ~+6% chain inflation belonged to the **MiniCPM lane** (generate.rs device chain), never
+to the gguf lane the Bonsai standings ride on; the gguf ruler's own (small, mostly anti-spec)
+biases are fixed in 02e12c8. **v2 baseline (M3, 3 rotated reps, spread <0.3%): plain 14.42,
+spec exact 14.67 (ids byte-match plain), margin-3.0 19.18.** The 19.17 standing holds.
+Trap: never set the spec mm2d env on the plain arm — LMBRRR_MM2D_PLANAR=1 at m=1 craters
+decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
 
 ## Hard constraints & operating rules
 
@@ -85,17 +88,22 @@ Ticket: **`eval-harness-validity-fixes`** (p1). Start here.
 | Current frontier ops-log (Claude-specific, non-canonical) | `~/.claude-work-2/.../memory/bonsai-acceptance-drive-plan.md` |
 | Bring-up plan (architecture, config derivations) | ticket `ternary-bonsai-27b-support` (EPIC), `dspark-bonsai-integration` |
 
-## Current frontier snapshot (as of 2026-07-17; numbers are v1-biased)
+## Current frontier snapshot (as of 2026-07-17; v2-confirmed on the fixed ruler)
 
-- Best stable config ≈ **19.17 tok/s** = planar mm2d verify + GQA v1 chunk + capture rollback
-  + margin-3.0 acceptance + Q8_0 drafter. Exact (byte-match) default is lossless; margin 1.0 is
-  quality-free; margin 3.0 is the speed point (PPL +8–16%).
+- Best stable config = **19.18 tok/s** (margin-3.0 + Q8_0 drafter + planar mm2d verify + GQA v1
+  chunk + capture rollback; v2 median of 3 rotated reps). Exact (byte-match) is 14.67 vs plain
+  14.42; margin 1.0 is quality-free; margin 3.0 is the speed point (PPL +8–16%).
+- **Measured round anatomy (margin arm): ~229 ms/round FLAT in accepted-count** — verify 192 ms
+  (84%), propose 30 ms (13%), rollback+overhead ~7 ms. tok/s = (accept+1)/round_wall closes the
+  identity. **18/29 rounds saturate the width-4 cap** — acceptance is cap-truncated, so the
+  width-7 retrain's headroom exceeds the old propose-bound estimate.
 - The verify **matmul is settled** — mm2d (`matmul2d` on the packed uint2b operand) is the best
   available at m≤8 on M3 (independently re-confirmed vs MLX's f32-bound qmm, `metal_notes` §15.E).
   The lever is NOT the verify kernel — it is acceptance + verify *structure* + the arch state handling.
-- Ranked actionable order (in the epic): fix the ruler (task-0) → width-7 drafter retrain →
-  Sequoia-DP'd tree with a confidence-placed branch → rollback-free GDN masked-solve + lossless
-  wide tree → EAGLE-3 drafter upgrade. Escape hatch (bounded quality loss): more relaxed acceptance.
+- Ranked actionable order (in the epic): width-7 drafter retrain (Modal fused prep+train
+  in flight) → Sequoia-DP'd tree with a confidence-placed branch → rollback-free GDN
+  masked-solve + lossless wide tree → EAGLE-3 drafter upgrade. Escape hatch (bounded quality
+  loss): more relaxed acceptance.
 
 ## Board caveat (run this first)
 
