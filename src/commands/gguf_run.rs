@@ -1331,6 +1331,22 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
                 candle_metal_kernels::source::Source::GatedDeltaPrefill,
                 "gated_delta_prefill_bf16",
             ),
+            // v2 (re-gridded) chunk path — the l>=8 GQA verify + prefill route.
+            // GD2_MAX_L is a flat #define(12); q_raw+k_raw = 2*12*128*4 = 12KB
+            // in prep alone. If prep/core are >16KB the same occupancy lever
+            // (template GD2_MAX_L to the width) extends to width-7 verify.
+            (
+                candle_metal_kernels::source::Source::GatedDeltaV2,
+                "gated_delta_v2_prep_bf16",
+            ),
+            (
+                candle_metal_kernels::source::Source::GatedDeltaV2,
+                "gated_delta_v2_core",
+            ),
+            (
+                candle_metal_kernels::source::Source::GatedDeltaV2,
+                "gated_delta_v2_epilogue_bf16",
+            ),
         ] {
             let p = kernels.load_pipeline(dev, src, name)?;
             println!(
