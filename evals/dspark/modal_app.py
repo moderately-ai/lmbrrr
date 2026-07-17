@@ -705,7 +705,9 @@ def prep_and_train(
     target_model: str = "prism-ml/Ternary-Bonsai-27B-unpacked",
     num_train_epochs: int = 6,
     lr: float | None = None,
-    exp_name: str = "dspark_block7_bonsai_r1",
+    # r1b: the Gate-4 smoke train already parked a 1-step checkpoint under
+    # dspark_block7_bonsai_r1, which trips the skip-if-final-ckpt guard.
+    exp_name: str = "dspark_block7_bonsai_r1b",
     local_batch_size: int = 2,
     cache_batch_size: int = 8,
 ) -> None:
