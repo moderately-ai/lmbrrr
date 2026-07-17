@@ -54,6 +54,25 @@ enum GgufCmd {
     /// Loop ONE quantized matmul kernel in isolation so a gpucapture/gpudebug
     /// capture is dominated by it (counters are timeline-aggregate). No model.
     ProfileKernel(ProfileKernelArgs),
+    /// Loop the DeltaNet prefill kernels in isolation (streaming vs chunk-loop)
+    /// on synthetic Bonsai-shaped inputs — for capture/counter attribution of
+    /// why streaming under/over-performs the host-looped chunk. No model.
+    BenchDeltanet(BenchDeltanetArgs),
+}
+
+#[derive(Args, Debug)]
+struct BenchDeltanetArgs {
+    /// Which kernel to loop: "stream" | "chunk". Loop it in isolation so a
+    /// gpucapture is dominated by it.
+    #[arg(long, default_value = "stream")]
+    which: String,
+    /// Sequence length (prefill span).
+    #[arg(long, default_value_t = 232)]
+    l: usize,
+    /// Iterations of the whole-sequence work (each = 1 stream dispatch or
+    /// ceil(l/12) chunk dispatches). Large so the kernel dominates a capture.
+    #[arg(long, default_value_t = 200)]
+    iters: usize,
 }
 
 #[derive(Args, Debug)]
@@ -1496,6 +1515,98 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
     Ok(())
 }
 
+/// Isolated DeltaNet-prefill kernel loop (Bonsai shapes) for capture/counter
+/// attribution: streaming (one dispatch/seq) vs chunk (host loop over l/12).
+fn bench_deltanet(device: &Device, which: &str, l: usize, iters: usize) -> Result<()> {
+    use lmbrrr::fused_deltanet::{gated_delta_chunk, gated_delta_prefill, GatedDeltaDims};
+    // Bonsai DeltaNet dims.
+    let (heads, num_k_heads, dk, dv, ksz) = (48usize, 16usize, 128usize, 128usize, 4usize);
+    let key_dim = num_k_heads * dk;
+    let value_dim = heads * dv;
+    let conv_dim = 2 * key_dim + value_dim;
+    let row_stride = conv_dim + value_dim + 2 * heads;
+    let dims = GatedDeltaDims {
+        heads,
+        dk,
+        dv,
+        conv_dim,
+        key_dim,
+        value_dim,
+        ksz,
+        num_k_heads,
+    };
+    let proj = Tensor::randn(0f32, 1f32, (1, l, row_stride), device)?.to_dtype(DType::BF16)?;
+    let conv_state = Tensor::zeros((1, conv_dim, ksz), DType::BF16, device)?;
+    let recurrent_state = Tensor::zeros((1, heads, dk, dv), DType::F32, device)?;
+    let conv_w = Tensor::randn(0f32, 0.1f32, (conv_dim, ksz), device)?.to_dtype(DType::BF16)?;
+    let dt_bias = Tensor::zeros((heads,), DType::F32, device)?;
+    let a_log_exp = (Tensor::randn(0f32, 0.1f32, (heads,), device)?.abs()? + 0.5)?;
+    let norm_w = Tensor::ones((dv,), DType::F32, device)?;
+
+    let n_chunks = l.div_ceil(12);
+    eprintln!(
+        "bench-deltanet which={which} l={l} iters={iters} heads={heads} (stream=1 dispatch/seq, chunk={n_chunks} dispatches/seq)"
+    );
+    // Warmup.
+    for _ in 0..5 {
+        match which {
+            "stream" => {
+                let _ = gated_delta_prefill(
+                    &proj.flatten_to(1)?, l, &conv_state, &recurrent_state,
+                    &conv_w, &dt_bias, &a_log_exp, &norm_w, &dims, 1e-6, 1e-6,
+                )?;
+            }
+            "chunk" => {
+                for ci in 0..n_chunks {
+                    let start = ci * 12;
+                    let c = 12.min(l - start);
+                    let pc = proj.narrow(1, start, c)?.flatten_to(1)?;
+                    let _ = gated_delta_chunk(
+                        &pc, c, &conv_state, &recurrent_state,
+                        &conv_w, &dt_bias, &a_log_exp, &norm_w, &dims, 1e-6, 1e-6,
+                    )?;
+                }
+            }
+            other => anyhow::bail!("unknown --which {other}; use stream | chunk"),
+        }
+    }
+    device.synchronize()?;
+    let t = Instant::now();
+    for _ in 0..iters {
+        match which {
+            "stream" => {
+                let _ = gated_delta_prefill(
+                    &proj.flatten_to(1)?, l, &conv_state, &recurrent_state,
+                    &conv_w, &dt_bias, &a_log_exp, &norm_w, &dims, 1e-6, 1e-6,
+                )?;
+            }
+            "chunk" => {
+                for ci in 0..n_chunks {
+                    let start = ci * 12;
+                    let c = 12.min(l - start);
+                    let pc = proj.narrow(1, start, c)?.flatten_to(1)?;
+                    let _ = gated_delta_chunk(
+                        &pc, c, &conv_state, &recurrent_state,
+                        &conv_w, &dt_bias, &a_log_exp, &norm_w, &dims, 1e-6, 1e-6,
+                    )?;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    device.synchronize()?;
+    let s = t.elapsed().as_secs_f64();
+    // Per-seq cost = one layer's DeltaNet at this l; x48 layers approximates the
+    // per-forward DeltaNet wall (no MLP/attn/proj).
+    println!(
+        "{which}: {:.3} ms/seq ({:.1} seq/s over {iters} iters); x48 layers ~= {:.1} ms/forward",
+        1000.0 * s / iters as f64,
+        iters as f64 / s,
+        1000.0 * s / iters as f64 * 48.0,
+    );
+    Ok(())
+}
+
 fn profile_decode(
     model: &mut Qwen35CausalLM,
     device: &Device,
@@ -2075,6 +2186,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
         GgufCmd::BenchGemv => bench_gemv(&device),
         GgufCmd::BenchShapes => bench_shapes(&device),
         GgufCmd::ProfileKernel(a) => profile_kernel(&device, &a.which, a.iters, a.m),
+        GgufCmd::BenchDeltanet(a) => bench_deltanet(&device, &a.which, a.l, a.iters),
         GgufCmd::Decode(a) => {
             let (mut model, ids, eos, _ctx, tok, load_seconds) = load_gguf_model(&a.model, &device)?;
             decode(&mut model, &device, &ids, eos, a.max_new_tokens, &tok, load_seconds, a.warmup)
