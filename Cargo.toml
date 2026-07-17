@@ -19,12 +19,13 @@ metal-debug-labels = [
 anyhow = { version = "1", features = ["backtrace"] }
 # Fork branch `lmbrrr` carries Metal kernel additions ahead of upstream
 # (i32 casts); pinned by rev, upstreamed as PRs when stable.
-candle = { package = "candle-core", git = "https://github.com/tomsanbear/candle.git", rev = "8e8f3045", features = ["metal"] }
-candle-nn = { git = "https://github.com/tomsanbear/candle.git", rev = "8e8f3045", features = ["metal"] }
-candle-transformers = { git = "https://github.com/tomsanbear/candle.git", rev = "8e8f3045", features = ["metal"] }
-candle-metal-kernels = { git = "https://github.com/tomsanbear/candle.git", rev = "8e8f3045" }
+candle = { package = "candle-core", git = "https://github.com/tomsanbear/candle.git", rev = "9d514e7c", features = ["metal"] }
+candle-nn = { git = "https://github.com/tomsanbear/candle.git", rev = "9d514e7c", features = ["metal"] }
+candle-transformers = { git = "https://github.com/tomsanbear/candle.git", rev = "9d514e7c", features = ["metal"] }
+candle-metal-kernels = { git = "https://github.com/tomsanbear/candle.git", rev = "9d514e7c" }
 clap = { version = "4.2.4", features = ["derive"] }
 crossterm = "0.28"
+half = "2"
 hf-hub = { version = "0.5.0", features = ["tokio"] }
 image = { version = "0.25.2", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "0.2"

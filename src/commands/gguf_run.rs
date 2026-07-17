@@ -815,6 +815,150 @@ fn bench_gemv(device: &Device) -> Result<()> {
         }
     }
 
+    // Bit-plane popcount ternary GEMV (B3 spike): weights as +/- sign planes
+    // (2 bits + f16/128 = the same 2.125 bpw as Q2_0), activations int4
+    // bit-sliced — per-weight work is AND+popcount, no unpack, no multiply.
+    // Bar to clear: mm2d's ~43 GB/s at m=5-8; roof is the mv's ~106.
+    {
+        use candle_metal_kernels::call_ternary_bitplane_qmv;
+        let kw = k / 32;
+        let nb = k / 128;
+        let mut s_rng = 0x2468_ace0u32;
+        let mut next = move || {
+            s_rng = s_rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            s_rng
+        };
+        let mut wpos = vec![0u32; n * kw];
+        let mut wneg = vec![0u32; n * kw];
+        let mut dsc = vec![0u16; n * nb];
+        let mut wdense = vec![0f32; n * k];
+        for col in 0..n {
+            let dvals: Vec<f32> = (0..nb)
+                .map(|_| 0.005f32 + (next() % 1000) as f32 * 1e-5)
+                .collect();
+            for (blk, d) in dvals.iter().enumerate() {
+                dsc[col * nb + blk] = half::f16::from_f32(*d).to_bits();
+            }
+            for wi in 0..kw {
+                let (mut p, mut ng) = (0u32, 0u32);
+                for bit in 0..32 {
+                    let kk = wi * 32 + bit;
+                    // Use the f16-rounded d so the dense reference matches the
+                    // kernel's arithmetic exactly.
+                    let d = half::f16::from_f32(dvals[kk / 128]).to_f32();
+                    match next() % 4 {
+                        2 => {
+                            p |= 1 << bit;
+                            wdense[col * k + kk] = d;
+                        }
+                        3 => {
+                            ng |= 1 << bit;
+                            wdense[col * k + kk] = -d;
+                        }
+                        _ => {}
+                    }
+                }
+                wpos[col * kw + wi] = p;
+                wneg[col * kw + wi] = ng;
+            }
+        }
+        let mdev = match device {
+            Device::Metal(d) => d.clone(),
+            _ => anyhow::bail!("bitplane bench needs metal"),
+        };
+        let as_u8 = |v: &[u32]| unsafe {
+            std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4)
+        };
+        let wpos_buf = mdev.new_buffer_builder().with_data(as_u8(&wpos)).with_label("bp_wpos").build()?;
+        let wneg_buf = mdev.new_buffer_builder().with_data(as_u8(&wneg)).with_label("bp_wneg").build()?;
+        let dsc_bytes = unsafe {
+            std::slice::from_raw_parts(dsc.as_ptr() as *const u8, dsc.len() * 2)
+        };
+        let dsc_buf = mdev.new_buffer_builder().with_data(dsc_bytes).with_label("bp_d").build()?;
+        let wdense_t = Tensor::from_vec(wdense, (n, k), device)?;
+        let plane_bytes = (2 * n * kw * 4 + n * nb * 2) as f64;
+
+        for m in [1usize, 2, 4, 8] {
+            let x = Tensor::randn(0f32, 1f32, (m, k), device)?;
+            let xv = x.to_vec2::<f32>()?;
+            let mut ascale = vec![0f32; m];
+            let mut xq = vec![0f32; m * k];
+            let mut aplane = vec![0u32; m * 4 * kw];
+            for (row, xr) in xv.iter().enumerate() {
+                let s = xr.iter().fold(0f32, |a, v| a.max(v.abs())).max(1e-8) / 7.0;
+                ascale[row] = s;
+                for (kk, v) in xr.iter().enumerate() {
+                    let q = (v / s).round().clamp(-7.0, 7.0) as i32;
+                    xq[row * k + kk] = s * q as f32;
+                    let u = (q + 8) as u32;
+                    for b in 0..4 {
+                        if (u >> b) & 1 == 1 {
+                            aplane[(row * 4 + b) * kw + kk / 32] |= 1 << (kk % 32);
+                        }
+                    }
+                }
+            }
+            let ap_buf = mdev.new_buffer_builder().with_data(as_u8(&aplane)).with_label("bp_ap").build()?;
+            let as_bytes = unsafe {
+                std::slice::from_raw_parts(ascale.as_ptr() as *const u8, ascale.len() * 4)
+            };
+            let asc_buf = mdev.new_buffer_builder().with_data(as_bytes).with_label("bp_as").build()?;
+            let dst = mdev.new_buffer_builder().with_size(m * n * 4).with_label("bp_dst").build()?;
+            let refr_q = Tensor::from_vec(xq.clone(), (m, k), device)?.matmul(&wdense_t.t()?)?;
+            let refr_true = x.matmul(&wdense_t.t()?)?;
+            let dispatch = || -> Result<()> {
+                let enc = mdev.command_encoder()?;
+                call_ternary_bitplane_qmv(
+                    mdev.metal_device(),
+                    &enc,
+                    mdev.kernels(),
+                    (m, n, k),
+                    &wpos_buf,
+                    &wneg_buf,
+                    &dsc_buf,
+                    &ap_buf,
+                    &asc_buf,
+                    &dst,
+                )?;
+                Ok(())
+            };
+            for _ in 0..8 {
+                dispatch()?;
+            }
+            device.synchronize()?;
+            let iters = 200;
+            let t = Instant::now();
+            for _ in 0..iters {
+                dispatch()?;
+            }
+            device.synchronize()?;
+            let s = t.elapsed().as_secs_f64();
+            dispatch()?;
+            device.synchronize()?;
+            let out = candle::MetalStorage::new(dst.clone(), mdev.clone(), m * n, DType::F32);
+            let got = Tensor::from_storage(
+                candle::Storage::Metal(out),
+                (m, n),
+                candle::op::BackpropOp::none(),
+                false,
+            );
+            let denom = refr_true.abs()?.mean_all()?.to_scalar::<f32>()?.max(1e-6);
+            // Kernel-vs-int4-reference: should be near-exact (same integers,
+            // different float fold order). Act-err: what int4 activations cost.
+            let rel_kernel =
+                got.sub(&refr_q)?.abs()?.mean_all()?.to_scalar::<f32>()? / denom;
+            let act_err =
+                refr_q.sub(&refr_true)?.abs()?.mean_all()?.to_scalar::<f32>()? / denom;
+            println!(
+                "Q2_0 BITPLANE {n}x{k} m={m}: {:.3} ms/call ({:.1} GB/s), rel_vs_int4ref {:.4}, int4_act_err {:.4}",
+                1000.0 * s / iters as f64,
+                (plane_bytes * iters as f64) / s / 1e9,
+                rel_kernel,
+                act_err
+            );
+        }
+    }
+
     // Planar coalesced verify GEMM (q2_0_mm2d): reads a [k][n_pad] repack so the
     // cross-row weight read coalesces (the [row][block] kernels were capped ~21
     // GB/s). This is the DSpark-verify weight-bound lever.
