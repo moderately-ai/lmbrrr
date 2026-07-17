@@ -53,6 +53,10 @@ pub struct KernelRouteConfig {
     /// dispatch-count vs intra-chunk-work tradeoff). Clamped to the kernel's
     /// GDC_MAX_L=12; 0/unset uses 12.
     pub deltanet_prefill_cap: usize,
+    /// Use the single-dispatch streaming prefill kernel (S + conv window in
+    /// registers across internal tiles) instead of the host-looped chunk. A/B
+    /// against deltanet_prefill_fused's chunk loop.
+    pub deltanet_prefill_stream: bool,
 }
 
 impl Default for KernelRouteConfig {
@@ -68,6 +72,7 @@ impl Default for KernelRouteConfig {
             deltanet_sequential_fallback: false,
             deltanet_prefill_fused: false,
             deltanet_prefill_cap: 12,
+            deltanet_prefill_stream: false,
         }
     }
 }
@@ -97,6 +102,7 @@ impl KernelRouteConfig {
                 .and_then(|v| v.parse().ok())
                 .filter(|&c| (2..=12).contains(&c))
                 .unwrap_or(12),
+            deltanet_prefill_stream: std::env::var(k::DELTANET_PREFILL_STREAM).is_ok(),
         }
     }
 }

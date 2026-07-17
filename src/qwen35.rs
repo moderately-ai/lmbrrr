@@ -1588,11 +1588,36 @@ impl GatedDeltaNet {
             ksz: self.conv_kernel_size,
             num_k_heads: self.num_k_heads,
         };
+        let dt_bias = self.dt_bias_f32.flatten_all()?;
+        let a_log_exp = self.a_log_exp_f32.flatten_all()?;
+
+        // Streaming variant: one dispatch over the whole sequence (S + conv
+        // window carried in registers across internal tiles). A/B against the
+        // host-looped chunk path below.
+        if self.routes.deltanet_prefill_stream {
+            let (out, conv_new, state_new) = crate::fused_deltanet::gated_delta_prefill(
+                &proj.flatten_to(1)?,
+                l,
+                &conv_state,
+                &recurrent_state.contiguous()?,
+                &self.conv_weight_full,
+                &dt_bias,
+                &a_log_exp,
+                &self.norm.weight_f32,
+                &dims,
+                1e-6,
+                self.norm.eps as f32,
+            )
+            .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
+            self.conv_state = Some(conv_new);
+            self.recurrent_state = Some(state_new);
+            self.verify_captured = None;
+            return self.out_proj.forward(&out);
+        }
+
         // Sub-chunk size, <= the chunk kernel's GDC_MAX_L (threadgroup-bounded).
         // Configurable to sweep the dispatch-count vs intra-chunk-work tradeoff.
         let cap = self.routes.deltanet_prefill_cap.clamp(2, 12);
-        let dt_bias = self.dt_bias_f32.flatten_all()?;
-        let a_log_exp = self.a_log_exp_f32.flatten_all()?;
         let mut outs = Vec::with_capacity(l.div_ceil(cap));
         let mut start = 0usize;
         while start < l {

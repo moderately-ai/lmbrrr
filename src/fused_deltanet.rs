@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use candle::op::BackpropOp;
 use candle::{DType, Device, Storage, Tensor};
 use candle_metal_kernels::kernels::{
-    call_gated_delta_chunk, call_gated_delta_decode, call_gated_delta_v2_reconstruct,
-    GatedDeltaParams,
+    call_gated_delta_chunk, call_gated_delta_decode, call_gated_delta_prefill,
+    call_gated_delta_v2_reconstruct, GatedDeltaParams,
 };
 
 /// Rollback-capture tensors emitted by the fused chunk kernel, matching the
@@ -189,6 +189,127 @@ pub fn gated_delta_chunk(
         gcs: mk(cap_gcs_buf, dims.heads * l, DType::F32, vec![1, dims.heads, l]),
     };
     Ok((out, conv_out, state_out, capture))
+}
+
+/// Streaming prefill over the WHOLE sequence in one dispatch (any seq_len; no
+/// rollback capture). Same inputs/outputs as `gated_delta_chunk` minus the
+/// capture tensors; the kernel loops fixed tiles internally, carrying S + the
+/// conv window in registers. Returns (out [1,l,value_dim], conv_out, state_out).
+#[allow(clippy::too_many_arguments)]
+pub fn gated_delta_prefill(
+    proj: &Tensor,
+    seq_len: usize,
+    conv_state: &Tensor,
+    recurrent_state: &Tensor,
+    conv_weight: &Tensor,
+    dt_bias_f32: &Tensor,
+    a_log_exp_f32: &Tensor,
+    norm_weight_f32: &Tensor,
+    dims: &GatedDeltaDims,
+    l2_eps: f32,
+    norm_eps: f32,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    let Device::Metal(device) = proj.device() else {
+        anyhow::bail!("fused gated-delta prefill requires a Metal device");
+    };
+    let sanitized = [
+        offset0(proj)?,
+        offset0(conv_state)?,
+        offset0(recurrent_state)?,
+        offset0(conv_weight)?,
+        offset0(dt_bias_f32)?,
+        offset0(a_log_exp_f32)?,
+        offset0(norm_weight_f32)?,
+    ];
+    let dtypes = [
+        DType::BF16,
+        DType::BF16,
+        DType::F32,
+        DType::BF16,
+        DType::F32,
+        DType::F32,
+        DType::F32,
+    ];
+    let mut guards = Vec::with_capacity(sanitized.len());
+    for (t, dtype) in sanitized.iter().zip(dtypes.iter()) {
+        if t.dtype() != *dtype {
+            anyhow::bail!("fused gated-delta prefill: dtype mismatch {:?} vs {dtype:?}", t.dtype());
+        }
+        let (storage, _) = t.storage_and_layout();
+        guards.push(storage);
+    }
+    let buffer = |i: usize| -> Result<_> {
+        match &*guards[i] {
+            Storage::Metal(ms) => Ok(ms.buffer().clone()),
+            _ => anyhow::bail!("fused gated-delta prefill: input {i} not on Metal"),
+        }
+    };
+    let bufs: Vec<_> = (0..sanitized.len()).map(&buffer).collect::<Result<_>>()?;
+
+    let alloc = |count: usize, dtype: DType, label: &str| {
+        device
+            .new_buffer_builder()
+            .with_size_for(count, dtype)
+            .with_label(label)
+            .build()
+    };
+    let l = seq_len;
+    let out_buf = alloc(l * dims.value_dim, DType::BF16, "gdp_out")?;
+    let conv_out_buf = alloc(dims.conv_dim * dims.ksz, DType::BF16, "gdp_conv")?;
+    let state_out_buf = alloc(dims.heads * dims.dk * dims.dv, DType::F32, "gdp_state")?;
+
+    let encoder = device.command_encoder()?;
+    call_gated_delta_prefill(
+        device.metal_device(),
+        &encoder,
+        device.kernels(),
+        GatedDeltaParams {
+            heads: dims.heads as u32,
+            dk: dims.dk as u32,
+            dv: dims.dv as u32,
+            conv_dim: dims.conv_dim as u32,
+            key_dim: dims.key_dim as u32,
+            value_dim: dims.value_dim as u32,
+            ksz: dims.ksz as u32,
+            num_k_heads: dims.num_k_heads as u32,
+            l2_eps,
+            norm_eps,
+        },
+        l,
+        &bufs[0],
+        &bufs[1],
+        &bufs[2],
+        &bufs[3],
+        &bufs[4],
+        &bufs[5],
+        &bufs[6],
+        &out_buf,
+        &conv_out_buf,
+        &state_out_buf,
+    )
+    .map_err(candle::Error::wrap)
+    .context("fused gated-delta prefill dispatch")?;
+    drop(encoder);
+    drop(guards);
+
+    let mk = |buf, count: usize, dtype, shape: Vec<usize>| -> Tensor {
+        let storage = candle::MetalStorage::new(buf, device.clone(), count, dtype);
+        Tensor::from_storage(Storage::Metal(storage), shape, BackpropOp::none(), false)
+    };
+    let out = mk(out_buf, l * dims.value_dim, DType::BF16, vec![1, l, dims.value_dim]);
+    let conv_out = mk(
+        conv_out_buf,
+        dims.conv_dim * dims.ksz,
+        DType::BF16,
+        vec![1, dims.conv_dim, dims.ksz],
+    );
+    let state_out = mk(
+        state_out_buf,
+        dims.heads * dims.dk * dims.dv,
+        DType::F32,
+        vec![1, dims.heads, dims.dk, dims.dv],
+    );
+    Ok((out, conv_out, state_out))
 }
 
 /// Runs the fused decode step. `proj` is the packed projection
