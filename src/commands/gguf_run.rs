@@ -137,6 +137,12 @@ struct ProfileArgs {
     /// by component under whatever route env is set (LMBRRR_MM2D etc.).
     #[arg(long, default_value_t = 1)]
     verify_width: usize,
+    /// Replicate the spec loop's tap-layer device capture during each chunk
+    /// forward (e.g. "1,16,31,46,61" = the Bonsai drafter taps). The in-loop
+    /// verify always captures; the profiler default doesn't — this flag makes
+    /// the two measure the same work.
+    #[arg(long)]
+    capture_taps: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1336,9 +1342,19 @@ fn profile_decode(
     device: &Device,
     ids: &[u32],
     width: usize,
+    capture_taps: Option<&str>,
 ) -> Result<()> {
     use candle::D;
     use std::collections::HashMap;
+
+    let taps: Option<Vec<usize>> = capture_taps
+        .map(|s| {
+            s.split(',')
+                .map(|t| t.trim().parse::<usize>())
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("bad --capture-taps: {e}"))?;
 
     let prof = Qwen35Profiler::new();
     model.set_profiler(Some(prof.clone()));
@@ -1368,8 +1384,12 @@ fn profile_decode(
         // full-logits path (what the spec verify runs). Token identity is
         // irrelevant to timing; reuse the prompt's first `width` ids.
         let chunk: Vec<u32> = ids.iter().cycle().take(width).copied().collect();
+        let wall = Instant::now();
         for _ in 0..steps {
             let chunk_input = Tensor::from_slice(&chunk, (1, width), device)?;
+            if let Some(taps) = &taps {
+                model.set_device_capture(Some(taps.clone()));
+            }
             let logits = model.forward_all_logits(&chunk_input, offset)?;
             // Include the verify's argmax readback in the step, as spec does.
             let _ = logits
@@ -1377,9 +1397,18 @@ fn profile_decode(
                 .to_dtype(DType::U32)?
                 .flatten_all()?
                 .to_vec1::<u32>()?;
+            if taps.is_some() {
+                let caps = model.take_device_captures();
+                let _ = Tensor::cat(&caps, D::Minus1)?;
+            }
             device.synchronize()?;
             offset += width;
         }
+        eprintln!(
+            "chunk wall (serialized, incl. profiler syncs): {:.2} ms/step, capture={}",
+            wall.elapsed().as_secs_f64() * 1000.0 / steps as f64,
+            taps.is_some()
+        );
     }
 
     // Aggregate step events (seq_len == width) by component.
@@ -1878,7 +1907,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
         GgufCmd::Profile(a) => {
             let (mut model, ids, _eos, _ctx, _tok, _load_seconds) =
                 load_gguf_model(&a.model, &device)?;
-            profile_decode(&mut model, &device, &ids, a.verify_width)
+            profile_decode(&mut model, &device, &ids, a.verify_width, a.capture_taps.as_deref())
         }
     }
 }

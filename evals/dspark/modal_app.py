@@ -693,7 +693,7 @@ def train8(
     )
 
 
-@app.function(image=image, gpu="H100:8", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=3 * 1024 * 1024)
+@app.function(image=image, gpu="H100:4", volumes=VOLUMES, secrets=[hf_secret], timeout=23 * 3600, ephemeral_disk=3 * 1024 * 1024)
 def prep_and_train(
     train_data: str = "data/regen-bonsai-r1b.jsonl",
     cache_name: str = "target-cache-bonsai-r1b",
