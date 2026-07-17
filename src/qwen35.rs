@@ -1544,39 +1544,87 @@ impl GatedDeltaNet {
             && self.head_v_dim == 128
     }
 
-    /// Sub-chunk the sequence through the per-chunk fused path (via `forward`,
-    /// which routes each <=12-token sub-chunk to the fused chunk/decode kernel
-    /// and carries conv_state + recurrent_state between them). The first
-    /// sub-chunk seeds conv_state through whatever path `forward` selects (the
-    /// tensor path when conv_state is None — small and correct). Capture is
-    /// forced off: prefill's rollback capture is never consumed (the first
-    /// verify round overwrites it), and staging it per sub-chunk would leave a
-    /// stale window.
-    fn forward_fused_prefill(
-        &mut self,
-        xs: &Tensor,
-        l: usize,
-        layer_index: usize,
-        offset: usize,
-        profiler: Option<&Qwen35Profiler>,
-    ) -> Result<Tensor> {
+    /// Long prefill through the fused conv+recurrence kernel. The projections
+    /// (the big quantized matmuls) run ONCE over the full sequence — weight-
+    /// amortized, m=l — and only the fused chunk kernel (conv + WY/UT solve +
+    /// output-gate norm, all on-chip) loops over <=12-token sub-chunks,
+    /// carrying conv_state + recurrent_state. This replaces the unfused
+    /// tensor-path materialized recurrence (the measured ~22% + conv 9% +
+    /// gate 5% of prefill) without touching the amortized proj/MLP. Prefill
+    /// takes no rollback capture (the first verify round overwrites it).
+    fn forward_fused_prefill(&mut self, xs: &Tensor, l: usize) -> Result<Tensor> {
+        self.ensure_v1_state_layout()?;
+        let qkvz = self.in_proj_qkvz.forward(xs)?;
+        let ba = self.in_proj_ba.forward(xs)?;
+        let proj = Tensor::cat(&[&qkvz, &ba], D::Minus1)?; // [1, l, 8224] packed v1
+        let device = xs.device();
+        // conv_state None (fresh prefill) == a zero retained window, which the
+        // kernel reads from slots [1..ksz-1]; matches the tensor path's
+        // left-pad. Must be bf16 (the kernel's conv_state operand dtype).
+        let mut conv_state = match &self.conv_state {
+            Some(state) => state.clone(),
+            None => Tensor::zeros(
+                (1, self.conv_dim, self.conv_kernel_size),
+                DType::BF16,
+                device,
+            )?,
+        };
+        let mut recurrent_state = match &self.recurrent_state {
+            Some(state) if state.dtype() == DType::F32 => state.clone(),
+            Some(state) => state.to_dtype(DType::F32)?,
+            None => Tensor::zeros(
+                (1, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                DType::F32,
+                device,
+            )?,
+        };
+        let dims = crate::fused_deltanet::GatedDeltaDims {
+            heads: self.num_v_heads,
+            dk: self.head_k_dim,
+            dv: self.head_v_dim,
+            conv_dim: self.conv_dim,
+            key_dim: self.key_dim,
+            value_dim: self.value_dim,
+            ksz: self.conv_kernel_size,
+            num_k_heads: self.num_k_heads,
+        };
         const CAP: usize = 12;
-        let saved_capture = self.verify_capture;
-        self.verify_capture = false;
-        let result = (|| {
-            let mut outs = Vec::with_capacity(l.div_ceil(CAP));
-            let mut start = 0usize;
-            while start < l {
-                let c = CAP.min(l - start);
-                let chunk = xs.narrow(1, start, c)?;
-                outs.push(self.forward(&chunk, layer_index, offset + start, profiler)?);
-                start += c;
+        let dt_bias = self.dt_bias_f32.flatten_all()?;
+        let a_log_exp = self.a_log_exp_f32.flatten_all()?;
+        let mut outs = Vec::with_capacity(l.div_ceil(CAP));
+        let mut start = 0usize;
+        while start < l {
+            let mut c = CAP.min(l - start);
+            // The fused chunk kernel wants 2 <= c; never leave a size-1 tail.
+            if l - start - c == 1 {
+                c -= 1;
             }
-            let refs: Vec<&Tensor> = outs.iter().collect();
-            Tensor::cat(&refs, 1)
-        })();
-        self.verify_capture = saved_capture;
-        result
+            let proj_c = proj.narrow(1, start, c)?;
+            let (out, conv_new, state_new, _cap) = crate::fused_deltanet::gated_delta_chunk(
+                &proj_c.flatten_to(1)?,
+                c,
+                &conv_state,
+                &recurrent_state.contiguous()?,
+                &self.conv_weight_full,
+                &dt_bias,
+                &a_log_exp,
+                &self.norm.weight_f32,
+                &dims,
+                1e-6,
+                self.norm.eps as f32,
+            )
+            .map_err(|e| candle::Error::msg(format!("{e:#}")))?;
+            conv_state = conv_new;
+            recurrent_state = state_new;
+            outs.push(out);
+            start += c;
+        }
+        self.conv_state = Some(conv_state);
+        self.recurrent_state = Some(recurrent_state);
+        self.verify_captured = None;
+        let refs: Vec<&Tensor> = outs.iter().collect();
+        let out = Tensor::cat(&refs, 1)?;
+        self.out_proj.forward(&out)
     }
 
     fn fused_v2_eligible(&self, xs: &Tensor, b: usize, l: usize) -> bool {
@@ -1901,7 +1949,7 @@ impl GatedDeltaNet {
                 "deltanet_fused_prefill",
                 l,
                 offset,
-                || self.forward_fused_prefill(xs, l, layer_index, offset, profiler),
+                || self.forward_fused_prefill(xs, l),
             );
         }
         // One fused qkv+z projection; the z slice is consumed later at the
