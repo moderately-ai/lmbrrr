@@ -63,6 +63,7 @@ image = (
         "datasets==4.8.5",
         "openai==2.6.1",
         "flash-linear-attention",
+        "gguf==0.17.1",
     )
     .env(
         {
@@ -242,13 +243,41 @@ def regenerate(
     output_name: str = "regen-smoke.jsonl",
     skip_samples: int = 0,
     model: str = TARGET_MODEL,
+    done_marker: str | None = None,
+    unique: bool = False,
 ) -> None:
     """Replace assistant turns with target-model generations (non-thinking).
 
     Defaults from the 2026-07-11 rightsizing sweep: batch 128 + length-sorted
     admission = 3.65x the old batch-16 config (192 OOMs on prefill logits at
     this vocab). Pass model=/vol/models/minicpm-v46-fakequant-q4kft for
-    deployment-config traces."""
+    deployment-config traces.
+
+    Idempotency (used by regenerate_sharded; standalone calls leave both off):
+    - `done_marker` set  -> skip entirely if the marker already exists (a prior
+      attempt of this shard completed), and write it on success. Makes a Modal
+      infra RESCHEDULE (which restarts a lost call regardless of retries=) a
+      no-op instead of a full re-run.
+    - `unique=True`      -> append the container task id to the output filename
+      so a rescheduled duplicate writes a DIFFERENT file and can never truncate
+      a sibling's already-complete output (the 2026-07-17 corruption). The
+      merge dedups by conversation id.
+    """
+    import os
+    import uuid
+
+    if done_marker is not None:
+        volume.reload()
+        if os.path.exists(f"/vol/data/{done_marker}"):
+            print(f"SKIP {output_name}: marker {done_marker} already present", flush=True)
+            return
+
+    out = output_name
+    if unique:
+        task = os.environ.get("MODAL_TASK_ID") or uuid.uuid4().hex
+        base, ext = os.path.splitext(output_name)
+        out = f"{base}-{task}{ext}"
+
     monitor = GpuMonitor(tag=f"regen-b{batch_size}")
     monitor.start()
     _run(
@@ -261,7 +290,7 @@ def regenerate(
             "--input",
             f"/vol/data/{input_name}",
             "--output",
-            f"/vol/data/{output_name}",
+            f"/vol/data/{out}",
             "--num-samples",
             str(num_samples),
             "--skip-samples",
@@ -274,6 +303,12 @@ def regenerate(
         env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
     )
     print("REGEN_GPU", json.dumps(monitor.stop()), flush=True)
+    # Write the completion marker only after the subprocess wrote a full file,
+    # so its existence authoritatively means "this shard is done".
+    if done_marker is not None:
+        n = sum(1 for _ in open(f"/vol/data/{out}", "r", encoding="utf-8"))
+        with open(f"/vol/data/{done_marker}", "w", encoding="utf-8") as m:
+            m.write(json.dumps({"output": out, "count": n}))
     volume.commit()
 
 
@@ -287,32 +322,95 @@ def regenerate_sharded(
     output_prefix: str = "regen-round1",
     model: str = TARGET_MODEL,
 ) -> None:
-    """Fan regeneration across parallel GPU containers, then merge shards."""
+    """Fan regeneration across parallel GPU containers, then merge.
+
+    Idempotent + corruption-proof (2026-07-17 duplicate-run postmortem):
+    Modal restarts a lost container's call on an infra reschedule regardless
+    of retries=, so a naive orchestrator that holds N handles for hours can be
+    restarted and re-drive every shard — re-running completed work AND (with a
+    shared output filename opened "w") truncating a sibling's finished file.
+
+    Guards:
+      * each shard writes a task-UNIQUE file, so no two attempts ever touch the
+        same path (truncation structurally impossible);
+      * each completed shard drops a per-index `.done` marker; this orchestrator
+        spawns only shards lacking a marker, and a re-spawned shard self-skips
+        if its marker exists (no 2x compute on restart);
+      * the merge trusts only marked shards and dedups by conversation id, so
+        duplicate files from any reschedule collapse harmlessly.
+
+    Correctness depends only on the dedup (never on commit timing or atomic
+    rename); the markers only save money by avoiding re-runs.
+    """
+    import glob
+    import json
+    import os
+
     per_shard = (total_samples + shards - 1) // shards
-    calls = [
-        {
-            "num_samples": per_shard,
-            "skip_samples": shard * per_shard,
-            "max_new_tokens": max_new_tokens,
-            "batch_size": batch_size,
-            "input_name": input_name,
-            "output_name": f"{output_prefix}-shard{shard:02d}.jsonl",
-            "model": model,
-        }
-        for shard in range(shards)
-    ]
-    handles = [regenerate.spawn(**call) for call in calls]
-    for handle in handles:
-        handle.get()
+
+    def marker_name(nn: int) -> str:
+        return f"{output_prefix}-shard{nn:02d}.done"
+
     volume.reload()
+    pending = [
+        nn for nn in range(shards)
+        if not os.path.exists(f"/vol/data/{marker_name(nn)}")
+    ]
+    print(
+        f"spawning {len(pending)}/{shards} shards "
+        f"({shards - len(pending)} already complete): {pending}",
+        flush=True,
+    )
+    handles = {
+        nn: regenerate.spawn(
+            num_samples=per_shard,
+            skip_samples=nn * per_shard,
+            max_new_tokens=max_new_tokens,
+            batch_size=batch_size,
+            input_name=input_name,
+            output_name=f"{output_prefix}-shard{nn:02d}.jsonl",
+            model=model,
+            done_marker=marker_name(nn),
+            unique=True,
+        )
+        for nn in pending
+    }
+    failures = []
+    for nn, handle in handles.items():
+        try:
+            handle.get()
+        except Exception as exc:  # a poison shard must not abort the merge
+            failures.append((nn, repr(exc)))
+            print(f"SHARD {nn:02d} FAILED: {exc!r}", flush=True)
+
+    volume.reload()
+    done = [nn for nn in range(shards) if os.path.exists(f"/vol/data/{marker_name(nn)}")]
+    missing = [nn for nn in range(shards) if nn not in done]
+
     merged = f"/vol/data/{output_prefix}.jsonl"
+    seen: set = set()
+    total = 0
     with open(merged, "w", encoding="utf-8") as out_handle:
-        for shard in range(shards):
-            shard_path = f"/vol/data/{output_prefix}-shard{shard:02d}.jsonl"
-            with open(shard_path, "r", encoding="utf-8") as in_handle:
-                for line in in_handle:
-                    out_handle.write(line)
-    print(f"merged {shards} shards -> {merged}", flush=True)
+        for nn in done:
+            for path in sorted(glob.glob(f"/vol/data/{output_prefix}-shard{nn:02d}-*.jsonl")):
+                with open(path, "r", encoding="utf-8") as in_handle:
+                    for line in in_handle:
+                        if not line.strip():
+                            continue
+                        try:
+                            rid = json.loads(line).get("id")
+                        except Exception:
+                            continue
+                        if rid in seen:
+                            continue
+                        seen.add(rid)
+                        out_handle.write(line)
+                        total += 1
+    print(
+        f"merged {len(done)}/{shards} shards -> {merged} "
+        f"({total} conversations); missing={missing} failures={failures}",
+        flush=True,
+    )
     volume.commit()
 
 
@@ -1632,3 +1730,100 @@ def rank_tokens(
         f"top32k_coverage={coverage:.4f} -> /vol/artifacts/{output_name}",
         flush=True,
     )
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=600)
+def inspect_checkpoint(checkpoint: str = "runs/checkpoints/lmbrrr/dspark_block7_bonsai_smoke1853/step_6") -> None:
+    """List a draft checkpoint's tensor keys + config — tells the GGUF
+    converter exactly which tensors the checkpoint carries (frozen
+    embed/head may be omitted)."""
+    import os, json
+    from safetensors import safe_open
+
+    ckpt = f"/vol/{checkpoint}"
+    cfg_path = os.path.join(ckpt, "config.json")
+    if os.path.exists(cfg_path):
+        cfg = json.load(open(cfg_path))
+        print("CONFIG_KEYS", json.dumps({k: cfg[k] for k in sorted(cfg) if not isinstance(cfg[k], (list, dict))}, default=str))
+        for k in ("target_layer_ids", "layer_types"):
+            if k in cfg:
+                print(f"CONFIG_{k}", json.dumps(cfg[k]))
+    st = os.path.join(ckpt, "model.safetensors")
+    with safe_open(st, framework="pt") as f:
+        keys = sorted(f.keys())
+        print(f"TENSOR_COUNT {len(keys)}")
+        for k in keys:
+            print("T", k, list(f.get_slice(k).get_shape()), f.get_slice(k).get_dtype())
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=1800)
+def convert_gguf(
+    checkpoint: str = "runs/checkpoints/lmbrrr/dspark_block7_bonsai_smoke1853/step_6",
+    out_name: str | None = None,
+) -> None:
+    """Convert a trained draft checkpoint to a dspark GGUF for lmbrrr (bf16).
+    Writes to /vol/models/<out_name>; download it, then `lmbrrr gguf requant`
+    to Q8_0/Q4_1 for deployment."""
+    import os
+
+    name = out_name or (os.path.basename(checkpoint.rstrip("/")) + "-dspark-bf16.gguf")
+    os.makedirs("/vol/models", exist_ok=True)
+    out_path = f"/vol/models/{name}"
+    _run(
+        [
+            "python",
+            "/lmbrrr-dspark/convert_dspark_gguf.py",
+            "--checkpoint",
+            f"/vol/{checkpoint}",
+            "--out",
+            out_path,
+        ]
+    )
+    print(f"CONVERTED -> {out_path} ({os.path.getsize(out_path)/1e9:.2f} GB)", flush=True)
+    volume.commit()
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=600)
+def inventory_shards(prefix: str = "regen-bonsai-r1b", shards: int = 12) -> None:
+    """Line-count each shard file on the volume — distinguish complete from
+    truncated shards after a partial/duplicated regen run."""
+    import os
+    total = 0
+    for i in range(shards):
+        p = f"/vol/data/{prefix}-shard{i:02d}.jsonl"
+        n = sum(1 for _ in open(p)) if os.path.exists(p) else -1
+        print(f"shard{i:02d} {n}", flush=True)
+        if n > 0:
+            total += n
+    print(f"TOTAL {total}", flush=True)
+
+
+@app.function(image=image, volumes=VOLUMES, timeout=1200)
+def merge_shards(
+    prefix: str = "regen-bonsai-r1b",
+    shards: int = 12,
+    output_name: str = "regen-bonsai-r1b.jsonl",
+) -> None:
+    """Concatenate existing non-empty shard files into one JSONL. Idempotent
+    recovery for a sharded regen whose orchestrator didn't reach its own
+    merge (e.g. a preempted/duplicated parent, stopped manually)."""
+    import os
+
+    merged = f"/vol/data/{output_name}"
+    total, used = 0, []
+    with open(merged, "w", encoding="utf-8") as out:
+        for i in range(shards):
+            p = f"/vol/data/{prefix}-shard{i:02d}.jsonl"
+            if not os.path.exists(p) or os.path.getsize(p) == 0:
+                print(f"skip shard{i:02d} (missing/empty)", flush=True)
+                continue
+            n = 0
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        out.write(line)
+                        n += 1
+            total += n
+            used.append(i)
+    print(f"merged shards {used} -> {merged}  ({total} conversations)", flush=True)
+    volume.commit()
