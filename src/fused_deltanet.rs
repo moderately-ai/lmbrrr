@@ -257,6 +257,8 @@ pub fn gated_delta_prefill(
     let out_buf = alloc(l * dims.value_dim, DType::BF16, "gdp_out")?;
     let conv_out_buf = alloc(dims.conv_dim * dims.ksz, DType::BF16, "gdp_conv")?;
     let state_out_buf = alloc(dims.heads * dims.dk * dims.dv, DType::F32, "gdp_state")?;
+    // Ping-pong scratch for the recurrent state (avoids the in-place L1 thrash).
+    let state_scratch_buf = alloc(dims.heads * dims.dk * dims.dv, DType::F32, "gdp_scratch")?;
 
     let encoder = device.command_encoder()?;
     call_gated_delta_prefill(
@@ -286,6 +288,7 @@ pub fn gated_delta_prefill(
         &out_buf,
         &conv_out_buf,
         &state_out_buf,
+        &state_scratch_buf,
     )
     .map_err(candle::Error::wrap)
     .context("fused gated-delta prefill dispatch")?;
