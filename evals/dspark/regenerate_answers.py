@@ -55,6 +55,17 @@ def parse_args() -> argparse.Namespace:
             "of prefill logits."
         ),
     )
+    parser.add_argument(
+        "--resume-glob",
+        default=None,
+        help=(
+            "Glob of prior output files for THIS shard (e.g. "
+            "'.../regen-shard03-*.jsonl'). Conversation ids already completed "
+            "in them are skipped, so a shard re-run after an infra reschedule "
+            "regenerates only the remainder (within-shard incremental resume). "
+            "This process writes to its own new file; the merge dedups by id."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -130,6 +141,41 @@ def main() -> int:
                 continue
             pending.append(ActiveConversation(row_id=row.get("id", line_no), user_turns=turns))
     print(f"loaded {len(pending)} conversations ({skipped} skipped)", flush=True)
+
+    # Incremental resume: drop conversations already completed in prior attempts
+    # of this shard (each row_id is globally unique — the dataset id, else the
+    # absolute input line number). Reads defensively: a prior file may be
+    # mid-write from a concurrent duplicate attempt, so malformed tail lines
+    # are ignored. This attempt writes to its OWN file; the merge dedups by id.
+    if args.resume_glob:
+        import glob as _glob
+
+        done_ids: set = set()
+        for prior in _glob.glob(args.resume_glob):
+            try:
+                handle = open(prior, "r", encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            with handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        prior_row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if prior_row.get("status") == "success" and "id" in prior_row:
+                        done_ids.add(prior_row["id"])
+        before = len(pending)
+        pending = [conv for conv in pending if conv.row_id not in done_ids]
+        print(
+            f"resume: {len(done_ids)} completed in prior files; "
+            f"skipping {before - len(pending)} of {before}, "
+            f"regenerating {len(pending)}",
+            flush=True,
+        )
+
     if args.sort_by_length:
         pending.sort(key=lambda conv: sum(len(turn) for turn in conv.user_turns))
 

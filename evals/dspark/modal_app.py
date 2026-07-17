@@ -273,35 +273,42 @@ def regenerate(
             return
 
     out = output_name
+    resume_glob = None
     if unique:
         task = os.environ.get("MODAL_TASK_ID") or uuid.uuid4().hex
         base, ext = os.path.splitext(output_name)
         out = f"{base}-{task}{ext}"
+        # Prior attempts of THIS shard (base-<othertask>.jsonl) — resume from
+        # them so a reschedule regenerates only the remainder. The current
+        # file (base-<task>.jsonl) doesn't exist yet at the writer's resume
+        # read (it opens --output after the resume scan), so it is not
+        # re-read here.
+        resume_glob = f"/vol/data/{base}-*{ext}"
 
     monitor = GpuMonitor(tag=f"regen-b{batch_size}")
     monitor.start()
-    _run(
-        [
-            "python",
-            "/lmbrrr-dspark/regenerate_answers.py",
-            "--sort-by-length",
-            "--model",
-            model,
-            "--input",
-            f"/vol/data/{input_name}",
-            "--output",
-            f"/vol/data/{out}",
-            "--num-samples",
-            str(num_samples),
-            "--skip-samples",
-            str(skip_samples),
-            "--max-new-tokens",
-            str(max_new_tokens),
-            "--batch-size",
-            str(batch_size),
-        ],
-        env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
-    )
+    cmd = [
+        "python",
+        "/lmbrrr-dspark/regenerate_answers.py",
+        "--sort-by-length",
+        "--model",
+        model,
+        "--input",
+        f"/vol/data/{input_name}",
+        "--output",
+        f"/vol/data/{out}",
+        "--num-samples",
+        str(num_samples),
+        "--skip-samples",
+        str(skip_samples),
+        "--max-new-tokens",
+        str(max_new_tokens),
+        "--batch-size",
+        str(batch_size),
+    ]
+    if resume_glob is not None:
+        cmd += ["--resume-glob", resume_glob]
+    _run(cmd, env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     print("REGEN_GPU", json.dumps(monitor.stop()), flush=True)
     # Write the completion marker only after the subprocess wrote a full file,
     # so its existence authoritatively means "this shard is done".
