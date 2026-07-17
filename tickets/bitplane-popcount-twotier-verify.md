@@ -1,7 +1,7 @@
 ---
 id: bitplane-popcount-twotier-verify
 title: Bit-plane popcount ternary matmul + two-tier verify (int2/int4 activations)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [metal-ternary-matmul-kernel]
