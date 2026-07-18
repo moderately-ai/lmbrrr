@@ -115,7 +115,35 @@ impl GgufFile {
 
     pub(crate) fn read_qtensor(&self, gguf_name: &str, device: &Device) -> Result<QTensor> {
         let mut reader = self.reader.borrow_mut();
-        self.content.tensor(&mut *reader, gguf_name, device)
+        let qt = self.content.tensor(&mut *reader, gguf_name, device)?;
+        drop(reader);
+        // STEP-0 gate (ticket mm2d-fullk-pow2-requant-verify): round each Q2_0
+        // per-128 block scale to the nearest power of two (ue8m0 proxy) so the
+        // fold could become a shift. Pessimistic per-128 stand-in for the real
+        // per-32 requant — measure PPL here BEFORE building the fold-free kernel.
+        if std::env::var("LMBRRR_Q2_POW2_SCALES").is_ok()
+            && qt.dtype() == candle::quantized::GgmlDType::Q2_0
+        {
+            let dims = qt.shape().dims().to_vec();
+            let mut bytes = qt.data()?.into_owned();
+            // Q2_0 block = half d (2 bytes) + 128*2b codes (32 bytes) = 34 bytes.
+            for blk in bytes.chunks_exact_mut(34) {
+                let d = half::f16::from_le_bytes([blk[0], blk[1]]).to_f32();
+                if d != 0.0 && d.is_finite() {
+                    let p2 = d.signum() * (d.abs().log2().round()).exp2();
+                    let h = half::f16::from_f32(p2).to_le_bytes();
+                    blk[0] = h[0];
+                    blk[1] = h[1];
+                }
+            }
+            return Ok(qtensor_from_ggml(
+                candle::quantized::GgmlDType::Q2_0,
+                &bytes,
+                dims,
+                device,
+            )?);
+        }
+        Ok(qt)
     }
 
     pub(crate) fn content(&self) -> &gguf_file::Content {
