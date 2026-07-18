@@ -141,9 +141,24 @@ struct SpecArgs {
     /// Typical acceptance: a draft survives while its target logit is within
     /// this margin of the top logit (port of the MiniCPM loop's flag).
     /// Committed tokens remain the drafts, so output may legitimately differ
-    /// from greedy. Unset = exact argmax match (lossless).
+    /// from greedy. DEFAULT (unset) = margin 1.0, the quality-FREE speed point
+    /// (PPL 1.124 vs greedy 1.114 — the PPL gate passed, ~+15% tok/s). Pass
+    /// `0` (or `--exact`) for the lossless byte-match path; `3.0` (or `--fast`)
+    /// for the fast operating point (~19 tok/s, PPL +8-16% — a real tradeoff).
     #[arg(long)]
     accept_margin: Option<f32>,
+
+    /// Lossless byte-exact acceptance (equivalent to `--accept-margin 0`):
+    /// commit only exact-argmax matches, output byte-identical to greedy.
+    /// Overrides the default margin. Wins over `--fast`.
+    #[arg(long)]
+    exact: bool,
+
+    /// Fast operating point: sugar for `--accept-margin 3.0` (~19 tok/s, PPL
+    /// +8-16% vs greedy — coherent but not quality-preserving). Ignored if an
+    /// explicit `--accept-margin` or `--exact` is given.
+    #[arg(long)]
+    fast: bool,
 
     /// Peakedness gate for --accept-margin: apply the margin only on rows
     /// whose top LOGPROB >= -this value; flat rows fall back to exact argmax
@@ -166,6 +181,14 @@ struct SpecArgs {
     /// Exact-argmax acceptance only.
     #[arg(long)]
     tree: bool,
+
+    /// Disable the default planar-mm2d verify path and run the packed GEMV
+    /// path instead. `gguf spec` defaults to planar mm2d (the ~19 tok/s
+    /// operating point; builds + caches planes to ~/.cache/lmbrrr/mm2d on the
+    /// first run). Use this on a pre-Metal-4 OS or to A/B the packed path.
+    /// `LMBRRR_MM2D` in the environment overrides this either way.
+    #[arg(long)]
+    no_mm2d: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1975,7 +1998,7 @@ fn spec_decode(
         }
     }
 
-    let dbg = std::env::var("LMBRRR_SPEC_DEBUG").is_ok();
+    let dbg = std::env::var(lmbrrr::env_keys::SPEC_DEBUG).is_ok();
 
     // Partial-accept rollback strategy: capture-based closed-form
     // reconstruction by default (no re-forward; the capture is one S0 + small
@@ -2387,7 +2410,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 .collect::<Result<_, _>>()
                 .map_err(|e| anyhow::anyhow!("bad --ids: {e}"))?;
             let (mut model, prompt_ids, _eos, _ctx, _tok, _load) =
-                load_gguf_model(&a.model, &device)?;
+                load_gguf_model(&a.model, &device, None)?;
             score(&mut model, &device, &prompt_ids, &gen)
         }
         GgufCmd::Requant(a) => requant(&a),
@@ -2398,12 +2421,29 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
         GgufCmd::ProfileKernel(a) => profile_kernel(&device, &a.which, a.iters, a.m),
         GgufCmd::BenchDeltanet(a) => bench_deltanet(&device, &a.which, a.l, a.iters),
         GgufCmd::Decode(a) => {
-            let (mut model, ids, eos, _ctx, tok, load_seconds) = load_gguf_model(&a.model, &device)?;
+            let (mut model, ids, eos, _ctx, tok, load_seconds) =
+                load_gguf_model(&a.model, &device, None)?;
             decode(&mut model, &device, &ids, eos, a.max_new_tokens, &tok, load_seconds, a.warmup)
         }
         GgufCmd::Spec(a) => {
             let spec_run = lmbrrr::runtime_config::SpecRunConfig::from_env();
-            let (mut model, ids, eos, ctx, tok, _load_seconds) = load_gguf_model(&a.model, &device)?;
+            // Effective acceptance: --exact / --accept-margin 0 => lossless
+            // byte-match (None path); explicit margin honored; --fast => 3.0;
+            // default => 1.0 (quality-free). Precedence: exact > margin > fast.
+            let accept_margin = if a.exact {
+                None
+            } else if let Some(m) = a.accept_margin {
+                (m != 0.0).then_some(m)
+            } else if a.fast {
+                Some(3.0)
+            } else {
+                Some(1.0)
+            };
+            // spec defaults to the planar mm2d operating point unless --no-mm2d.
+            let mm2d_default =
+                (!a.no_mm2d).then(lmbrrr::mm2d::Mm2dConfig::spec_planar_default);
+            let (mut model, ids, eos, ctx, tok, _load_seconds) =
+                load_gguf_model(&a.model, &device, mm2d_default)?;
             spec_decode(
                 &mut model,
                 &a.drafter,
@@ -2414,7 +2454,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 &ctx,
                 &tok,
                 spec_run.readvance_rollback,
-                a.accept_margin,
+                accept_margin,
                 a.margin_peak,
                 a.pld,
                 a.tree,
@@ -2422,7 +2462,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
         }
         GgufCmd::Profile(a) => {
             let (mut model, ids, _eos, _ctx, _tok, _load_seconds) =
-                load_gguf_model(&a.model, &device)?;
+                load_gguf_model(&a.model, &device, None)?;
             profile_decode(&mut model, &device, &ids, a.verify_width, a.capture_taps.as_deref())
         }
     }
@@ -2434,6 +2474,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
 fn load_gguf_model(
     args: &ModelArgs,
     device: &Device,
+    mm2d_default: Option<lmbrrr::mm2d::Mm2dConfig>,
 ) -> Result<(Qwen35CausalLM, Vec<u32>, u32, ModelCtx, Tokenizer, f64)> {
     let dtype = DType::BF16;
     let load = Instant::now();
@@ -2441,7 +2482,18 @@ fn load_gguf_model(
     let cfg = gguf.config()?;
     // Entrypoint env resolution (LMBRRR_MM2D etc.) — the target's ctx. The
     // drafter keeps its own default ctx (see spec_decode).
-    let ctx = lmbrrr::runtime_config::RuntimeConfig::from_env().model;
+    let ctx = {
+        let mut m = lmbrrr::runtime_config::RuntimeConfig::from_env().model;
+        // Command-scope mm2d default (spec passes the planar operating point):
+        // applied ONLY when the user has not explicitly set LMBRRR_MM2D — env
+        // always wins over the command default. Planes build below at load.
+        if let Some(base) = mm2d_default {
+            if std::env::var(lmbrrr::env_keys::MM2D).is_err() {
+                m.mm2d = std::sync::Arc::new(base);
+            }
+        }
+        m
+    };
     let tok = gguf
         .tokenizer()
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;

@@ -135,6 +135,23 @@ impl Mm2dConfig {
             fused_verify_argmax: std::env::var(k::FUSED_VERIFY_ARGMAX).is_ok_and(|v| v == "1"),
         }
     }
+
+    /// The `gguf spec` default operating point: planar-only verify (the
+    /// ~19 tok/s M3 config). `enabled` + `planar_only` on, plane cache at
+    /// `~/.cache/lmbrrr/mm2d`; every other knob stays at its arbitrated
+    /// default (`splitk`, `body_min_m=2`, `head_min_n`, `split_target_tgs=128`).
+    /// The spec command applies this ONLY when `LMBRRR_MM2D` is unset (env
+    /// still overrides) and `--no-mm2d` was not passed. NOTE: planar drops the
+    /// packed weights (no GEMV fallback on a *dispatch* failure), so this is
+    /// safe on Metal-4 (M3 / macOS 27); on a pre-Metal-4 OS use `--no-mm2d`.
+    pub fn spec_planar_default() -> Self {
+        Self {
+            enabled: true,
+            planar_only: true,
+            plane_cache_dir: default_plane_cache_dir(),
+            ..Self::default()
+        }
+    }
 }
 
 fn default_plane_cache_dir() -> Option<std::path::PathBuf> {
