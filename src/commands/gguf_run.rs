@@ -1689,7 +1689,10 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
 /// Isolated DeltaNet-prefill kernel loop (Bonsai shapes) for capture/counter
 /// attribution: streaming (one dispatch/seq) vs chunk (host loop over l/12).
 fn bench_deltanet(device: &Device, which: &str, l: usize, iters: usize) -> Result<()> {
-    use lmbrrr::fused_deltanet::{gated_delta_chunk, gated_delta_prefill, GatedDeltaDims};
+    use lmbrrr::fused_deltanet::{
+        gated_delta_chunk, gated_delta_prefill, gated_delta_v2_decode, GatedDeltaDecodeWeights,
+        GatedDeltaDims,
+    };
     // Bonsai DeltaNet dims.
     let (heads, num_k_heads, dk, dv, ksz) = (48usize, 16usize, 128usize, 128usize, 4usize);
     let key_dim = num_k_heads * dk;
@@ -1713,6 +1716,32 @@ fn bench_deltanet(device: &Device, which: &str, l: usize, iters: usize) -> Resul
     let dt_bias = Tensor::zeros((heads,), DType::F32, device)?;
     let a_log_exp = (Tensor::randn(0f32, 0.1f32, (heads,), device)?.abs()? + 0.5)?;
     let norm_w = Tensor::ones((dv,), DType::F32, device)?;
+
+    // v2 decode (l=1) inputs: split qkvz/ba projections + transposed state.
+    let qkvz = Tensor::randn(0f32, 1f32, (1, 1, conv_dim + value_dim), device)?
+        .to_dtype(DType::BF16)?;
+    let ba = Tensor::randn(0f32, 1f32, (1, 1, 2 * heads), device)?.to_dtype(DType::BF16)?;
+    let state_t = Tensor::zeros((1, heads, dv, dk), DType::F32, device)?;
+    let decode_weights = GatedDeltaDecodeWeights {
+        conv_weight: &conv_w,
+        dt_bias_f32: &dt_bias,
+        a_log_exp_f32: &a_log_exp,
+        norm_weight_f32: &norm_w,
+        dims: &dims,
+        l2_eps: 1e-6,
+        norm_eps: 1e-6,
+    };
+    let run_decode = || -> Result<()> {
+        let _ = gated_delta_v2_decode(
+            &qkvz.flatten_all()?.contiguous()?,
+            &ba.flatten_all()?.contiguous()?,
+            1,
+            &conv_state,
+            &state_t.contiguous()?,
+            &decode_weights,
+        )?;
+        Ok(())
+    };
 
     let n_chunks = l.div_ceil(12);
     eprintln!(
@@ -1738,7 +1767,8 @@ fn bench_deltanet(device: &Device, which: &str, l: usize, iters: usize) -> Resul
                     )?;
                 }
             }
-            other => anyhow::bail!("unknown --which {other}; use stream | chunk"),
+            "decode" => run_decode()?,
+            other => anyhow::bail!("unknown --which {other}; use stream | chunk | decode"),
         }
     }
     device.synchronize()?;
@@ -1762,6 +1792,7 @@ fn bench_deltanet(device: &Device, which: &str, l: usize, iters: usize) -> Resul
                     )?;
                 }
             }
+            "decode" => run_decode()?,
             _ => unreachable!(),
         }
     }
