@@ -1462,6 +1462,13 @@ fn profile_kernel(device: &Device, which: &str, iters: usize, m: usize) -> Resul
                 candle_metal_kernels::source::Source::GatedDeltaV2,
                 "gated_delta_v2_epilogue_bf16",
             ),
+            // The m=1 decode kernel (25% of the decode floor): maxTPT<1024 =>
+            // register-limited (an occupancy lever exists); =1024 => the 34%
+            // occupancy is grid-limited (48 tg = one/value-head), structural.
+            (
+                candle_metal_kernels::source::Source::GatedDeltaV2,
+                "gated_delta_v2_decode_bf16",
+            ),
         ] {
             let p = kernels.load_pipeline(dev, src, name)?;
             println!(
