@@ -47,7 +47,11 @@ pub struct KernelRouteConfig {
     pub deltanet_sequential_fallback: bool,
     /// Route long prefill (l > the fused-chunk cap) through the fused chunk
     /// kernel, looped over sub-chunks carrying state, instead of the unfused
-    /// tensor-path scan. Opt-in until the byte-parity gate ships it on.
+    /// tensor-path scan. DEFAULT ON: +1.24x TTFT (~35->44 tok/s) and
+    /// quality-preserving — the multi-prompt teacher-forced PPL gate passed
+    /// (2026-07-17: 0.000% delta on 4 prompt classes, -0.098% on a ~230-tok
+    /// prefill, within the measured 0.16% rounding class). Not byte-exact (one
+    /// argmax-flip on a near-tie); `LMBRRR_DELTANET_PREFILL_FUSED=0` disables.
     pub deltanet_prefill_fused: bool,
     /// Sub-chunk size for the fused-prefill loop (dispatch-count vs
     /// intra-chunk-work tradeoff). MEASURED optimum 8 (2026-07-17, Bonsai
@@ -72,7 +76,7 @@ impl Default for KernelRouteConfig {
             fused_mtp_fc: true,
             deltanet_v2: true,
             deltanet_sequential_fallback: false,
-            deltanet_prefill_fused: false,
+            deltanet_prefill_fused: true,
             deltanet_prefill_cap: 8,
             deltanet_prefill_stream: false,
         }
@@ -98,7 +102,7 @@ impl KernelRouteConfig {
             deltanet_v2: opt_out(k::DELTANET_V2, base.deltanet_v2),
             // Any presence enables the fallback (historical `is_ok()` sense).
             deltanet_sequential_fallback: std::env::var(k::DELTANET_SEQUENTIAL).is_ok(),
-            deltanet_prefill_fused: std::env::var(k::DELTANET_PREFILL_FUSED).is_ok(),
+            deltanet_prefill_fused: opt_out(k::DELTANET_PREFILL_FUSED, base.deltanet_prefill_fused),
             deltanet_prefill_cap: std::env::var(k::DELTANET_PREFILL_CAP)
                 .ok()
                 .and_then(|v| v.parse().ok())
