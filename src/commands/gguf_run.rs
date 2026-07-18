@@ -40,6 +40,12 @@ enum GgufCmd {
     /// — works on the dspark drafter, which stock llama.cpp cannot quantize).
     /// 1D and non-divisible tensors pass through unchanged; metadata is copied.
     Requant(RequantArgs),
+    /// Diagnostic (ticket mm2d-fullk-pow2-requant-verify STEP 1): read the Q2_0
+    /// per-128 block scales `d` and report how far they sit from powers of two
+    /// (ue8m0), plus the per-32-pow2 vs per-32-arbitrary code-refit reconstruction
+    /// error. Decides whether the fold-free fullk requant is viable FROM the
+    /// deployed Q2_0 weights, or must come from the original bf16 (Modal-side).
+    Pow2Scales(Pow2ScalesArgs),
     /// Build the mm2d (tensor-op verify) plane artifact for a Q2_0 GGUF: repack
     /// every eligible weight into the planar layout and write the plane files
     /// next to the model. One-time; runs point at the artifact via
@@ -248,6 +254,115 @@ struct RequantArgs {
     /// Target ggml dtype for 2D float tensors: q8_0 | q4_1 | q4k | q6k.
     #[arg(long, default_value = "q8_0")]
     dtype: String,
+}
+
+#[derive(Args, Debug)]
+struct Pow2ScalesArgs {
+    /// Q2_0 GGUF to analyze.
+    #[arg(long)]
+    gguf: PathBuf,
+    /// Analyze only the first N Q2_0 tensors (0 = all).
+    #[arg(long, default_value_t = 0)]
+    limit: usize,
+}
+
+/// STEP 1 diagnostic for the fullk/pow2-requant lever. For each Q2_0 2D tensor:
+/// (a) read the per-128 block scales `d` and measure their log2-distance to the
+/// nearest integer exponent (0 = already a power of two, 0.5 = worst case), and
+/// (b) requant the DEQUANTIZED weights to per-32 blocks under an arbitrary scale
+/// vs a power-of-two scale (2-bit codes {-1,0,1,2} refit to each), reporting the
+/// relative reconstruction error of each. If (a) shows the d's are far from pow2
+/// and (b) shows per-32-pow2 >> per-32-arbitrary, the fullk requant CANNOT be
+/// done from the deployed Q2_0 weights (per-32 granularity does not help when the
+/// input is already per-128-quantized) and must requant the ORIGINAL bf16.
+fn pow2_scales(args: &Pow2ScalesArgs) -> Result<()> {
+    use candle::quantized::{gguf_file, GgmlDType};
+    let mut file = std::fs::File::open(&args.gguf)?;
+    let content = gguf_file::Content::read(&mut file)?;
+    let device = Device::Cpu;
+    let mut names: Vec<String> = content.tensor_infos.keys().cloned().collect();
+    names.sort();
+
+    // (a) pow2-distance of the per-128 d scales, over sampled Q2_0 tensors.
+    let mut log2dist: Vec<f32> = Vec::new();
+    // (b) per-32 requant reconstruction error, arbitrary vs power-of-two.
+    let (mut se_arb, mut se_p2, mut wnorm) = (0f64, 0f64, 0f64);
+    let mut analyzed = 0usize;
+    for name in &names {
+        let info = &content.tensor_infos[name];
+        if !matches!(info.ggml_dtype, GgmlDType::Q2_0) || info.shape.dims().len() != 2 {
+            continue;
+        }
+        if args.limit != 0 && analyzed >= args.limit {
+            break;
+        }
+        let qt = content.tensor(&mut file, name, &device)?;
+        // (a) raw block scales: Q2_0 block = half d (2 bytes) + 32 code bytes.
+        let bytes = qt.data()?;
+        for blk in bytes.chunks_exact(34) {
+            let d = half::f16::from_le_bytes([blk[0], blk[1]]).to_f32();
+            if d > 0.0 && d.is_finite() {
+                let l = d.log2();
+                log2dist.push((l - l.round()).abs());
+            }
+        }
+        // (b) per-32 requant error on the dequantized weights.
+        let w = qt.dequantize(&device)?.flatten_all()?.to_vec1::<f32>()?;
+        for blk in w.chunks(32) {
+            let amax = blk.iter().fold(0f32, |a, &x| a.max(x.abs()));
+            for &x in blk {
+                wnorm += (x as f64) * (x as f64);
+            }
+            if amax <= 0.0 {
+                continue;
+            }
+            // arbitrary scale: grid search d in (0, amax], codes {-1,0,1,2}.
+            let mut best_arb = f64::INFINITY;
+            for step in 1..=24 {
+                let d = amax * (step as f32) / 24.0;
+                let mut se = 0f64;
+                for &x in blk {
+                    let c = (x / d).round().clamp(-1.0, 2.0);
+                    let e = (x - c * d) as f64;
+                    se += e * e;
+                }
+                best_arb = best_arb.min(se);
+            }
+            se_arb += best_arb;
+            // power-of-two scale: exponents spanning the block magnitude.
+            let kmax = amax.log2().ceil() as i32;
+            let mut best_p2 = f64::INFINITY;
+            for kk in (kmax - 4)..=(kmax + 1) {
+                let d = 2f32.powi(kk);
+                let mut se = 0f64;
+                for &x in blk {
+                    let c = (x / d).round().clamp(-1.0, 2.0);
+                    let e = (x - c * d) as f64;
+                    se += e * e;
+                }
+                best_p2 = best_p2.min(se);
+            }
+            se_p2 += best_p2;
+        }
+        analyzed += 1;
+    }
+
+    log2dist.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = log2dist.len().max(1);
+    let median = log2dist[n / 2];
+    let mean = log2dist.iter().sum::<f32>() / n as f32;
+    let near = log2dist.iter().filter(|&&x| x < 0.083).count(); // within ~6% of a pow2
+    let wnorm = wnorm.sqrt().max(1e-12);
+    println!(
+        "pow2-scales: {analyzed} Q2_0 tensors, {n} per-128 scales\n\
+         (a) |log2(d) - round| distance to nearest power-of-two: median {median:.3}, mean {mean:.3} (0=pow2, 0.5=worst); within 6% of pow2: {:.1}%\n\
+         (b) per-32 refit reconstruction rel_err vs deployed Q2_0 weights: arbitrary {:.4}, power-of-two {:.4} (ratio {:.2}x)",
+        100.0 * near as f64 / n as f64,
+        se_arb.sqrt() / wnorm,
+        se_p2.sqrt() / wnorm,
+        (se_p2 / se_arb.max(1e-30)).sqrt()
+    );
+    Ok(())
 }
 
 /// CPU-only requant: read every tensor, quantize eligible 2D float tensors to
@@ -2238,6 +2353,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
             score(&mut model, &device, &prompt_ids, &gen)
         }
         GgufCmd::Requant(a) => requant(&a),
+        GgufCmd::Pow2Scales(a) => pow2_scales(&a),
         GgufCmd::Repack(a) => repack(&device, &a),
         GgufCmd::BenchGemv => bench_gemv(&device),
         GgufCmd::BenchShapes => bench_shapes(&device),
