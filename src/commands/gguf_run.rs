@@ -130,8 +130,10 @@ struct SpecArgs {
     #[command(flatten)]
     model: ModelArgs,
 
-    /// Drafter GGUF (Ternary-Bonsai-27B-dspark-Q4_1.gguf). The draft width is
-    /// the drafter's block_size.
+    /// Drafter GGUF. Recommended: Ternary-Bonsai-27B-dspark-Q8_0.gguf — Q8_0
+    /// is ~25% faster propose than Q4_1 with identical acceptance (lossless;
+    /// build via `gguf requant --dtype q8_0`). The draft width is the drafter's
+    /// block_size (read from GGUF metadata).
     #[arg(long)]
     drafter: PathBuf,
 
