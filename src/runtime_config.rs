@@ -49,9 +49,11 @@ pub struct KernelRouteConfig {
     /// kernel, looped over sub-chunks carrying state, instead of the unfused
     /// tensor-path scan. Opt-in until the byte-parity gate ships it on.
     pub deltanet_prefill_fused: bool,
-    /// Sub-chunk size for the fused-prefill loop (experiment knob: sweeps the
-    /// dispatch-count vs intra-chunk-work tradeoff). Clamped to the kernel's
-    /// GDC_MAX_L=12; 0/unset uses 12.
+    /// Sub-chunk size for the fused-prefill loop (dispatch-count vs
+    /// intra-chunk-work tradeoff). MEASURED optimum 8 (2026-07-17, Bonsai
+    /// planar, rotated): cap=8 45.88 tok/s vs cap=12 43.61 = +5.2% TTFT — 8 is
+    /// the largest sub-chunk still on the cheaper l8 kernel (fewer dispatches
+    /// than 5/6/7, less unroll/tg-mem than l12). Clamped to GDC_MAX_L=12.
     pub deltanet_prefill_cap: usize,
     /// Use the single-dispatch streaming prefill kernel (S + conv window in
     /// registers across internal tiles) instead of the host-looped chunk. A/B
@@ -71,7 +73,7 @@ impl Default for KernelRouteConfig {
             deltanet_v2: true,
             deltanet_sequential_fallback: false,
             deltanet_prefill_fused: false,
-            deltanet_prefill_cap: 12,
+            deltanet_prefill_cap: 8,
             deltanet_prefill_stream: false,
         }
     }
@@ -101,7 +103,7 @@ impl KernelRouteConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|&c| (2..=12).contains(&c))
-                .unwrap_or(12),
+                .unwrap_or(8),
             deltanet_prefill_stream: std::env::var(k::DELTANET_PREFILL_STREAM).is_ok(),
         }
     }
