@@ -1,8 +1,8 @@
 ---
 id: drafter-width7-retrain-bonsai
 title: Width-7 Bonsai DSpark drafter retrain (fill the flat m=8 verify tile)
-status: in-progress
-priority: p1
+status: parked
+priority: p2
 dependencies: []
 related: [ternary-bonsai-27b-support, ternary-decode-profile-optimize, dspark-cache-redesign-beyond-400k]
 scopes: [evals]
@@ -11,6 +11,8 @@ paths: []
 tags: [route-map, acceptance, research]
 ---
 Bucket A / A1. Retrain the Bonsai DSpark drafter at block_size 7 so verify m=8 rides the SAME flat mm2d tile as today's m=5.
+
+DECISION 2026-07-17 — NOT PURSUING (user call), and a CORRECTION to the "root cause" below. The width-7 retrain is parked as a deliberate cost/benefit decision, not a blocker: the shipped width-4 (margin-3.0, ~19 tok/s, 1.3x plain, coherent + PPL-gated) is a strong result on its own, and width-7 is a multi-day / ~$2-3k Modal bet with an UNCERTAIN payoff. The economics that killed it: (1) the DeepSpec eval's accept_len 1.71 was already the MATCHED-target number for a 40k drafter, and 1.71 < the shipped width-4's 3.448 — so even a perfect deploy fix at 40k LOSES; beating width-4 needs a ~10x corpus scale-up (toward 400k: ~$2.2k regen alone + a ~17 TiB cache that busts the 3 TiB ephemeral, forcing new sharded-cache-train plumbing), and hitting the needed ~4.5+ accept_len is EXTRAPOLATED from MiniCPM's 400k->4.41 (a different model + easier width) — unproven for a 2-layer Bonsai drafter at width-7. CORRECTION to the "CONFIRMED BY CONSTRUCTION" claim below: it is OVERCONFIDENT. I confirmed the training USED target_model=unpacked (modal_app.py:705), but I did NOT measure that the unpacked bf16 hiddens differ from the Q2_0 hiddens — the one-tensor + tap-hidden unpacked-vs-Q2_0 FIDELITY CHECK IS STILL OWED (never run). The earlier ops-log (memory bonsai-acceptance-drive-plan) asserts the OPPOSITE — that prism-ml/Ternary-Bonsai-27B-unpacked is "the ternary values dense = deployment-faithful by construction." If that is right, the target-mismatch theory is FALSE and the 1.71->0.19 M3 collapse is a different bug (feature-capture or conversion) a retrain would not fix. BEFORE any future retrain: run the free fidelity check to settle which session is right, and do 120k (in-pipeline, ~$650) before 400k. Consider EAGLE-3 (A2, the routemap's "highest ceiling") as the better use of the same budget.
 
 ROOT CAUSE of the deploy-path collapse CONFIRMED BY CONSTRUCTION (2026-07-17, code-level, no Modal needed). The width-7 A/B collapsed (accept 0.19 on M3 vs 1.71 in DeepSpec). CODE PROOF: modal_app.py:705 the Bonsai round captured target hiddens with `target_model = "prism-ml/Ternary-Bonsai-27B-unpacked"` (dense bf16), whereas the WORKING MiniCPM path (line 467, and comment at 497-499 "Deployment-config consistency: capture hidden states under the same fake-quant weights that generated the traces") used `minicpm-v46-fakequant-q4kft` — the DEPLOYMENT-MATCHED fake-quant target. So the drafter's `fc(tap-hiddens)` trained on UNPACKED-bf16 layer outputs [1,16,31,46,61] but at deploy time lmbrrr feeds it the Q2_0-GGUF layer outputs (lmbrrr capture = post-layer residual `hidden`, qwen35.rs:2974, layers indexed directly with no offset — that capture convention is CORRECT, proven by prism's width-4 working through it). The 2-bit Q2_0 error shifts the tap hiddens off the manifold the fc learned -> the tap-feature contribution degrades -> proposals fall back to the markov prior -> accept collapses. This is the SAME class as prism's width-4 being robust (it was trained deployment-consistent) while ours was not. Hypothesis (A) is thus CONFIRMED at the config level; the Modal unpacked-vs-Q2_0 hidden cos-sim check would only quantify the magnitude, which the fix does not require.
 
