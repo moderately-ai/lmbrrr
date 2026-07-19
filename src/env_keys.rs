@@ -57,6 +57,9 @@ pub const SPEC_DEBUG: &str = "LMBRRR_SPEC_DEBUG";
 /// Emit per-round confidence logits + per-position exact-accept mask in the
 /// gguf-spec JSON report (`oracle_rounds`) for offline scheduler EV analysis.
 pub const ORACLE_LOG: &str = "LMBRRR_ORACLE_LOG";
+/// Log per-draft-position hidden features at checkpoint layers during verify
+/// for offline accept-predictor AUC (P5 prereq). Adds capture + host read cost.
+pub const ACCEPT_PROBE: &str = "LMBRRR_ACCEPT_PROBE";
 
 /// Every `LMBRRR_*` key the runtime resolves via `std::env::var`.
 /// `RuntimeConfig::from_env` warns on any `LMBRRR_*` variable present in the
@@ -96,6 +99,7 @@ pub const KNOWN_LMBRRR_KEYS: &[&str] = &[
     VT_PROFILE,
     SPEC_DEBUG,
     ORACLE_LOG,
+    ACCEPT_PROBE,
 ];
 
 // --- External (OS / framework) vars, not part of the LMBRRR tunable surface ---

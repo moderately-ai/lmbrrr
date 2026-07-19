@@ -2018,8 +2018,13 @@ fn spec_decode(
 
     let dbg = std::env::var(lmbrrr::env_keys::SPEC_DEBUG).is_ok();
     let oracle_log = std::env::var(lmbrrr::env_keys::ORACLE_LOG).is_ok();
+    let accept_probe = std::env::var(lmbrrr::env_keys::ACCEPT_PROBE).is_ok();
     // Per-round records for offline scheduler EV (confidence + exact accept mask).
     let mut oracle_rounds: Vec<serde_json::Value> = Vec::new();
+    // Per-position accept-probe rows (checkpoint hidden RMS + labels).
+    let mut accept_probe_rows: Vec<serde_json::Value> = Vec::new();
+    // Full-attn-ish checkpoints on 64L / every-4th full attn (0-based 15,31,47,63).
+    const PROBE_LAYERS: [usize; 4] = [15, 31, 47, 63];
 
     // Partial-accept rollback strategy: capture-based closed-form
     // reconstruction by default (no re-forward; the capture is one S0 + small
@@ -2331,7 +2336,21 @@ fn spec_decode(
         chunk.extend_from_slice(&drafts);
         let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), device)?;
 
-        model.set_device_capture(Some(layers.clone()));
+        // When accept-probing, capture checkpoint layers in addition to drafter taps
+        // so mid-stack hiddens are available for offline AUC without a second forward.
+        if accept_probe {
+            let mut caps = layers.clone();
+            for &l in &PROBE_LAYERS {
+                if !caps.contains(&l) {
+                    caps.push(l);
+                }
+            }
+            caps.sort_unstable();
+            caps.dedup();
+            model.set_device_capture(Some(caps));
+        } else {
+            model.set_device_capture(Some(layers.clone()));
+        }
         let tv = Instant::now();
         let logits = model.forward_all_logits(&chunk_input, offset)?;
         let targets = logits
@@ -2424,8 +2443,88 @@ fn spec_decode(
         }
         drop(logits); // free the [1, chunk, 248k] verify logits before any re-forward
         let caps = model.take_device_captures();
-        let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
-        drop(caps);
+        // Split captures: drafter taps (original order) vs accept-probe checkpoints.
+        let (ctx_feat, probe_by_layer) = if accept_probe {
+            let mut all_layers = layers.clone();
+            for &l in &PROBE_LAYERS {
+                if !all_layers.contains(&l) {
+                    all_layers.push(l);
+                }
+            }
+            all_layers.sort_unstable();
+            all_layers.dedup();
+            if caps.len() != all_layers.len() {
+                anyhow::bail!(
+                    "accept-probe: expected {} captures, got {}",
+                    all_layers.len(),
+                    caps.len()
+                );
+            }
+            let mut by_layer: std::collections::HashMap<usize, Tensor> =
+                std::collections::HashMap::new();
+            for (l, c) in all_layers.iter().zip(caps.into_iter()) {
+                by_layer.insert(*l, c);
+            }
+            let tap_caps: Vec<Tensor> = layers
+                .iter()
+                .map(|l| {
+                    by_layer
+                        .get(l)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("missing tap capture layer {l}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let feat = Tensor::cat(&tap_caps, D::Minus1)?;
+            drop(tap_caps);
+            (feat, Some(by_layer))
+        } else {
+            (Tensor::cat(&caps, D::Minus1)?, None)
+        };
+
+        // Accept-probe rows: for each draft position, checkpoint hidden RMS +
+        // exact-match labels (prefix-valid). Kill bar for P5: best single-feature
+        // or logistic AUC >= 0.85 on held-out rounds.
+        if let Some(by_layer) = probe_by_layer.as_ref() {
+            let exact_mask: Vec<bool> = drafts
+                .iter()
+                .zip(targets.iter())
+                .map(|(d, t)| d == t)
+                .collect();
+            // chunk layout: pos 0 = anchor, pos 1.. = drafts
+            for (di, &ok) in exact_mask.iter().enumerate() {
+                let prefix_ok = exact_mask.iter().take(di).all(|&m| m);
+                let pos = di + 1; // row in capture tensors
+                let mut feats = serde_json::Map::new();
+                for &l in &PROBE_LAYERS {
+                    let Some(h) = by_layer.get(&l) else { continue };
+                    // h: [1, seq, hidden] -> row pos -> rms = sqrt(mean sq)
+                    let row = h.narrow(1, pos, 1)?.squeeze(0)?.squeeze(0)?; // [hidden]
+                    let row_f = row.to_dtype(DType::F32)?;
+                    let ms = row_f.sqr()?.mean_all()?.to_scalar::<f32>()?;
+                    let rms = ms.sqrt();
+                    let mean = row_f.mean_all()?.to_scalar::<f32>()?;
+                    let maxabs = row_f.abs()?.max_all()?.to_scalar::<f32>()?;
+                    feats.insert(format!("L{l}_rms"), serde_json::json!(rms));
+                    feats.insert(format!("L{l}_mean"), serde_json::json!(mean));
+                    feats.insert(format!("L{l}_maxabs"), serde_json::json!(maxabs));
+                }
+                if let Some(conf) = conf_opt.as_ref() {
+                    if let Some(c) = conf.get(di) {
+                        feats.insert("conf".into(), serde_json::json!(c));
+                    }
+                }
+                feats.insert("pos".into(), serde_json::json!(di));
+                feats.insert("exact".into(), serde_json::json!(ok));
+                feats.insert("prefix_ok".into(), serde_json::json!(prefix_ok));
+                // Useful label for early-exit: "will this position still be on the accepted prefix?"
+                feats.insert(
+                    "on_accept_prefix".into(),
+                    serde_json::json!(prefix_ok && ok),
+                );
+                feats.insert("round".into(), serde_json::json!(rounds));
+                accept_probe_rows.push(serde_json::Value::Object(feats));
+            }
+        }
 
         let bonus = targets[accepted];
 
@@ -2545,6 +2644,11 @@ fn spec_decode(
             "round_accepted": round_accepted,
             "overhead_seconds": decode_seconds - propose_s - verify_s - rollback_s,
             "oracle_rounds": if oracle_log { serde_json::Value::Array(oracle_rounds) } else { serde_json::Value::Null },
+            "accept_probe_rows": if accept_probe {
+                serde_json::Value::Array(accept_probe_rows)
+            } else {
+                serde_json::Value::Null
+            },
             "provenance": super::run_bench::report_provenance_json(),
         })
     );
