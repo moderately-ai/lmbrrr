@@ -1,7 +1,7 @@
 ---
 id: metal-ternary-matmul-kernel
 title: "FEATURE: Metal ternary matmul kernel (ternary weight x activation, BitNet-style)"
-status: in-progress
+status: done
 priority: p2
 dependencies: [spike-ternary-type42-block-format, ternary-type42-dequant]
 related: [ternary-bonsai-27b-support, eval-matmul2d-uint4b-tensor-op, bf16-activation-quantized-matmul-metal]

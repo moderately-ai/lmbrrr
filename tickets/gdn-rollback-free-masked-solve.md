@@ -4,7 +4,7 @@ title: Rollback-free gated-DeltaNet masked-solve verify kernel (Trees-from-Margi
 status: todo
 priority: p1
 dependencies: []
-related: [tree-speculation-over-dspark, optimize-deltanet-chunked-prefill-and-verify-throughput, keep-deltanet-recurrent-state-f32]
+related: [tree-speculation-over-dspark, optimize-deltanet-chunked-prefill-and-verify-throughput, keep-deltanet-recurrent-state-f32, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [runtime/metal]
 shared_scopes: []
 paths: []

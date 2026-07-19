@@ -31,3 +31,13 @@ The standard that turns an *observation* into a *finding* on this project. Harne
 ## The ruler caveat (standing)
 
 The tok/s metrics are currently **v1 and known-biased** — a ~+6% device-chain steady-state inflation and EOS-overshoot phantom token-times (see ticket `eval-harness-validity-fixes`, the campaign's task-0). Under gate 2, **no throughput number is admissible as a finding until the harness is fixed, the metrics are v2-versioned, and a fresh quiet, rotated baseline is established.** Until then, cross-arm ratios are only fair when both arms used identical N and READBACK_EVERY — note it in every log entry.
+
+
+## Ruler status (amended 2026-07-19)
+
+TASK-0 on `eval-harness-validity-fixes` **cleared the gguf/Bonsai ruler** (v2): plain 14.42 /
+exact 14.67 / margin-3.0 19.18 on the then-current stack. The MiniCPM-lane ~+6% chain inflation
+never applied to gguf standings. **After F1 occupancy + default formalization (margin-1.0) +
+Q8_0 drafter recommendation, run `blessed-v3-standings-re-baseline-*` before new campaign
+claims.** Cross-arm ratios still require identical N and protocol. Full program:
+`docs/research/full-acceleration-program-2026-07-19.md`.

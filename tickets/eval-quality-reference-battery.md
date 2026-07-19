@@ -4,7 +4,7 @@ title: "EVAL: quality reference battery — perplexity + text-agreement vs bf16,
 status: todo
 priority: p1
 dependencies: []
-related: []
+related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [evals, quantization]
 shared_scopes: []
 paths: []

@@ -4,7 +4,7 @@ title: SPRINTER approximate-verify-then-audit (exactness-breaking escape hatch)
 status: todo
 priority: p2
 dependencies: []
-related: [relaxed-typical-acceptance-mode, calibrate-dspark-confidence-head]
+related: [relaxed-typical-acceptance-mode, calibrate-dspark-confidence-head, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [inference/speculative]
 shared_scopes: []
 paths: []

@@ -50,6 +50,31 @@ Practical guidance:
 - On the **M3**, run `gguf spec` — the default gives the 1.2× for free.
 - On the **M4 Max**, plain `gguf decode` is essentially as fast as spec and simpler (no drafter). The speculative machinery is tuned for the bandwidth-starved regime; pushing the M4 further would mean re-profiling the verify/propose balance on that hardware, not more M3-tuned spec.
 
+## Reference-engine comparison
+
+How does lmbrrr stack up against the other engines that run this model? All three run the same Ternary-Bonsai-27B base at a ~2-bit operating point; decode is greedy, 96-token generation, warm, same prompt. The two reference engines are **prism-ml's own forks** (the ones shipped alongside the model): the [llama.cpp `prism` fork](https://github.com/PrismML-Eng) (Q2_0 type-42, same ternary quant as lmbrrr) and the [MLX `prism` fork](https://github.com/PrismML-Eng) driving `prism-ml/Ternary-Bonsai-27B-mlx-2bit` (their affine-2-bit port, with the fork's `qmv_wide` / ternary kernels).
+
+| engine | quant | **M3 Pro** | **M4 Max** |
+|---|---|---|---|
+| **prism MLX** (fork) | affine 2-bit (~2.19 bpw) | **16.8** | **40.3** |
+| **lmbrrr** (this repo) | Q2_0 ternary (2.125 bpw) | 14.5 | 33.1 |
+| prism llama.cpp (fork) | Q2_0 ternary (2.125 bpw) | 13.3 | 28.2 |
+| *lmbrrr spec* (margin 1.0, Q8_0 drafter) | Q2_0 + drafter | *17.4* | *~33* |
+
+Read honestly:
+
+- **prism MLX is the fastest raw decode on both hosts** — ~16% over lmbrrr on the M3 (16.8 vs 14.5), ~22% on the M4 (40.3 vs 33.1). MLX's affine-2-bit `qmv` kernels beat our Q2_0 GEMV. This is consistent with lmbrrr's own wall: every hot lmbrrr kernel is instruction-issue-bound at 35–74% of peak bandwidth (see Notes), and MLX's more mature kernels capture more of the remaining headroom.
+- **Among true-ternary Q2_0 engines, lmbrrr is the fastest** — it beats the reference llama.cpp fork (the one prism-ml shipped) on both hosts: +9% on the M3 (14.5 vs 13.3), +17% on the M4 (33.1 vs 28.2).
+- **lmbrrr's speculative decode is the only path that edges MLX, and only on the M3** — spec 17.4 vs MLX decode 16.8 (~4%; 18.1 at `--fast`). On the M4, MLX decode (40.3) is well ahead of lmbrrr spec (~33). So lmbrrr is competitive at the top of the M3 (bandwidth-starved) regime and behind on the M4.
+
+Caveats — this is **not** a clean engine-vs-engine verdict:
+
+- **Different quant schemes.** MLX runs affine 2-bit (4 levels, ~2.19 bpw); lmbrrr and llama.cpp run true ternary Q2_0 (3 levels, 2.125 bpw). MLX carries ~3% more bits and a more expressive codebook, so part of its speed advantage is a different operating point, not purely a faster engine. The apples-to-apples row is lmbrrr-vs-llama.cpp (identical Q2_0), where lmbrrr wins.
+- **Quality was not cross-compared.** All three produced coherent output on the probe, but no cross-engine PPL was run. lmbrrr's margin-1.0 acceptance is PPL-equivalent to *its own* greedy — that is not a claim about MLX-vs-lmbrrr output quality.
+- **MLX spec is unmeasured.** The prism MLX fork ships `spec_decode_verify`; a working MLX speculative path would likely extend its lead. lmbrrr's spec advantage here is only over MLX *decode*, not MLX spec.
+
+Bottom line: lmbrrr is a from-scratch candle/Rust engine that leads the ternary-Q2_0 field and reaches MLX-decode parity on the M3 via speculation — but Apple's MLX, running a slightly richer 2-bit scheme through very mature Metal kernels, is the raw-throughput leader on both machines.
+
 ## Notes
 
 - **Engine wall (M3, proven):** every hot kernel is instruction-issue-bound (mm2d verify 54 GB/s, decode-mv 111 GB/s, v2_decode 52 GB/s — all 35–74% of peak DRAM bandwidth), not bandwidth-bound. Bandwidth tricks don't pay; the verify sits at the matmul2d op's instruction-issue ceiling for the pre-M5 M3. See `tickets/verify-spec-acceleration-routemap.md`.

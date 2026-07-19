@@ -1,7 +1,7 @@
 ---
 id: deltanet-fused-chunk-long-prefill
 title: "Fused DeltaNet chunk for long prefill (TTFT is linear at ~20 ms/token — the fused kernel is gated l<=12)"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [verify-spec-acceleration-routemap, optimize-deltanet-chunked-prefill-and-verify-throughput, gdn-rollback-free-masked-solve]

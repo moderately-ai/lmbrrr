@@ -14,9 +14,13 @@ tickets, `docs/research/`, and `metal_notes.md`.)
 1. **This file** — orientation, constraints, where things live.
 2. **The goal** (below) — the campaign you are driving.
 3. **`docs/research/rigor-protocol.md`** — the gates every result must pass. Non-negotiable.
-4. **`ticketsplease show verify-spec-acceleration-routemap`** — the route-map EPIC: the
-   ranked backlog of every acceleration route with verdicts + arXiv refs. The living plan.
-5. **`metal_notes.md`** — the macOS-27 GPU capture/profile playbook, the Metal 4.1
+4. **`docs/research/full-acceleration-program-2026-07-19.md`** — the FULL living program
+   (P0–P10, every spike, kill criteria). Dispatch hub ticket:
+   `program-full-bonsai-acceleration-program-2026-07-19-canonical`.
+5. **`ticketsplease show verify-spec-acceleration-routemap`** — measurement ledger +
+   refutation archive (2026-07-17 research wave). Ranked-actionable text there is STALE;
+   use the program doc above for what to run next.
+6. **`metal_notes.md`** — the macOS-27 GPU capture/profile playbook, the Metal 4.1
    capability facts, and the settled kernel case studies (§14, §15).
 
 ## The goal (the campaign)

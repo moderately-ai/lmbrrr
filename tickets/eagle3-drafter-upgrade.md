@@ -4,7 +4,7 @@ title: EAGLE-3-style upgrade of the DSpark/Bonsai drafter (raise the acceptance 
 status: todo
 priority: p1
 dependencies: []
-related: [train-dspark-semi-autoregressive-drafter, implement-real-eagle-recurrent-drafter, design-full-dspark-drafter]
+related: [train-dspark-semi-autoregressive-drafter, implement-real-eagle-recurrent-drafter, design-full-dspark-drafter, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [inference/speculative]
 shared_scopes: []
 paths: []

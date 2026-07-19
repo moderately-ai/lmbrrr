@@ -1,7 +1,7 @@
 ---
 id: dspark-bonsai-integration
 title: DSpark speculative decoding — Ternary-Bonsai-27B integration
-status: in-progress
+status: done
 priority: p1
 dependencies: []
 related: [ternary-bonsai-27b-support, ternary-decode-profile-optimize, gguf-loader-qwen35-hybrid, verify-spec-acceleration-routemap]

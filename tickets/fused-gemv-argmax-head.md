@@ -1,7 +1,7 @@
 ---
 id: fused-gemv-argmax-head
 title: "EVAL: fused GEMV->argmax head kernel (exact; never materialize 248k logits)"
-status: in-progress
+status: done
 priority: p2
 dependencies: []
 related: []

@@ -4,7 +4,7 @@ title: "EVAL p2: multi-turn chat — per-turn TTFT, hybrid state reuse across re
 status: todo
 priority: p2
 dependencies: []
-related: []
+related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [evals, runtime/candle]
 shared_scopes: []
 paths: []

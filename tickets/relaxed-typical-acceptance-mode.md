@@ -4,7 +4,7 @@ title: Relaxed typical acceptance mode
 status: done
 priority: p2
 dependencies: [integrate-dspark-block-runner]
-related: [tree-speculation-over-dspark]
+related: [tree-speculation-over-dspark, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [inference/speculative, runtime/candle]
 shared_scopes: [docs/research]
 paths: [src/main.rs, docs/research/relaxed-acceptance.md]

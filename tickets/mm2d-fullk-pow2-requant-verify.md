@@ -4,7 +4,7 @@ title: "mm2d verify: fold-free fullk GEMM on a power-of-two-scale (ue8m0) requan
 status: todo
 priority: p2
 dependencies: []
-related: [verify-spec-acceleration-routemap, eval-matmul2d-uint4b-tensor-op, dequant-bf16-dense-gemm-verify, bitplane-popcount-twotier-verify]
+related: [verify-spec-acceleration-routemap, eval-matmul2d-uint4b-tensor-op, dequant-bf16-dense-gemm-verify, bitplane-popcount-twotier-verify, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [quantization, runtime/metal]
 shared_scopes: []
 paths: [candle-metal-kernels/src/metal_src/mm2d_q2_0.metal]

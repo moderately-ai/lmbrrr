@@ -1,7 +1,7 @@
 ---
 id: spec-loop-economics-recovery
 title: "Spec-loop economics recovery: make DSpark beat chain-greedy again under honest decode-only accounting"
-status: in-progress
+status: todo
 priority: p1
 dependencies: []
 related: []

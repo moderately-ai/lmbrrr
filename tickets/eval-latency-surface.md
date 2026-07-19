@@ -4,7 +4,7 @@ title: "EVAL: latency surface — TTFT, prefill throughput, decode-vs-position c
 status: todo
 priority: p2
 dependencies: []
-related: []
+related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [evals]
 shared_scopes: []
 paths: []

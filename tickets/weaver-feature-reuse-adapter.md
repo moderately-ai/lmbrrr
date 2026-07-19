@@ -4,7 +4,7 @@ title: Weaver feature-reuse drafter adapter (share embed/unembed + target hidden
 status: todo
 priority: p2
 dependencies: []
-related: [ingest-external-dspark-head, tree-speculation-over-dspark]
+related: [ingest-external-dspark-head, tree-speculation-over-dspark, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [inference/speculative]
 shared_scopes: []
 paths: []

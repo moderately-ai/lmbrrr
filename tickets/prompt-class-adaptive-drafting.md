@@ -4,7 +4,7 @@ title: Prompt-class-adaptive drafting (recover the prose acceptance gap)
 status: todo
 priority: p2
 dependencies: []
-related: [relaxed-typical-acceptance-mode, integrate-dspark-adaptive-scheduler]
+related: [relaxed-typical-acceptance-mode, integrate-dspark-adaptive-scheduler, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [inference/speculative]
 shared_scopes: []
 paths: []

@@ -1,7 +1,7 @@
 ---
 id: deltanet-raise-occupancy-latency-bound
 title: "Raise gated-DeltaNet kernel occupancy (8% -> higher): the recurrence is latency-bound, hits BOTH verify and prefill"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [deltanet-fused-chunk-long-prefill, verify-spec-acceleration-routemap, optimize-deltanet-metal-decode, fuse-deltanet-decode-step-kernel]

@@ -1,7 +1,7 @@
 ---
 id: ternary-decode-profile-optimize
 title: "PERF: profile + optimize the ternary Bonsai-27B decode toward > 13.7 tok/s"
-status: in-progress
+status: done
 priority: p1
 dependencies: [gguf-loader-qwen35-hybrid, causal-text-model-generic-decode]
 related: [ternary-bonsai-27b-support, metal-ternary-matmul-kernel, optimize-deltanet-metal-decode, design-ternary-bonsai-e2e-bringup]

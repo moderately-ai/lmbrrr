@@ -4,7 +4,7 @@ title: Tree speculation over DSpark
 status: todo
 priority: p1
 dependencies: [integrate-dspark-block-runner]
-related: [remeasure-spec-round-cost-model, gdn-rollback-free-masked-solve, weaver-feature-reuse-adapter]
+related: [remeasure-spec-round-cost-model, gdn-rollback-free-masked-solve, weaver-feature-reuse-adapter, program-full-bonsai-acceleration-program-2026-07-19-canonical]
 scopes: [inference/speculative, runtime/candle, evals]
 shared_scopes: [docs/research]
 paths: [src/main.rs, src/qwen35.rs, evals/dspark/**, docs/research/tree-speculation-dspark.md]

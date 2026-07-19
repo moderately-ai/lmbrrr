@@ -1,7 +1,7 @@
 ---
 id: gguf-loader-qwen35-hybrid
 title: "FEATURE: GGUF model loader + name mapping for qwen35-hybrid"
-status: in-progress
+status: done
 priority: p2
 dependencies: [linear-source-seam, metal-ternary-matmul-kernel]
 related: [ternary-bonsai-27b-support, ternary-type42-dequant, qwen35-27b-config-scaleup, causal-text-model-generic-decode]

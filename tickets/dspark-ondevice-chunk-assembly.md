@@ -1,7 +1,7 @@
 ---
 id: dspark-ondevice-chunk-assembly
 title: "Kill the dspark proposal drain: on-device chunk assembly + width selection"
-status: in-progress
+status: todo
 priority: p2
 dependencies: []
 related: []
