@@ -32,9 +32,9 @@ Measured on the deployment target (M3 Pro) and the dev machine (M4 Max), same Q4
 
 | | **M3 Pro** (~150 GB/s) | **M4 Max** (~410 GB/s) | M4 speedup |
 |---|---|---|---|
-| **spec** (default, margin 1.0) | **17.4 tok/s** | **~33 tok/s** | 1.9× |
-| spec `--fast` (margin 3.0) | 18.1 | 34.6 | 1.9× |
-| plain decode | 14.5 | 33.1 | 2.3× |
+| **spec** (default, margin 1.0) | **18.2 tok/s** | **~33 tok/s** | 1.9× |
+| spec `--fast` (margin 3.0) | **20.1** | 34.6 | 1.9× |
+| plain decode | **14.5** | 33.1 | 2.3× |
 | prefill / TTFT | 44 tok/s | 105 tok/s | 2.4× |
 
 Acceptance is identical across machines (margin-1.0 → mean 3.0 tokens accepted / round). The Q8_0 drafter adds a few percent on top (~25% faster propose, ~13% of the round) with unchanged acceptance.
@@ -83,3 +83,5 @@ Bottom line: lmbrrr is a from-scratch candle/Rust engine that leads the ternary-
 - **Drafter:** Q8_0 is recommended (`gguf requant --gguf <bf16> --dtype q8_0`) — lossless acceptance, ~25% faster propose than Q4_1.
 
 *Measurements: M3 Pro (macOS 27) / M4 Max (36 GB). Rotated where noted; M4 spec showed ~9% run-to-run variance vs the M3's tight repeats (dev-box thermal/background). Absolute tok/s is prompt- and length-sensitive — treat these as the ~100-token / warm regime.*
+
+*v3 blessed baseline 2026-07-19 (Q8_0 drafter, N=128, 3 rotated reps, prose): plain 14.47 / exact 15.35 byte-match / m1 18.19 / m3 20.09. See ticket `blessed-v3-standings-re-baseline-post-f1-defaults-q8-0`.*

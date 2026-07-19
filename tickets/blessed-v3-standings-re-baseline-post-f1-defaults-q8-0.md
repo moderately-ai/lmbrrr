@@ -1,7 +1,7 @@
 ---
 id: blessed-v3-standings-re-baseline-post-f1-defaults-q8-0
 title: Blessed v3 standings re-baseline (post-F1, defaults, Q8_0)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [eval-harness-validity-fixes, program-full-bonsai-acceleration-program-2026-07-19-canonical]

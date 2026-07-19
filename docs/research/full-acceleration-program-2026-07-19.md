@@ -284,3 +284,12 @@ Campaign dashboard = this file + epic rollup + ticket comments (append-only).
 | P10.3 | `m5-matrix-unit-roadmap` |
 
 New tickets created alongside this doc for gaps (see git).
+
+## Measured results log (append-only)
+
+### 2026-07-19 — v3 baseline + flag battery (M3, Q8_0)
+
+- **v3 baseline:** plain 14.47 / exact 15.35 (byte-match) / m1 18.19 / m3 20.09
+- **Tree TW=3 exact:** KILL −12–15% tok/s (alt_wins real but cost-bound)
+- **PLD m1 prose:** KILL −20%
+- **FUSED_VERIFY_ARGMAX m1:** KILL ~0%

@@ -1,7 +1,7 @@
 ---
 id: tree-pld-fused-argmax-flag-battery-on-bonsai-code-exists-measure
 title: Tree+PLD+fused-argmax flag battery on Bonsai (code exists, measure)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [tree-speculation-over-dspark, ngram-draft-source-mux, program-full-bonsai-acceleration-program-2026-07-19-canonical]

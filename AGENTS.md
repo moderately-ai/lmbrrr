@@ -53,8 +53,8 @@ The harness fixes are landed and the fresh quiet/rotated v2 baseline is set (tic
 `eval-harness-validity-fixes`, closed — full ledger in its comments). Key reconciliation:
 the ~+6% chain inflation belonged to the **MiniCPM lane** (generate.rs device chain), never
 to the gguf lane the Bonsai standings ride on; the gguf ruler's own (small, mostly anti-spec)
-biases are fixed in 02e12c8. **v2 baseline (M3, 3 rotated reps, spread <0.3%): plain 14.42,
-spec exact 14.67 (ids byte-match plain), margin-3.0 19.18.** The 19.17 standing holds.
+biases are fixed in 02e12c8. **v2 baseline (2026-07-17): plain 14.42 / exact 14.67 / m3 19.18.**
+**v3 baseline (2026-07-19, post-F1+Q8_0+defaults): plain 14.47 / exact 15.35 / m1 18.19 / m3 20.09.**
 Trap: never set the spec mm2d env on the plain arm — LMBRRR_MM2D_PLANAR=1 at m=1 craters
 decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
 
@@ -92,19 +92,19 @@ decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
 | Current frontier ops-log (Claude-specific, non-canonical) | `~/.claude-work-2/.../memory/bonsai-acceptance-drive-plan.md` |
 | Bring-up plan (architecture, config derivations) | ticket `ternary-bonsai-27b-support` (EPIC), `dspark-bonsai-integration` |
 
-## Current frontier snapshot (as of 2026-07-17; v2-confirmed on the fixed ruler)
+## Current frontier snapshot (as of 2026-07-19; **v3** blessed baseline)
 
-- Best stable config = **19.18 tok/s** (margin-3.0 + Q8_0 drafter + planar mm2d verify + GQA v1
-  chunk + capture rollback; v2 median of 3 rotated reps). Exact (byte-match) is 14.67 vs plain
-  14.42; margin 1.0 is quality-free; margin 3.0 is the speed point — PPL cost is CLASS-DEPENDENT
-  (prose +5.4% / code +4.4% / math +3.9% / **factual +21.4%**; a per-row peakedness gate was
-  tried same-day and REFUTED — the drift is trajectory-level, not flat-row-level, and factual's
-  margin acceptance is intrinsically low (~2.0/round) anyway; ledger in the
-  relaxed-typical-acceptance-mode comments).
-- **Measured round anatomy (margin arm): ~229 ms/round FLAT in accepted-count** — verify 192 ms
-  (84%), propose 30 ms (13%), rollback+overhead ~7 ms. tok/s = (accept+1)/round_wall closes the
-  identity. **18/29 rounds saturate the width-4 cap** — acceptance is cap-truncated, so the
-  width-7 retrain's headroom exceeds the old propose-bound estimate.
+- **v3 baseline (M3, Q8_0 drafter, planar defaults, prose prompt, N=128, 3 rotated reps, spread <0.3%):**
+  plain **14.47**, spec exact **15.35** (ids byte-match plain every rep), margin-1.0 **18.19**
+  (accept 2.969), margin-3.0 / `--fast` **20.09** (accept 3.448). Ledger:
+  `blessed-v3-standings-re-baseline-post-f1-defaults-q8-0`.
+- Lift vs v2 (2026-07-17): plain 14.42→14.47; exact 14.67→15.35; m3 19.18→20.09. Acceptance
+  unchanged at m3 (3.448) — pure stack speed (F1 occupancy + Q8_0 propose + defaults).
+- Product default = margin-1.0 (quality-free). Campaign speed OP = `--fast` 20.09.
+- PPL cost at margin-3.0 remains CLASS-DEPENDENT (prose +5.4% / code +4.4% / math +3.9% /
+  **factual +21.4%**; peakedness gate REFUTED — trajectory-level; see relaxed-typical-acceptance).
+- Round anatomy (m3 arm): wall ~218 ms flat; verify dominates;  accept cap still saturates often.
+- Full program: `docs/research/full-acceleration-program-2026-07-19.md`.
 - The verify **matmul is settled** — mm2d (`matmul2d` on the packed uint2b operand) is the best
   available at m≤8 on M3 (independently re-confirmed vs MLX's f32-bound qmm, `metal_notes` §15.E).
   The lever is NOT the verify kernel — it is acceptance + verify *structure* + the arch state handling.
