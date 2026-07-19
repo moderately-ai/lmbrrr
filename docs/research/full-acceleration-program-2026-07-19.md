@@ -296,3 +296,5 @@ New tickets created alongside this doc for gaps (see git).
 
 - **Oracle width EV:** prefix-width admission 0% under flat mm2d; **skip-on-zero-accept +12–22%**. Scheduler rescoped to skip/handoff not width.
 - **ORACLE_LOG** env shipped for future EV work.
+
+- **Deep analysis** (`flag-battery-deep-analysis-2026-07-19.md`): tree tax = verify 56% + rollback 38%; PLD = verify-tail skew; skip-on-zero +9–22% on real walls; flat cost corr=−0.72; host CPU ~89% both chain/tree (delta not host).
