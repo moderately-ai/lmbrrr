@@ -198,6 +198,16 @@ struct SpecArgs {
     #[arg(long)]
     skip_after_reject: bool,
 
+    /// Conf-adaptive acceptance margin (productize P4): still runs full verify,
+    /// but picks the margin from mean draft confidence each round:
+    ///   mean_conf < lo  → exact (0)
+    ///   lo..hi          → base (default 1.0 quality-free)
+    ///   mean_conf >= hi → fast (default 3.0)
+    /// Overrides fixed `--accept-margin` / `--fast` / default when set.
+    /// Pass as `--adapt-margin lo,hi[,base[,fast]]` e.g. `1.0,2.0` or `1,2,1,3`.
+    #[arg(long, value_name = "LO,HI[,BASE[,FAST]]")]
+    adapt_margin: Option<String>,
+
     /// Disable the default planar-mm2d verify path and run the packed GEMV
     /// path instead. `gguf spec` defaults to planar mm2d (the ~19 tok/s
     /// operating point; builds + caches planes to ~/.cache/lmbrrr/mm2d on the
@@ -1968,6 +1978,57 @@ fn argmax_row(logits: &Tensor) -> Result<u32> {
         .to_vec1::<u32>()?[0])
 }
 
+/// Conf-adaptive margin schedule: (lo, hi, base, fast).
+#[derive(Clone, Copy, Debug)]
+struct AdaptMargin {
+    lo: f32,
+    hi: f32,
+    base: f32,
+    fast: f32,
+}
+
+fn parse_adapt_margin(s: Option<&str>) -> Result<Option<AdaptMargin>> {
+    let Some(s) = s else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = s.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 || parts.len() > 4 {
+        anyhow::bail!(
+            "--adapt-margin expects lo,hi[,base[,fast]], got {s:?} ({} parts)",
+            parts.len()
+        );
+    }
+    let lo: f32 = parts[0].parse().map_err(|e| anyhow::anyhow!("adapt lo: {e}"))?;
+    let hi: f32 = parts[1].parse().map_err(|e| anyhow::anyhow!("adapt hi: {e}"))?;
+    let base: f32 = if parts.len() >= 3 {
+        parts[2].parse().map_err(|e| anyhow::anyhow!("adapt base: {e}"))?
+    } else {
+        1.0
+    };
+    let fast: f32 = if parts.len() >= 4 {
+        parts[3].parse().map_err(|e| anyhow::anyhow!("adapt fast: {e}"))?
+    } else {
+        3.0
+    };
+    if !(lo < hi) {
+        anyhow::bail!("--adapt-margin needs lo < hi (got {lo} >= {hi})");
+    }
+    Ok(Some(AdaptMargin { lo, hi, base, fast }))
+}
+
+impl AdaptMargin {
+    fn margin_for_mean_conf(self, mean_conf: f32) -> Option<f32> {
+        // None => exact argmax path
+        if mean_conf < self.lo {
+            None
+        } else if mean_conf < self.hi {
+            Some(self.base).filter(|m| *m > 0.0)
+        } else {
+            Some(self.fast).filter(|m| *m > 0.0)
+        }
+    }
+}
+
 /// DSpark speculative decode: prefill+capture the target's tap layers, seed the
 /// drafter context, then per round draft a block, verify it in one target pass,
 /// accept the longest exact-match prefix, roll the target KV back to the
@@ -1989,6 +2050,7 @@ fn spec_decode(
     use_tree: bool,
     skip_low_conf: Option<f32>,
     skip_after_reject: bool,
+    adapt_margin: Option<AdaptMargin>,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -2083,6 +2145,9 @@ fn spec_decode(
     let mut skip_rounds = 0usize;
     let mut skip_tokens = 0usize;
     let mut skip_next = false; // set after accepted==0 when skip_after_reject
+    let mut adapt_exact_rounds = 0usize;
+    let mut adapt_base_rounds = 0usize;
+    let mut adapt_fast_rounds = 0usize;
 
     let decode = Instant::now();
     while committed.len() < max_new_tokens && committed.last() != Some(&eos) {
@@ -2256,7 +2321,11 @@ fn spec_decode(
                     };
                     propose_s += tp.elapsed().as_secs_f64();
                     // Keep confidences for skip-low-conf, oracle log, or accept-probe AUC.
-                    let conf = if oracle_log || skip_low_conf.is_some() || accept_probe {
+                    let conf = if oracle_log
+                        || skip_low_conf.is_some()
+                        || accept_probe
+                        || adapt_margin.is_some()
+                    {
                         Some(proposal.confidence_logits.clone())
                     } else {
                         None
@@ -2362,7 +2431,26 @@ fn spec_decode(
         // exact argmax match (lossless greedy), or typical acceptance — the
         // draft survives while its target logit is within `margin` of the
         // top logit. Computed before the logits drop below.
-        let accepted = match accept_margin {
+        // Conf-adaptive schedule overrides the fixed margin when enabled.
+        let round_margin: Option<f32> = if let (Some(ad), Some(conf)) =
+            (adapt_margin, conf_opt.as_ref())
+        {
+            if conf.is_empty() {
+                accept_margin
+            } else {
+                let mean_c = conf.iter().sum::<f32>() / conf.len() as f32;
+                let m = ad.margin_for_mean_conf(mean_c);
+                match m {
+                    None => adapt_exact_rounds += 1,
+                    Some(x) if (x - ad.fast).abs() < 1e-3 => adapt_fast_rounds += 1,
+                    Some(_) => adapt_base_rounds += 1,
+                }
+                m
+            }
+        } else {
+            accept_margin
+        };
+        let accepted = match round_margin {
             None => drafts
                 .iter()
                 .zip(targets.iter())
@@ -2638,6 +2726,10 @@ fn spec_decode(
             "skip_after_reject": skip_after_reject,
             "skip_rounds": skip_rounds,
             "skip_tokens": skip_tokens,
+            "adapt_margin": adapt_margin.map(|a| format!("{},{},{},{}", a.lo, a.hi, a.base, a.fast)),
+            "adapt_exact_rounds": adapt_exact_rounds,
+            "adapt_base_rounds": adapt_base_rounds,
+            "adapt_fast_rounds": adapt_fast_rounds,
             "eos_reached": eos_reached,
             "discarded_tokens": discarded_tokens,
             "round_wall_ms": round_wall_ms,
@@ -2716,6 +2808,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 a.tree,
                 a.skip_low_conf,
                 a.skip_after_reject,
+                parse_adapt_margin(a.adapt_margin.as_deref())?,
             )
         }
         GgufCmd::Profile(a) => {
