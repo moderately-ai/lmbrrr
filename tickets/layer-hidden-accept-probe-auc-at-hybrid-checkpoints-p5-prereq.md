@@ -1,7 +1,7 @@
 ---
 id: layer-hidden-accept-probe-auc-at-hybrid-checkpoints-p5-prereq
 title: Layer-hidden→accept probe AUC at hybrid checkpoints (P5 prereq)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]

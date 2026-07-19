@@ -146,3 +146,7 @@ Conf head **does** separate means (accepted conf ~2.4 vs rejected ~0.1–0.6) �
 ## 8. Live skip-policy A/B (follow-up)
 
 Implemented `--skip-low-conf` and `--skip-after-reject`. **Both lose live** (see scheduler ticket). Corrects §5: offline skip-on-zero EV is **not** a ship lever without a high-precision causal zero predictor. The +9–22% figures remain valid only as an *oracle upper bound* on replacing zero rounds, not as a policy EV.
+
+## 9. Accept-probe AUC (P5)
+
+Checkpoint hidden scalars (L15/31/47/63 rms/mean/maxabs) AUC ≤0.63 for on_accept_prefix. Drafter conf AUC 0.79 (best) still &lt;0.85 bar. Early-exit verify not unparked on simple features.
