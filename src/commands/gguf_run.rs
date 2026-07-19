@@ -2206,7 +2206,12 @@ fn spec_decode(
                         drafter.propose(anchor, offset, width)?
                     };
                     propose_s += tp.elapsed().as_secs_f64();
-                    let conf = oracle_log.then(|| proposal.confidence_logits.clone());
+                    // Keep confidences whenever skip-low-conf or oracle log needs them.
+                    let conf = if oracle_log || skip_low_conf.is_some() {
+                        Some(proposal.confidence_logits.clone())
+                    } else {
+                        None
+                    };
                     (proposal.tokens, false, conf)
                 }
             };
