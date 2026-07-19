@@ -2001,6 +2001,9 @@ fn spec_decode(
     }
 
     let dbg = std::env::var(lmbrrr::env_keys::SPEC_DEBUG).is_ok();
+    let oracle_log = std::env::var(lmbrrr::env_keys::ORACLE_LOG).is_ok();
+    // Per-round records for offline scheduler EV (confidence + exact accept mask).
+    let mut oracle_rounds: Vec<serde_json::Value> = Vec::new();
 
     // Partial-accept rollback strategy: capture-based closed-form
     // reconstruction by default (no re-forward; the capture is one S0 + small
@@ -2178,24 +2181,25 @@ fn spec_decode(
             // proposed main chain.
             pre_drafts = Some(p.tokens);
         }
-        let (drafts, used_pld) = match (copy_draft, pre_drafts) {
-            (Some(d), _) => {
-                pld_rounds += 1;
-                (d, true)
-            }
-            (None, Some(d)) => (d, false),
-            (None, None) => {
-                let tp = Instant::now();
-                let proposal = if dbg && rounds == 0 {
-                    drafter.propose_with_diagnostics(anchor, offset, width)?
-                } else {
-                    drafter.propose(anchor, offset, width)?
-                };
-                propose_s += tp.elapsed().as_secs_f64();
-                let p = if dbg { proposal.tokens.clone() } else { proposal.tokens };
-                (p, false)
-            }
-        };
+        let (drafts, used_pld, conf_opt): (Vec<u32>, bool, Option<Vec<f32>>) =
+            match (copy_draft, pre_drafts) {
+                (Some(d), _) => {
+                    pld_rounds += 1;
+                    (d, true, None)
+                }
+                (None, Some(d)) => (d, false, None),
+                (None, None) => {
+                    let tp = Instant::now();
+                    let proposal = if dbg && rounds == 0 {
+                        drafter.propose_with_diagnostics(anchor, offset, width)?
+                    } else {
+                        drafter.propose(anchor, offset, width)?
+                    };
+                    propose_s += tp.elapsed().as_secs_f64();
+                    let conf = oracle_log.then(|| proposal.confidence_logits.clone());
+                    (proposal.tokens, false, conf)
+                }
+            };
         let round_width = drafts.len();
         if dbg {
             eprintln!(
@@ -2280,6 +2284,25 @@ fn spec_decode(
             Some(_) => 0,
         };
         verify_s += tv.elapsed().as_secs_f64();
+        // Offline scheduler oracle: per-position exact-match mask + confidences.
+        // Exact mask is the lossless accept length at each prefix; independent
+        // of margin so EV of width truncation is comparable across modes.
+        if oracle_log {
+            let exact_mask: Vec<bool> = drafts
+                .iter()
+                .zip(targets.iter())
+                .map(|(d, t)| d == t)
+                .collect();
+            let exact_prefix = exact_mask.iter().take_while(|&&m| m).count();
+            oracle_rounds.push(serde_json::json!({
+                "round": rounds,
+                "conf": conf_opt,
+                "exact_mask": exact_mask,
+                "exact_prefix": exact_prefix,
+                "accepted": accepted,
+                "wall_ms": round_t.elapsed().as_secs_f64() * 1000.0,
+            }));
+        }
         drop(logits); // free the [1, chunk, 248k] verify logits before any re-forward
         let caps = model.take_device_captures();
         let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
@@ -2395,6 +2418,7 @@ fn spec_decode(
             "round_wall_ms": round_wall_ms,
             "round_accepted": round_accepted,
             "overhead_seconds": decode_seconds - propose_s - verify_s - rollback_s,
+            "oracle_rounds": if oracle_log { serde_json::Value::Array(oracle_rounds) } else { serde_json::Value::Null },
             "provenance": super::run_bench::report_provenance_json(),
         })
     );

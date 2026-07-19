@@ -54,6 +54,9 @@ pub const PROPOSE_TIMING: &str = "LMBRRR_PROPOSE_TIMING";
 pub const VT_PROFILE: &str = "LMBRRR_VT_PROFILE";
 /// Spec-run per-round debug trace (proposals/anchors), `gguf spec`.
 pub const SPEC_DEBUG: &str = "LMBRRR_SPEC_DEBUG";
+/// Emit per-round confidence logits + per-position exact-accept mask in the
+/// gguf-spec JSON report (`oracle_rounds`) for offline scheduler EV analysis.
+pub const ORACLE_LOG: &str = "LMBRRR_ORACLE_LOG";
 
 /// Every `LMBRRR_*` key the runtime resolves via `std::env::var`.
 /// `RuntimeConfig::from_env` warns on any `LMBRRR_*` variable present in the
@@ -92,6 +95,7 @@ pub const KNOWN_LMBRRR_KEYS: &[&str] = &[
     PROPOSE_TIMING,
     VT_PROFILE,
     SPEC_DEBUG,
+    ORACLE_LOG,
 ];
 
 // --- External (OS / framework) vars, not part of the LMBRRR tunable surface ---
