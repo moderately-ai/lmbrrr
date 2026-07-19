@@ -1,7 +1,7 @@
 ---
 id: m-1-bitplane-decode-gemv-b3-successor-133-7-vs-111-gb-s
 title: m=1 bitplane decode GEMV (B3 successor; 133.7 vs 111 GB/s)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [bitplane-popcount-twotier-verify, wider-unpack-weight-code, program-full-bonsai-acceleration-program-2026-07-19-canonical]

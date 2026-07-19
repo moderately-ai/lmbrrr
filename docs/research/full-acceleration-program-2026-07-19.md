@@ -302,3 +302,6 @@ New tickets created alongside this doc for gaps (see git).
 - **Skip policies LIVE REFUTED:** `--skip-low-conf 1.0` −25%; `--skip-after-reject` −5–9% exact/m1. Oracle +22% was non-causal (inplace zero after seeing it). Reactive is wrong time offset. Conf thr lacks precision. Flags default OFF. See bonsai-gguf-port-specscheduler ticket.
 
 - **Accept-probe AUC (P5 prereq):** 424 rows; best layer RMS AUC ~0.63; **conf AUC 0.79 < 0.85 kill**. Early-exit on checkpoint scalars NOT unparked. `LMBRRR_ACCEPT_PROBE` shipped.
+
+- **adapt-margin:** shipped `--adapt-margin 1,2`. N=128 prose ≈m3 tps with better PPL than m3; N=96 multi-prompt mixed (often m1-class). Opt-in only.
+- **bitplane m=1 exact:** blocked without act-quant; isolated int4 bitplane ~107–122 GB/s vs mv 106.

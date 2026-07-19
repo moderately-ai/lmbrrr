@@ -1,7 +1,7 @@
 ---
 id: class-entropy-adaptive-acceptance-policy-productize-margin
 title: Class/entropy-adaptive acceptance policy (productize margin)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [prompt-class-adaptive-drafting, relaxed-typical-acceptance-mode, program-full-bonsai-acceleration-program-2026-07-19-canonical]

@@ -85,3 +85,9 @@ Bottom line: lmbrrr is a from-scratch candle/Rust engine that leads the ternary-
 *Measurements: M3 Pro (macOS 27) / M4 Max (36 GB). Rotated where noted; M4 spec showed ~9% run-to-run variance vs the M3's tight repeats (dev-box thermal/background). Absolute tok/s is prompt- and length-sensitive — treat these as the ~100-token / warm regime.*
 
 *v3 blessed baseline 2026-07-19 (Q8_0 drafter, N=128, 3 rotated reps, prose): plain 14.47 / exact 15.35 byte-match / m1 18.19 / m3 20.09. See ticket `blessed-v3-standings-re-baseline-post-f1-defaults-q8-0`.*
+
+### Conf-adaptive margin (experimental)
+
+`--adapt-margin 1.0,2.0` picks exact / margin-1 / margin-3 per round from mean draft confidence.
+On a long prose run it can match `--fast` throughput with better teacher-forced PPL than global margin-3;
+multi-prompt results are mixed — keep opt-in until the suite gate passes.
