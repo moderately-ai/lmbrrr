@@ -2255,8 +2255,8 @@ fn spec_decode(
                         drafter.propose(anchor, offset, width)?
                     };
                     propose_s += tp.elapsed().as_secs_f64();
-                    // Keep confidences whenever skip-low-conf or oracle log needs them.
-                    let conf = if oracle_log || skip_low_conf.is_some() {
+                    // Keep confidences for skip-low-conf, oracle log, or accept-probe AUC.
+                    let conf = if oracle_log || skip_low_conf.is_some() || accept_probe {
                         Some(proposal.confidence_logits.clone())
                     } else {
                         None
