@@ -186,10 +186,17 @@ struct SpecArgs {
 
     /// Skip verify when mean drafter confidence is below this threshold: feed
     /// the pending anchor as a plain 1-token greedy step instead (~69 ms vs
-    /// ~218 ms verify). Oracle EV 2026-07-19: exact +11–14% at thr≈1.0–2.0;
-    /// m1 smaller. Default OFF. See flag-battery-deep-analysis + oracle ticket.
+    /// ~218 ms verify). Live A/B 2026-07-19: thr≥1.0 over-skips (−25% tok/s)
+    /// because offline EV assumed a fixed trajectory; use only very low thr
+    /// (≤0) or prefer `--skip-after-reject`. Default OFF.
     #[arg(long)]
     skip_low_conf: Option<f32>,
+
+    /// After a fully-rejected draft round (accepted==0), take the next step as
+    /// plain greedy (no propose/verify). Causal, no conf calibration needed.
+    /// Offline EV modest; compounds with low-conf skip. Default OFF.
+    #[arg(long)]
+    skip_after_reject: bool,
 
     /// Disable the default planar-mm2d verify path and run the packed GEMV
     /// path instead. `gguf spec` defaults to planar mm2d (the ~19 tok/s
@@ -1981,6 +1988,7 @@ fn spec_decode(
     use_pld: bool,
     use_tree: bool,
     skip_low_conf: Option<f32>,
+    skip_after_reject: bool,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -2069,10 +2077,46 @@ fn spec_decode(
     let mut flat_rows = 0usize;
     let mut skip_rounds = 0usize;
     let mut skip_tokens = 0usize;
+    let mut skip_next = false; // set after accepted==0 when skip_after_reject
 
     let decode = Instant::now();
     while committed.len() < max_new_tokens && committed.last() != Some(&eos) {
         let round_t = Instant::now();
+
+        // Reactive skip: previous round fully rejected → plain greedy step.
+        if skip_next {
+            skip_next = false;
+            model.set_device_capture(Some(layers.clone()));
+            let step = Tensor::from_slice(&[anchor], (1, 1), device)?;
+            let tv = Instant::now();
+            let logits = model.forward_all_logits(&step, offset)?;
+            let next = argmax_row(&logits)?;
+            verify_s += tv.elapsed().as_secs_f64();
+            drop(logits);
+            let caps = model.take_device_captures();
+            let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
+            drop(caps);
+            drafter.append_context(&ctx_feat, offset)?;
+            drop(ctx_feat);
+            offset += 1;
+            committed.push(next);
+            committed_raw += 1;
+            rounds += 1;
+            skip_rounds += 1;
+            skip_tokens += 1;
+            anchor = next;
+            device.synchronize()?;
+            round_wall_ms.push(round_t.elapsed().as_secs_f64() * 1000.0);
+            round_accepted.push(0);
+            if dbg {
+                eprintln!("round {rounds}: SKIP after-reject -> greedy {next}");
+            }
+            if next == eos {
+                break;
+            }
+            continue;
+        }
+
         if dbg {
             eprintln!("round {}: snapshot...", rounds + 1);
         }
@@ -2438,6 +2482,9 @@ fn spec_decode(
         device.synchronize()?;
         round_wall_ms.push(round_t.elapsed().as_secs_f64() * 1000.0);
         round_accepted.push(accepted);
+        if skip_after_reject && accepted == 0 {
+            skip_next = true;
+        }
         if dbg {
             eprintln!(
                 "round {rounds}: offset={offset} accepted={accepted}/{width} committed={}",
@@ -2489,6 +2536,7 @@ fn spec_decode(
             "tree_rounds": tree_rounds,
             "alt_wins": alt_wins,
             "skip_low_conf": skip_low_conf,
+            "skip_after_reject": skip_after_reject,
             "skip_rounds": skip_rounds,
             "skip_tokens": skip_tokens,
             "eos_reached": eos_reached,
@@ -2563,6 +2611,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 a.pld,
                 a.tree,
                 a.skip_low_conf,
+                a.skip_after_reject,
             )
         }
         GgufCmd::Profile(a) => {
