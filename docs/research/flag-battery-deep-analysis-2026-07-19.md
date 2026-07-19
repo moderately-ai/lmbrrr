@@ -142,3 +142,7 @@ Conf head **does** separate means (accepted conf ~2.4 vs rejected ~0.1–0.6) �
 4. Live host CPU distinguishes host-bound vs GPU-bound **deltas**; here both ~89% so delta is GPU-sync path.  
 5. xctrace leaf sums are **not** a substitute for in-loop verify_seconds on this stack; use xctrace for gaps/DVFS, gpudebug embed for isolated kernels.  
 6. For skip-on-zero claims, simulate on **empirical** `round_wall_ms` + plain ms, not only analytic flat model.
+
+## 8. Live skip-policy A/B (follow-up)
+
+Implemented `--skip-low-conf` and `--skip-after-reject`. **Both lose live** (see scheduler ticket). Corrects §5: offline skip-on-zero EV is **not** a ship lever without a high-precision causal zero predictor. The +9–22% figures remain valid only as an *oracle upper bound* on replacing zero rounds, not as a policy EV.

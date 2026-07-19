@@ -298,3 +298,5 @@ New tickets created alongside this doc for gaps (see git).
 - **ORACLE_LOG** env shipped for future EV work.
 
 - **Deep analysis** (`flag-battery-deep-analysis-2026-07-19.md`): tree tax = verify 56% + rollback 38%; PLD = verify-tail skew; skip-on-zero +9–22% on real walls; flat cost corr=−0.72; host CPU ~89% both chain/tree (delta not host).
+
+- **Skip policies LIVE REFUTED:** `--skip-low-conf 1.0` −25%; `--skip-after-reject` −5–9% exact/m1. Oracle +22% was non-causal (inplace zero after seeing it). Reactive is wrong time offset. Conf thr lacks precision. Flags default OFF. See bonsai-gguf-port-specscheduler ticket.

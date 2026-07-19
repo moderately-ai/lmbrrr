@@ -1,7 +1,7 @@
 ---
 id: bonsai-gguf-port-specscheduler-sts-kill-fixed-block-size-width
 title: "Bonsai gguf: port SpecScheduler + STS (kill fixed block_size width)"
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [implement-dspark-hardware-aware-prefix-scheduler, program-full-bonsai-acceleration-program-2026-07-19-canonical]
