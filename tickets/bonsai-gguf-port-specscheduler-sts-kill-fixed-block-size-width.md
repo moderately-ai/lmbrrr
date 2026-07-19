@@ -31,3 +31,15 @@ kill if 6-class suite ≤ fixed block_size width
 ### Reporting
 Ticket comment must include: exactness, blessed config, regime tags, measured-vs-inferred, kill result, what it does NOT prove.
 
+## RESCOPE (2026-07-19 oracle)
+
+`oracle-best-width-offline-from-confidences-scheduler-ev-gate` measured:
+
+- **Prefix-width admission = 0% lift** under flat mm2d verify (cost invariant in m≤8).
+- **Skip-on-zero-accept = +12–22% oracle lift** (exact +21.6%, m1 +11.8%).
+- Conf head separates accept/reject means but conf-threshold *width* cuts hurt.
+
+**Implement instead:** predict total-reject rounds (from conf vector / STS) and
+**skip draft → plain greedy step** (chain-handoff), not Appendix-A left-to-right
+width scan. Kill criterion: suite ≥ +3% vs fixed width-4, no class −2%.
+

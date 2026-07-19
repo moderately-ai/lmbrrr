@@ -1,7 +1,7 @@
 ---
 id: oracle-best-width-offline-from-confidences-scheduler-ev-gate
 title: Oracle best-width offline from confidences (scheduler EV gate)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]

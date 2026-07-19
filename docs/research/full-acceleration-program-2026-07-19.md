@@ -293,3 +293,6 @@ New tickets created alongside this doc for gaps (see git).
 - **Tree TW=3 exact:** KILL −12–15% tok/s (alt_wins real but cost-bound)
 - **PLD m1 prose:** KILL −20%
 - **FUSED_VERIFY_ARGMAX m1:** KILL ~0%
+
+- **Oracle width EV:** prefix-width admission 0% under flat mm2d; **skip-on-zero-accept +12–22%**. Scheduler rescoped to skip/handoff not width.
+- **ORACLE_LOG** env shipped for future EV work.
