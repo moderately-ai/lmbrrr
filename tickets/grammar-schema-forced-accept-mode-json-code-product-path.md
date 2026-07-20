@@ -1,7 +1,7 @@
 ---
 id: grammar-schema-forced-accept-mode-json-code-product-path
 title: Grammar/schema forced-accept mode (JSON/code product path)
-status: in-progress
+status: done
 priority: p3
 dependencies: []
 related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]
@@ -9,9 +9,6 @@ scopes: [inference/speculative]
 shared_scopes: []
 paths: []
 tags: [route-map, acceptance, product, program-2026-07-19]
-claimed_from: todo
-assignee: agent-program
-lease_expires_at: 1784559860
 ---
 
 ## Program ID: `P4.4`

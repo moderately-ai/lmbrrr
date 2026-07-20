@@ -320,3 +320,6 @@ New tickets created alongside this doc for gaps (see git).
 - **Soft-default 6-class N=96 (3-rep med tps):** prose 19.95 / code 19.95 / math 16.78 / factual 20.91 / chat 21.97 / reason 19.91.
 - **Width-7 block7 GGUF live:** KILL deploy — 5.3 tps / acc 0.22 vs w4 19.9/3.36 (exclusive M3). Retrain+fidelity required.
 - **AGENTS:** M3 process exclusivity rule (one GPU workload; clear stragglers; no concurrent harvest).
+
+- **Quality scrap N=64 exclusive:** soft ≈ exact PPL prose; factual exact accept-starved (10.8 tps) vs soft 20.9.
+- **--grammar-json** shipped (P); null standings lift on default thinky JSON prompts.

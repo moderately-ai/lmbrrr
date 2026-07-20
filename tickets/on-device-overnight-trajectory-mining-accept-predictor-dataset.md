@@ -1,7 +1,7 @@
 ---
 id: on-device-overnight-trajectory-mining-accept-predictor-dataset
 title: On-device overnight trajectory mining → accept-predictor dataset
-status: in-progress
+status: todo
 priority: p2
 dependencies: []
 related: [sprinter-approx-verify-audit, program-full-bonsai-acceleration-program-2026-07-19-canonical]
@@ -9,9 +9,6 @@ scopes: [evals, inference/speculative]
 shared_scopes: []
 paths: []
 tags: [route-map, approx-verify, program-2026-07-19]
-claimed_from: todo
-assignee: agent-program
-lease_expires_at: 1784558084
 ---
 
 ## Program ID: `P7.7 / P5 data`
