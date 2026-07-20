@@ -1,5 +1,6 @@
 use std::{
-    sync::{Arc, Mutex},
+    collections::HashSet,
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -9,10 +10,25 @@ use candle_transformers::utils::repeat_kv;
 use serde::Serialize;
 
 use crate::config::{LayerType, TextConfig};
+use crate::env_keys;
 use crate::linear_source::{LinearPart, LinearSource};
 use crate::model_ctx::ModelCtx;
 use crate::quantized_linear::{MixedLinear, QuantizedTextArtifact};
 use crate::runtime_config::KernelRouteConfig;
+
+fn gdn_skip_layers() -> &'static HashSet<usize> {
+    static SKIP: OnceLock<HashSet<usize>> = OnceLock::new();
+    SKIP.get_or_init(|| {
+        std::env::var(env_keys::GDN_SKIP_LAYERS)
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .filter_map(|p| p.trim().parse::<usize>().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Qwen35ProfileEvent {
@@ -2578,10 +2594,19 @@ impl DecoderLayer {
                 tree.map(|t| t.positions.as_slice()),
             )?,
             (TokenMixer::Linear(attn), None) => {
-                attn.forward(normed, layer_index, offset, profiler)?
+                if gdn_skip_layers().contains(&layer_index) {
+                    // Quality strip-probe: zero mixer out → residual identity.
+                    Tensor::zeros_like(normed)?
+                } else {
+                    attn.forward(normed, layer_index, offset, profiler)?
+                }
             }
             (TokenMixer::Linear(attn), Some(tree)) => {
-                attn.forward_tree(normed, tree.branch_width)?
+                if gdn_skip_layers().contains(&layer_index) {
+                    Tensor::zeros_like(normed)?
+                } else {
+                    attn.forward_tree(normed, tree.branch_width)?
+                }
             }
         };
         // Fused residual-add + post-attention norm: one dispatch emits both

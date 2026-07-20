@@ -62,6 +62,9 @@ pub const ORACLE_LOG: &str = "LMBRRR_ORACLE_LOG";
 pub const ACCEPT_PROBE: &str = "LMBRRR_ACCEPT_PROBE";
 /// Accumulate per-verify GDN gate/delta magnitude histograms (selective-compute prereq).
 pub const GDN_HIST: &str = "LMBRRR_GDN_HIST";
+/// Comma-separated GDN layer indices whose mixer output is forced to 0
+/// (identity residual) for quality strip-probes. Example: `0,1,2,5,6`.
+pub const GDN_SKIP_LAYERS: &str = "LMBRRR_GDN_SKIP_LAYERS";
 
 /// Every `LMBRRR_*` key the runtime resolves via `std::env::var`.
 /// `RuntimeConfig::from_env` warns on any `LMBRRR_*` variable present in the
@@ -103,6 +106,7 @@ pub const KNOWN_LMBRRR_KEYS: &[&str] = &[
     ORACLE_LOG,
     ACCEPT_PROBE,
     GDN_HIST,
+    GDN_SKIP_LAYERS,
 ];
 
 // --- External (OS / framework) vars, not part of the LMBRRR tunable surface ---
