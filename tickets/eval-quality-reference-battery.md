@@ -1,7 +1,7 @@
 ---
 id: eval-quality-reference-battery
 title: "EVAL: quality reference battery — perplexity + text-agreement vs bf16, the standing gate for any non-bit-preserving change"
-status: todo
+status: in-progress
 priority: p1
 dependencies: []
 related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]
@@ -9,6 +9,9 @@ scopes: [evals, quantization]
 shared_scopes: []
 paths: []
 tags: [eval-wave, quality]
+claimed_from: todo
+assignee: agent-program
+lease_expires_at: 1784559859
 ---
 WHY: our quality instruments are logit-local (transformers parity oracle, stub-oracle 0.75 bound at 128 tokens, per-linear quant sensitivity) or anecdotal (argmax coverage on two classes for the 32k head). NOBODY has measured what the deployed q4k-full-text stack costs end-to-end vs the bf16 reference in perplexity or long-form text agreement. Three queued lines of work are non-bit-preserving and currently have NO quantitative ship gate: imatrix-calibration-pipeline (q3 mixes), any MLX-format migration out of eval-apples-to-apples-qmv, and any future head/vocab trick. This battery is their gate, and its first run establishes the baseline we should have had all along.
 

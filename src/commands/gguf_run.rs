@@ -239,6 +239,17 @@ struct SpecArgs {
     #[arg(long)]
     no_adapt_margin: bool,
 
+    /// Product grammar assist (JSON): after normal acceptance stops, keep
+    /// accepting draft tokens whose decoded text is JSON-structural
+    /// (`{}[]",:\s`) or a pure integer/float fragment while their logit is
+    /// within `--grammar-margin` of the row max. Not for standings. Exactness P.
+    #[arg(long)]
+    grammar_json: bool,
+
+    /// Logit slack for `--grammar-json` structural extension (default 8.0).
+    #[arg(long, default_value_t = 8.0)]
+    grammar_margin: f32,
+
     /// Disable the default planar-mm2d verify path and run the packed GEMV
     /// path instead. `gguf spec` defaults to planar mm2d (the ~19 tok/s
     /// operating point; builds + caches planes to ~/.cache/lmbrrr/mm2d on the
@@ -2065,6 +2076,19 @@ impl AdaptMargin {
 /// accept the longest exact-match prefix, roll the target KV back to the
 /// commit point, and extend the drafter context with the committed captures.
 #[allow(clippy::too_many_arguments)]
+
+fn json_structural_piece(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return true; // whitespace-only tokens
+    }
+    if t.chars().all(|c| matches!(c, '{' | '}' | '[' | ']' | ':' | ',' | '"' | '-' | '+' | '.' | 'e' | 'E') || c.is_ascii_digit()) {
+        return true;
+    }
+    // multi-char pure number
+    t.parse::<f64>().is_ok()
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RecycleOpts {
     enabled: bool,
@@ -2092,6 +2116,8 @@ fn spec_decode(
     skip_after_reject: bool,
     adapt_margin: Option<AdaptMargin>,
     recycle: RecycleOpts,
+    grammar_json: bool,
+    grammar_margin: f32,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -2634,7 +2660,7 @@ fn spec_decode(
         } else {
             accept_margin
         };
-        let accepted = match round_margin {
+        let mut accepted = match round_margin {
             None => drafts
                 .iter()
                 .zip(targets.iter())
@@ -2693,6 +2719,39 @@ fn spec_decode(
             }
             Some(_) => 0,
         };
+        // Product JSON grammar: extend past the normal accept stop while draft
+        // pieces are structural/numeric and still near the top logit.
+        let mut grammar_extra = 0usize;
+        if grammar_json && accepted < round_width {
+            let verify_logits = logits.narrow(1, 0, round_width)?;
+            let max_vals = verify_logits
+                .max(D::Minus1)?
+                .to_dtype(DType::F32)?
+                .squeeze(0)?
+                .to_vec1::<f32>()?;
+            let idx = Tensor::from_slice(&drafts[..round_width], (1, round_width, 1), device)?;
+            let draft_vals = verify_logits
+                .gather(&idx, D::Minus1)?
+                .to_dtype(DType::F32)?
+                .squeeze(2)?
+                .squeeze(0)?
+                .to_vec1::<f32>()?;
+            let mut i = accepted;
+            while i < round_width {
+                let piece = tok
+                    .decode(&[drafts[i]], false)
+                    .unwrap_or_default();
+                if !json_structural_piece(&piece) {
+                    break;
+                }
+                if draft_vals[i] < max_vals[i] - grammar_margin {
+                    break;
+                }
+                i += 1;
+                grammar_extra += 1;
+            }
+            accepted += grammar_extra;
+        }
         verify_s += tv.elapsed().as_secs_f64();
         // Offline scheduler oracle: per-position exact-match mask + confidences.
         // Exact mask is the lossless accept length at each prefix; independent
@@ -2943,6 +3002,8 @@ fn spec_decode(
             "pld_accepted": pld_accepted,
             "recycle": recycle.enabled,
             "recycle_ungated": recycle.ungated,
+            "grammar_json": grammar_json,
+            "grammar_margin": grammar_margin,
             "recycle_rounds": recycle_rounds,
             "recycle_proposed_tokens": recycle_proposed_tokens,
             "recycle_accepted_tokens": recycle_accepted_tokens,
@@ -3067,6 +3128,8 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                     margin: a.recycle_margin,
                     topk: a.recycle_topk,
                 },
+                a.grammar_json,
+                a.grammar_margin,
             )
         }
         GgufCmd::Profile(a) => {
