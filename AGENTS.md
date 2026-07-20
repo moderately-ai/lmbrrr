@@ -103,7 +103,7 @@ decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
   (fact/summarize collapse). Escape: `--no-adapt-margin` / `--exact` / `--fast`.
 - Lift vs v2 (2026-07-17): plain 14.42→14.47; exact 14.67→15.35; m3 19.18→20.09. Acceptance
   unchanged at m3 (3.448) — pure stack speed (F1 occupancy + Q8_0 propose + defaults).
-- Product default = margin-1.0 (quality-free). Campaign speed OP = `--fast` 20.09.
+- Product default = **soft adapt** (`0,1.5,1,3`) → prose N=128 **20.16 tok/s** (≈`--fast` 20.10; suite mean +5.3% vs fixed m1). Fixed m1 via `--no-adapt-margin` = 18.20. Campaign speed OP = `--fast` ~20.1.
 - PPL cost at margin-3.0 remains CLASS-DEPENDENT (prose +5.4% / code +4.4% / math +3.9% /
   **factual +21.4%**; peakedness gate REFUTED — trajectory-level; see relaxed-typical-acceptance).
 - Round anatomy (m3 arm): wall ~218 ms flat; verify dominates;  accept cap still saturates often.

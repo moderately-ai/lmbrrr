@@ -33,7 +33,7 @@ Measured on the deployment target (M3 Pro) and the dev machine (M4 Max), same Q4
 
 | | **M3 Pro** (~150 GB/s) | **M4 Max** (~410 GB/s) | M4 speedup |
 |---|---|---|---|
-| **spec** (default, soft adapt) | **~19.8 tok/s** | **~33 tok/s** | 1.9× |
+| **spec** (default, soft adapt) | ****~20.2 tok/s** (prose N=128 median 20.16)** | **~33 tok/s** | 1.9× |
 | spec `--fast` (margin 3.0) | **20.1** | 34.6 | 1.9× |
 | plain decode | **14.5** | 33.1 | 2.3× |
 | prefill / TTFT | 44 tok/s | 105 tok/s | 2.4× |

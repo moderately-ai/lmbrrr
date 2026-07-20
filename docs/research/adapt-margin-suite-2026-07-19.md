@@ -36,3 +36,15 @@ Default `gguf spec` → soft adapt `0,1.5,1,3`.
 `--no-adapt-margin` for fixed m1; `--fast` / `--exact` unchanged.
 
 Raw rows: `evals/adapt/soft_suite_rows.json`.
+
+## v3b default re-baseline (prose N=128, 3 reps, post-default-flip)
+
+| arm | median tps | accept |
+|---|---:|---:|
+| plain | 14.47 | — |
+| exact | 15.35 | 2.342 |
+| m1 `--no-adapt-margin` | 18.20 | 2.969 |
+| **default soft** | **20.16** | 3.448 |
+| `--fast` | 20.10 | 3.448 |
+
+Default matches `--fast` speed on this prompt with soft schedule (0 exact / ~10 base / ~17 fast).
