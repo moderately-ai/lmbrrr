@@ -98,6 +98,9 @@ decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
   plain **14.47**, spec exact **15.35** (ids byte-match plain every rep), margin-1.0 **18.19**
   (accept 2.969), margin-3.0 / `--fast` **20.09** (accept 3.448). Ledger:
   `blessed-v3-standings-re-baseline-post-f1-defaults-q8-0`.
+- **Default OP (2026-07-19 suite):** soft `--adapt-margin 0,1.5,1,3` → mean **~19.8 tok/s** (+5.3% vs fixed m1),
+  mean PPL better than global `--fast`; no class PPL worse than m3. Hard adapt `1,2` REFUTED as default
+  (fact/summarize collapse). Escape: `--no-adapt-margin` / `--exact` / `--fast`.
 - Lift vs v2 (2026-07-17): plain 14.42→14.47; exact 14.67→15.35; m3 19.18→20.09. Acceptance
   unchanged at m3 (3.448) — pure stack speed (F1 occupancy + Q8_0 propose + defaults).
 - Product default = margin-1.0 (quality-free). Campaign speed OP = `--fast` 20.09.

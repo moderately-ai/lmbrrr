@@ -19,8 +19,9 @@ lmbrrr gguf decode --gguf Ternary-Bonsai-27B-Q2_0.gguf --warmup
 
 | flag | acceptance | quality | when |
 |---|---|---|---|
-| *(default)* | `--accept-margin 1.0` | **quality-free** (teacher-forced PPL == greedy; gate passed) | the default |
-| `--fast` | `--accept-margin 3.0` | PPL +8–16% vs greedy (coherent, a real tradeoff) | max speed, quality-tolerant |
+| *(default)* | soft `--adapt-margin 0,1.5,1,3` | conf-scheduled base/fast; suite +5.3% vs fixed m1, PPL better than global `--fast` | the default |
+| `--no-adapt-margin` | fixed `--accept-margin 1.0` | quality-free fixed margin | A/B / reproducibility |
+| `--fast` | `--accept-margin 3.0` | PPL higher (class-dependent; factual costly) | max speed, quality-tolerant |
 | `--exact` / `--accept-margin 0` | exact argmax | **byte-identical to greedy** (verified) | reproducibility / lossless |
 | `--no-mm2d` | (any margin) | — | disable the planar verify path (packed GEMV) |
 
@@ -32,7 +33,7 @@ Measured on the deployment target (M3 Pro) and the dev machine (M4 Max), same Q4
 
 | | **M3 Pro** (~150 GB/s) | **M4 Max** (~410 GB/s) | M4 speedup |
 |---|---|---|---|
-| **spec** (default, margin 1.0) | **18.2 tok/s** | **~33 tok/s** | 1.9× |
+| **spec** (default, soft adapt) | **~19.8 tok/s** | **~33 tok/s** | 1.9× |
 | spec `--fast` (margin 3.0) | **20.1** | 34.6 | 1.9× |
 | plain decode | **14.5** | 33.1 | 2.3× |
 | prefill / TTFT | 44 tok/s | 105 tok/s | 2.4× |
@@ -86,8 +87,17 @@ Bottom line: lmbrrr is a from-scratch candle/Rust engine that leads the ternary-
 
 *v3 blessed baseline 2026-07-19 (Q8_0 drafter, N=128, 3 rotated reps, prose): plain 14.47 / exact 15.35 byte-match / m1 18.19 / m3 20.09. See ticket `blessed-v3-standings-re-baseline-post-f1-defaults-q8-0`.*
 
-### Conf-adaptive margin (experimental)
+### Conf-adaptive margin (default)
 
-`--adapt-margin 1.0,2.0` picks exact / margin-1 / margin-3 per round from mean draft confidence.
-On a long prose run it can match `--fast` throughput with better teacher-forced PPL than global margin-3;
-multi-prompt results are mixed — keep opt-in until the suite gate passes.
+Default `gguf spec` uses soft `--adapt-margin 0,1.5,1,3` (never falls back to exact; base=1.0 when conf&lt;1.5, fast=3.0 when conf≥1.5).
+
+Suite 2026-07-19 (6 short class prompts × 2 reps, N=96, Q8_0 drafter):
+
+| arm | mean tps | mean PPL |
+|---|---:|---:|
+| fixed m1 (`--no-adapt-margin`) | 18.84 | 1.106 |
+| global `--fast` (m3) | 20.15 | 1.165 |
+| **soft adapt (default)** | **19.83** | **1.131** |
+
++5.3% vs fixed m1, −1.6% vs `--fast`, PPL better than `--fast` on every class. Hard adapt `1,2` (can go exact) **regresses** fact/summarize — do not use as default.
+Disable with `--no-adapt-margin`, `--exact`, `--fast`, or explicit `--accept-margin`.

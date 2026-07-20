@@ -198,15 +198,22 @@ struct SpecArgs {
     #[arg(long)]
     skip_after_reject: bool,
 
-    /// Conf-adaptive acceptance margin (productize P4): still runs full verify,
-    /// but picks the margin from mean draft confidence each round:
-    ///   mean_conf < lo  → exact (0)
-    ///   lo..hi          → base (default 1.0 quality-free)
+    /// Conf-adaptive acceptance margin: still runs full verify, but picks the
+    /// margin from mean draft confidence each round:
+    ///   mean_conf < lo  → exact (0)  [use lo=0 to never fall back to exact]
+    ///   lo..hi          → base (default 1.0)
     ///   mean_conf >= hi → fast (default 3.0)
-    /// Overrides fixed `--accept-margin` / `--fast` / default when set.
-    /// Pass as `--adapt-margin lo,hi[,base[,fast]]` e.g. `1.0,2.0` or `1,2,1,3`.
+    /// DEFAULT operating point is soft `0,1.5,1,3` (suite 2026-07-19: +5.3%
+    /// vs fixed m1, PPL better than global `--fast`, no class worse than m3).
+    /// Disabled by `--exact`, `--fast`, `--accept-margin`, or `--no-adapt-margin`.
+    /// Pass as `lo,hi[,base[,fast]]` e.g. `0,1.5` or `1,2,1,3`.
     #[arg(long, value_name = "LO,HI[,BASE[,FAST]]")]
     adapt_margin: Option<String>,
+
+    /// Force fixed margin mode (default margin 1.0 unless `--accept-margin` /
+    /// `--fast` / `--exact`). Disables the soft conf-adaptive default.
+    #[arg(long)]
+    no_adapt_margin: bool,
 
     /// Disable the default planar-mm2d verify path and run the packed GEMV
     /// path instead. `gguf spec` defaults to planar mm2d (the ~19 tok/s
@@ -2775,9 +2782,10 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
         }
         GgufCmd::Spec(a) => {
             let spec_run = lmbrrr::runtime_config::SpecRunConfig::from_env();
-            // Effective acceptance: --exact / --accept-margin 0 => lossless
-            // byte-match (None path); explicit margin honored; --fast => 3.0;
-            // default => 1.0 (quality-free). Precedence: exact > margin > fast.
+            // Effective acceptance precedence:
+            //   --exact > --accept-margin > --fast > soft adapt default > fixed 1.0
+            // Soft adapt (`0,1.5,1,3`) is the default OP (suite-gated 2026-07-19).
+            // --no-adapt-margin forces fixed margin 1.0 (or whatever --accept-margin says).
             let accept_margin = if a.exact {
                 None
             } else if let Some(m) = a.accept_margin {
@@ -2785,7 +2793,24 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
             } else if a.fast {
                 Some(3.0)
             } else {
-                Some(1.0)
+                Some(1.0) // fallback when adapt is off / conf missing
+            };
+            let fixed_mode = a.exact || a.fast || a.accept_margin.is_some() || a.no_adapt_margin;
+            let adapt = if fixed_mode {
+                // Explicit fixed path: only honor adapt if user still passed it
+                // together with fixed flags (unusual); otherwise None.
+                if a.adapt_margin.is_some() && !a.exact && !a.no_adapt_margin {
+                    parse_adapt_margin(a.adapt_margin.as_deref())?
+                } else {
+                    None
+                }
+            } else {
+                // Default soft adapt, or user override.
+                parse_adapt_margin(
+                    a.adapt_margin
+                        .as_deref()
+                        .or(Some("0,1.5,1.0,3.0")),
+                )?
             };
             // spec defaults to the planar mm2d operating point unless --no-mm2d.
             let mm2d_default =
@@ -2808,7 +2833,7 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 a.tree,
                 a.skip_low_conf,
                 a.skip_after_reject,
-                parse_adapt_margin(a.adapt_margin.as_deref())?,
+                adapt,
             )
         }
         GgufCmd::Profile(a) => {
