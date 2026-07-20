@@ -66,11 +66,21 @@ decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
   macOS-27 GPU tools). Run ALL benches/captures/experiments on the **M3 referee**: `ssh m3`,
   repo at `~/lmbrrr-work/lmbrrr`, `git pull` to sync. Inference benches run **foreground**;
   training/Modal/remote jobs run **backgrounded** (never block a turn on them).
+- **M3 process exclusivity (non-negotiable).** The M3 GPU is a single referee, not a job
+  queue. **At most one** `lmbrrr` / harvest / gpucapture / gpudebug / xctrace workload at a
+  time. Before every M3 run: `ps aux | grep -E '[l]mbrrr|[h]arvest|gpudebug|gpucapture'` and
+  kill stragglers (`pkill -f 'target/release/lmbrrr'`). **Never** `nohup` / background an
+  inference harvest alongside another bench; never start width-N A/B while a prior ssh session
+  is still draining. Concurrent Metal clients thrash clocks, corrupt wall times, and leave
+  zombie `lmbrrr` after agent timeouts. Long overnight harvests only when explicitly requested,
+  and only with the machine otherwise idle. After aborted/timeout agent turns: re-check and
+  clear before continuing.
 - **The candle fork** lives on branch `lmbrrr` of `huggingface/candle` (remote `tomsanbear`);
   lmbrrr pins it by `rev` in `Cargo.toml`. Metal kernels go there, then bump the pin.
 - **Measurement hygiene** (see rigor protocol): interleave A/B arms (DVFS droop), wait for a
   quiet machine (CPU load + GPU wallpaper contamination), first runs after a kernel change are
   shader-compile transients, `nextest` strips the metal feature — rebuild the release binary.
+  Contaminated multi-process runs are **invalid** — discard and re-run exclusive.
 - **GPU profiling**: `evals/profiling/` (needs a debuggable uv python — see its README);
   `metal_notes.md` for the gpudebug flow. Never `profile run --embed` (deadlocks).
 - **Tickets**: `ticketsplease` / `tkt` CLI (`/ticketsplease` skill). Work is git-versioned
@@ -111,10 +121,12 @@ decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
 - The verify **matmul is settled** — mm2d (`matmul2d` on the packed uint2b operand) is the best
   available at m≤8 on M3 (independently re-confirmed vs MLX's f32-bound qmm, `metal_notes` §15.E).
   The lever is NOT the verify kernel — it is acceptance + verify *structure* + the arch state handling.
-- Ranked actionable order (in the epic): width-7 drafter retrain (Modal fused prep+train
-  in flight) → Sequoia-DP'd tree with a confidence-placed branch → rollback-free GDN
-  masked-solve + lossless wide tree → EAGLE-3 drafter upgrade. Escape hatch (bounded quality
-  loss): more relaxed acceptance.
+- Living program + measured kills (2026-07-19): recycle/int2b/LUT/chunk-assembly/GDN-layer-skip
+  KILL; Weaver propose ceiling ~+11% if τ holds (backbone 26 ms/rd); conf AUC 0.89 on multi-class
+  harvest (does **not** revive skip-low-conf). Soft 6-class N=96 med ~20 tps (math ~16.8).
+- Ranked next (program doc, not stale epic): Weaver/EAGLE train (Modal) → width-7 fidelity then
+  retrain go/no-go → richer P5 mid-forward features → tree only after rollback cheapening.
+  Escape hatch (bounded quality loss): more relaxed acceptance / product grammar mode.
 
 ## Board caveat (run this first)
 
