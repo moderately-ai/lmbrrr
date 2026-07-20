@@ -1,7 +1,7 @@
 ---
 id: gdn-gate-state-histogram-diag-selective-compute-prereq
 title: GDN gate/β/state-Δ histogram diag (selective-compute prereq)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [program-full-bonsai-acceleration-program-2026-07-19-canonical]

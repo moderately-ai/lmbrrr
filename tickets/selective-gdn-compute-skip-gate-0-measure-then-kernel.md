@@ -1,8 +1,8 @@
 ---
 id: selective-gdn-compute-skip-gate-0-measure-then-kernel
 title: Selective GDN compute skip (gate≈0) — measure then kernel
-status: todo
-priority: p2
+status: done
+priority: p1
 dependencies: []
 related: [program-full-bonsai-acceleration-program-2026-07-19-canonical, fuse-deltanet-decode-step-kernel]
 scopes: [runtime/metal, candle-fork]

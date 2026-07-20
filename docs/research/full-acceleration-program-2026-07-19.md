@@ -307,3 +307,4 @@ New tickets created alongside this doc for gaps (see git).
 - **bitplane m=1 exact:** blocked without act-quant; isolated int4 bitplane ~107–122 GB/s vs mv 106.
 
 - **DEFAULT FLIP:** soft adapt `0,1.5,1,3` is now `gguf spec` default (+5.3% vs fixed m1, PPL better than --fast). Hard `1,2` stays opt-in only. See adapt-margin-suite-2026-07-19.md.
+- **GDN hist:** 90% of verify slots |delta|<1e-2 (PROMOTE signal). **Whole-layer GDN skip REFUTED** (PPL 1.08→83). Need exact-preserving fine-grained kernel, not layer dropout.
