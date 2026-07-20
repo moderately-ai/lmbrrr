@@ -318,3 +318,5 @@ New tickets created alongside this doc for gaps (see git).
 - **On-device chunk assembly:** KILL (overhead bucket 4.9 ms/rd = 2.2%; assembly ≤1%).
 - **LUT/T-MAC Metal:** KILL regime (issue-bound; no data shuffle; GEMV already > MLX).
 - **Soft-default 6-class N=96 (3-rep med tps):** prose 19.95 / code 19.95 / math 16.78 / factual 20.91 / chat 21.97 / reason 19.91.
+- **Width-7 block7 GGUF live:** KILL deploy — 5.3 tps / acc 0.22 vs w4 19.9/3.36 (exclusive M3). Retrain+fidelity required.
+- **AGENTS:** M3 process exclusivity rule (one GPU workload; clear stragglers; no concurrent harvest).

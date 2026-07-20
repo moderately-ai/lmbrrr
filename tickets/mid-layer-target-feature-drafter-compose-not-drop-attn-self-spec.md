@@ -1,7 +1,7 @@
 ---
 id: mid-layer-target-feature-drafter-compose-not-drop-attn-self-spec
 title: Mid-layer target feature drafter (compose; not drop-attn self-spec)
-status: in-progress
+status: todo
 priority: p2
 dependencies: []
 related: [eagle3-drafter-upgrade, program-full-bonsai-acceleration-program-2026-07-19-canonical]
@@ -9,9 +9,6 @@ scopes: [inference/speculative]
 shared_scopes: []
 paths: []
 tags: [route-map, drafter, program-2026-07-19]
-claimed_from: todo
-assignee: agent-program
-lease_expires_at: 1784557974
 ---
 
 ## Program ID: `P6.2`
