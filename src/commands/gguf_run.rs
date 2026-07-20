@@ -2704,12 +2704,24 @@ fn spec_decode(
                 .map(|(d, t)| d == t)
                 .collect();
             let exact_prefix = exact_mask.iter().take_while(|&&m| m).count();
+            let mean_conf = conf_opt.as_ref().map(|c| {
+                if c.is_empty() {
+                    0.0
+                } else {
+                    c.iter().sum::<f32>() / c.len() as f32
+                }
+            });
             oracle_rounds.push(serde_json::json!({
                 "round": rounds,
                 "conf": conf_opt,
+                "mean_conf": mean_conf,
+                "drafts": drafts,
                 "exact_mask": exact_mask,
                 "exact_prefix": exact_prefix,
                 "accepted": accepted,
+                "round_margin": round_margin,
+                "used_pld": used_pld,
+                "used_recycle": used_recycle,
                 "wall_ms": round_t.elapsed().as_secs_f64() * 1000.0,
             }));
         }
