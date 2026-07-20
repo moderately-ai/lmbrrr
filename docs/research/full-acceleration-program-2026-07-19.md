@@ -308,3 +308,7 @@ New tickets created alongside this doc for gaps (see git).
 
 - **DEFAULT FLIP:** soft adapt `0,1.5,1,3` is now `gguf spec` default (+5.3% vs fixed m1, PPL better than --fast). Hard `1,2` stays opt-in only. See adapt-margin-suite-2026-07-19.md.
 - **GDN hist:** 90% of verify slots |delta|<1e-2 (PROMOTE signal). **Whole-layer GDN skip REFUTED** (PPL 1.08→83). Need exact-preserving fine-grained kernel, not layer dropout.
+
+- **MLX kernel gap inverted:** lmbrrr Q2_0 GEMV 106 GB/s vs MLX qmv 62 GB/s on 17408×5120 m=1. e2e MLX lead is not the matmul. See mlx-vs-lmbrrr-kernel-gap-2026-07-19.md.
+- **Rollback emission:** default OP already ~2 ms/rd fused reconstruct; per-pos S emission KILL as chain lever.
+- **MTLBinaryArchive:** cold prefill tax ~15–20 ms vs 3s weight load; KILL for tok/s.

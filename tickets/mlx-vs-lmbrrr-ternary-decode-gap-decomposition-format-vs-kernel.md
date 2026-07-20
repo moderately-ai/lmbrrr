@@ -1,7 +1,7 @@
 ---
 id: mlx-vs-lmbrrr-ternary-decode-gap-decomposition-format-vs-kernel
 title: MLX vs lmbrrr ternary decode gap decomposition (format vs kernel)
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [eval-apples-to-apples-qmv, program-full-bonsai-acceleration-program-2026-07-19-canonical]

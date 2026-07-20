@@ -1,7 +1,7 @@
 ---
 id: per-position-gdn-state-emission-for-free-partial-accept-rollback
 title: Per-position GDN state emission for free partial-accept rollback
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [emit-per-position-verify-states, program-full-bonsai-acceleration-program-2026-07-19-canonical]

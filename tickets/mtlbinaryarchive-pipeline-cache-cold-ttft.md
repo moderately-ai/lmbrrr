@@ -1,7 +1,7 @@
 ---
 id: mtlbinaryarchive-pipeline-cache-cold-ttft
 title: MTLBinaryArchive pipeline cache (cold TTFT)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [eval-latency-surface, program-full-bonsai-acceleration-program-2026-07-19-canonical]
