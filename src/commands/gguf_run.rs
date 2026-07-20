@@ -198,6 +198,30 @@ struct SpecArgs {
     #[arg(long)]
     skip_after_reject: bool,
 
+    /// Verify-logit token recycling (Bonsai gguf). Banks top-k from every
+    /// verify; proposes a short chain when banked top-1/top-2 margin clears
+    /// `--recycle-margin`. Default OFF — measure before defaulting (mm2d-flat
+    /// makes short drafts harsher than MiniCPM's 1.77× break-even).
+    #[arg(long)]
+    recycle: bool,
+
+    /// Prefer recycle over the trained drafter whenever the table hits.
+    /// Default OFF: recycle only on skip-after-reject rounds (no preempt).
+    #[arg(long)]
+    recycle_ungated: bool,
+
+    /// Max recycled chain depth.
+    #[arg(long, default_value_t = 2)]
+    recycle_depth: usize,
+
+    /// Min banked top-1/top-2 logit margin to extend a recycled chain.
+    #[arg(long, default_value_t = 6.0)]
+    recycle_margin: f32,
+
+    /// Candidates banked per verify row.
+    #[arg(long, default_value_t = 8)]
+    recycle_topk: usize,
+
     /// Conf-adaptive acceptance margin: still runs full verify, but picks the
     /// margin from mean draft confidence each round:
     ///   mean_conf < lo  → exact (0)  [use lo=0 to never fall back to exact]
@@ -2041,6 +2065,15 @@ impl AdaptMargin {
 /// accept the longest exact-match prefix, roll the target KV back to the
 /// commit point, and extend the drafter context with the committed captures.
 #[allow(clippy::too_many_arguments)]
+#[derive(Clone, Copy, Debug)]
+struct RecycleOpts {
+    enabled: bool,
+    ungated: bool,
+    depth: usize,
+    margin: f32,
+    topk: usize,
+}
+
 fn spec_decode(
     model: &mut Qwen35CausalLM,
     drafter_path: &std::path::Path,
@@ -2058,6 +2091,7 @@ fn spec_decode(
     skip_low_conf: Option<f32>,
     skip_after_reject: bool,
     adapt_margin: Option<AdaptMargin>,
+    recycle: RecycleOpts,
 ) -> Result<()> {
     use lmbrrr::dspark::DsparkDrafter;
     let load = Instant::now();
@@ -2139,6 +2173,10 @@ fn spec_decode(
     let mut pld_accepted = 0usize;
     let mut tree_rounds = 0usize;
     let mut alt_wins = 0usize;
+    let mut recycle_table = lmbrrr::token_recycle::RecycleTable::new();
+    let mut recycle_rounds = 0usize;
+    let mut recycle_proposed_tokens = 0usize;
+    let mut recycle_accepted_tokens = 0usize;
     let mut offset = ids.len();
     // The anchor is prefill-produced but counted in the decode window —
     // symmetric with plain decode, whose first token is also the prefill argmax.
@@ -2163,14 +2201,118 @@ fn spec_decode(
     while committed.len() < max_new_tokens && committed.last() != Some(&eos) {
         let round_t = Instant::now();
 
-        // Reactive skip: previous round fully rejected → plain greedy step.
+        // Reactive skip: previous round fully rejected → recycle draft if
+        // available, else plain greedy. Recycle is free propose; still pays
+        // a verify of (1+depth) under mm2d-flat.
         if skip_next {
             skip_next = false;
+            let recycle_skip_draft = if recycle.enabled {
+                recycle_table.propose(anchor, recycle.depth, recycle.margin)
+            } else {
+                None
+            };
+            if let Some(chain) = recycle_skip_draft {
+                // Use the main draft/verify path with a recycle draft.
+                // Jump by setting a local that the copy path consumes.
+                let snapshot = model.snapshot_decode_state();
+                let mut chunk = Vec::with_capacity(chain.len() + 1);
+                chunk.push(anchor);
+                chunk.extend_from_slice(&chain);
+                let chunk_input = Tensor::from_slice(&chunk, (1, chunk.len()), device)?;
+                model.set_device_capture(Some(layers.clone()));
+                let tv = Instant::now();
+                let logits = model.forward_all_logits(&chunk_input, offset)?;
+                let targets = if recycle.enabled {
+                    let summary = lmbrrr::spec::recycle_topk::logits_argmax_and_topk(
+                        &logits,
+                        recycle.topk,
+                    )?;
+                    for (i, (_, cands)) in summary.iter().enumerate() {
+                        recycle_table.update(chunk[i], cands);
+                    }
+                    summary.into_iter().map(|(a, _)| a).collect::<Vec<_>>()
+                } else {
+                    logits
+                        .argmax(D::Minus1)?
+                        .to_dtype(DType::U32)?
+                        .flatten_all()?
+                        .to_vec1::<u32>()?
+                };
+                verify_s += tv.elapsed().as_secs_f64();
+                drop(logits);
+                let caps = model.take_device_captures();
+                let ctx_feat = Tensor::cat(&caps, D::Minus1)?;
+                drop(caps);
+                let accepted = chain
+                    .iter()
+                    .zip(targets.iter())
+                    .take_while(|(d, t)| d == t)
+                    .count();
+                let bonus = targets[accepted];
+                let committed_feat = ctx_feat.narrow(1, 0, accepted + 1)?.contiguous()?;
+                drop(ctx_feat);
+                drafter.append_context(&committed_feat, offset)?;
+                drop(committed_feat);
+                if accepted != chain.len() {
+                    let tr = Instant::now();
+                    if let Err(err) = model.rollback_to_prefix(&snapshot, accepted + 1) {
+                        eprintln!("warning: recycle skip rollback failed, readvance ({err})");
+                        model.restore_decode_state(&snapshot)?;
+                        let readvance = &chunk[..accepted + 1];
+                        let readvance_input =
+                            Tensor::from_slice(readvance, (1, readvance.len()), device)?;
+                        let _ = model.forward_all_logits(&readvance_input, offset)?;
+                        let _ = model.take_device_captures();
+                    }
+                    device.synchronize()?;
+                    rollback_s += tr.elapsed().as_secs_f64();
+                }
+                offset += accepted + 1;
+                committed.extend_from_slice(&chain[..accepted]);
+                committed.push(bonus);
+                committed_raw += accepted + 1;
+                accepted_total += accepted;
+                rounds += 1;
+                recycle_rounds += 1;
+                recycle_proposed_tokens += chain.len();
+                recycle_accepted_tokens += accepted;
+                skip_rounds += 1; // still a post-reject recovery round
+                anchor = bonus;
+                device.synchronize()?;
+                round_wall_ms.push(round_t.elapsed().as_secs_f64() * 1000.0);
+                round_accepted.push(accepted);
+                if dbg {
+                    eprintln!(
+                        "round {rounds}: SKIP after-reject -> recycle accepted={accepted}/{}",
+                        chain.len()
+                    );
+                }
+                if committed[committed.len() - (accepted + 1)..]
+                    .iter()
+                    .any(|&t| t == eos)
+                {
+                    if let Some(pos) = committed.iter().position(|&t| t == eos) {
+                        committed.truncate(pos + 1);
+                    }
+                    break;
+                }
+                continue;
+            }
             model.set_device_capture(Some(layers.clone()));
             let step = Tensor::from_slice(&[anchor], (1, 1), device)?;
             let tv = Instant::now();
             let logits = model.forward_all_logits(&step, offset)?;
             let next = argmax_row(&logits)?;
+            // Bank the greedy step for future recycle proposes.
+            if recycle.enabled {
+                if let Ok(summary) =
+                    lmbrrr::spec::recycle_topk::logits_argmax_and_topk(&logits, recycle.topk)
+                {
+                    if let Some((_, cands)) = summary.first() {
+                        recycle_table.update(anchor, cands);
+                    }
+                }
+            }
             verify_s += tv.elapsed().as_secs_f64();
             drop(logits);
             let caps = model.take_device_captures();
@@ -2210,10 +2352,21 @@ fn spec_decode(
             ngram_index.extend(&committed[indexed..]);
             indexed = committed.len();
         }
-        let copy_draft = if use_pld {
-            ngram_index.propose(8).filter(|d| d.len() >= width)
-        } else {
-            None
+        // Copy drafts: PLD first, then recycle (ungated only — gated path is
+        // skip-after-reject above). Recycle never requires drafter-width.
+        let copy_draft: Option<(Vec<u32>, bool)> = {
+            let from_pld = if use_pld {
+                ngram_index.propose(8).filter(|d| d.len() >= width)
+            } else {
+                None
+            };
+            match from_pld {
+                Some(d) => Some((d, false)),
+                None if recycle.enabled && recycle.ungated => recycle_table
+                    .propose(anchor, recycle.depth, recycle.margin)
+                    .map(|d| (d, true)),
+                None => None,
+            }
         };
         // Tree round: verify [anchor, a_1..a_tw, b_1..b_tw] as one flattened
         // chunk (tw = 3 keeps 1 + 2*tw = 7 within the flat m<=8 tensor tile)
@@ -2315,34 +2468,44 @@ fn spec_decode(
             // proposed main chain.
             pre_drafts = Some(p.tokens);
         }
-        let (drafts, used_pld, conf_opt): (Vec<u32>, bool, Option<Vec<f32>>) =
-            match (copy_draft, pre_drafts) {
-                (Some(d), _) => {
+        let (drafts, used_pld, used_recycle, conf_opt): (
+            Vec<u32>,
+            bool,
+            bool,
+            Option<Vec<f32>>,
+        ) = match (copy_draft, pre_drafts) {
+            (Some((d, from_recycle)), _) => {
+                if from_recycle {
+                    recycle_rounds += 1;
+                    recycle_proposed_tokens += d.len();
+                    (d, false, true, None)
+                } else {
                     pld_rounds += 1;
-                    (d, true, None)
+                    (d, true, false, None)
                 }
-                (None, Some(d)) => (d, false, None),
-                (None, None) => {
-                    let tp = Instant::now();
-                    let proposal = if dbg && rounds == 0 {
-                        drafter.propose_with_diagnostics(anchor, offset, width)?
-                    } else {
-                        drafter.propose(anchor, offset, width)?
-                    };
-                    propose_s += tp.elapsed().as_secs_f64();
-                    // Keep confidences for skip-low-conf, oracle log, or accept-probe AUC.
-                    let conf = if oracle_log
-                        || skip_low_conf.is_some()
-                        || accept_probe
-                        || adapt_margin.is_some()
-                    {
-                        Some(proposal.confidence_logits.clone())
-                    } else {
-                        None
-                    };
-                    (proposal.tokens, false, conf)
-                }
-            };
+            }
+            (None, Some(d)) => (d, false, false, None),
+            (None, None) => {
+                let tp = Instant::now();
+                let proposal = if dbg && rounds == 0 {
+                    drafter.propose_with_diagnostics(anchor, offset, width)?
+                } else {
+                    drafter.propose(anchor, offset, width)?
+                };
+                propose_s += tp.elapsed().as_secs_f64();
+                // Keep confidences for skip-low-conf, oracle log, or accept-probe AUC.
+                let conf = if oracle_log
+                    || skip_low_conf.is_some()
+                    || accept_probe
+                    || adapt_margin.is_some()
+                {
+                    Some(proposal.confidence_logits.clone())
+                } else {
+                    None
+                };
+                (proposal.tokens, false, false, conf)
+            }
+        };
         let round_width = drafts.len();
 
         // Conf-gated verify skip (program P3.1 rescope): when mean drafter
@@ -2432,11 +2595,20 @@ fn spec_decode(
         }
         let tv = Instant::now();
         let logits = model.forward_all_logits(&chunk_input, offset)?;
-        let targets = logits
-            .argmax(D::Minus1)?
-            .to_dtype(DType::U32)?
-            .flatten_all()?
-            .to_vec1::<u32>()?;
+        let targets = if recycle.enabled {
+            let summary =
+                lmbrrr::spec::recycle_topk::logits_argmax_and_topk(&logits, recycle.topk)?;
+            for (i, (_, cands)) in summary.iter().enumerate() {
+                recycle_table.update(chunk[i], cands);
+            }
+            summary.into_iter().map(|(a, _)| a).collect::<Vec<_>>()
+        } else {
+            logits
+                .argmax(D::Minus1)?
+                .to_dtype(DType::U32)?
+                .flatten_all()?
+                .to_vec1::<u32>()?
+        };
         // Acceptance rule (port of the MiniCPM loop's --accept-margin):
         // exact argmax match (lossless greedy), or typical acceptance — the
         // draft survives while its target logit is within `margin` of the
@@ -2659,6 +2831,9 @@ fn spec_decode(
         if used_pld {
             pld_accepted += accepted;
         }
+        if used_recycle {
+            recycle_accepted_tokens += accepted;
+        }
         if accepted != round_width {
             let tr = Instant::now();
             if readvance_rollback {
@@ -2752,6 +2927,13 @@ fn spec_decode(
             "flat_rows": flat_rows,
             "pld_rounds": pld_rounds,
             "pld_accepted": pld_accepted,
+            "recycle": recycle.enabled,
+            "recycle_ungated": recycle.ungated,
+            "recycle_rounds": recycle_rounds,
+            "recycle_proposed_tokens": recycle_proposed_tokens,
+            "recycle_accepted_tokens": recycle_accepted_tokens,
+            "recycle_table_rows": recycle_table.len(),
+            "recycle_table_updates": recycle_table.updates(),
             "tree_rounds": tree_rounds,
             "alt_wins": alt_wins,
             "skip_low_conf": skip_low_conf,
@@ -2864,6 +3046,13 @@ pub(crate) fn gguf(args: GgufArgs) -> Result<()> {
                 a.skip_low_conf,
                 a.skip_after_reject,
                 adapt,
+                RecycleOpts {
+                    enabled: a.recycle,
+                    ungated: a.recycle_ungated,
+                    depth: a.recycle_depth,
+                    margin: a.recycle_margin,
+                    topk: a.recycle_topk,
+                },
             )
         }
         GgufCmd::Profile(a) => {
