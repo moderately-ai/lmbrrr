@@ -2099,7 +2099,9 @@ fn spec_decode(
     // The drafter gets its OWN ModelCtx: sharing the target's mm2d scratch made
     // the drafter's quantized backbone read corrupted state (block_hidden -> 0).
     let drafter_ctx = ModelCtx::default();
-    let mut drafter = DsparkDrafter::load_gguf(&dgguf, device, DType::BF16, &drafter_ctx, false)?;
+    let propose_timing = lmbrrr::runtime_config::SpecRunConfig::from_env().propose_timing;
+    let mut drafter =
+        DsparkDrafter::load_gguf(&dgguf, device, DType::BF16, &drafter_ctx, propose_timing)?;
     let _ = ctx;
     let layers = drafter.config.target_layer_ids.clone();
     let width = drafter.config.block_size;
