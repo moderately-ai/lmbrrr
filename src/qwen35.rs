@@ -24,6 +24,25 @@ pub struct Qwen35ProfileEvent {
     pub seconds: f64,
 }
 
+/// Per-layer GDN verify-capture magnitude sample (selective-compute prereq).
+#[derive(Clone, Debug, Serialize)]
+pub struct GdnGateLayerStats {
+    pub layer_index: usize,
+    pub heads: usize,
+    pub seq: usize,
+    /// Mean |delta| over all head×pos×dv elements.
+    pub delta_abs_mean: f32,
+    pub delta_abs_p50: f32,
+    pub delta_abs_p90: f32,
+    pub delta_abs_p99: f32,
+    /// Fraction of (head, pos) slots whose mean_|delta| over dv is below eps.
+    pub frac_slots_below_1e3: f32,
+    pub frac_slots_below_1e2: f32,
+    pub frac_slots_below_1e1: f32,
+    /// Mean |gcs| (cumulative gate log) over head×pos.
+    pub gcs_abs_mean: f32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Qwen35Profiler {
     events: Arc<Mutex<Vec<Qwen35ProfileEvent>>>,
@@ -2696,6 +2715,12 @@ impl Qwen35CausalLM {
         self.model.take_device_captures()
     }
 
+    /// Sample |delta| / |gcs| stats from GDN layers that still hold a verify
+    /// capture (call after verify forward, before rollback_to_prefix).
+    pub fn gdn_verify_gate_stats(&self) -> candle::Result<Vec<GdnGateLayerStats>> {
+        self.model.gdn_verify_gate_stats()
+    }
+
     pub fn set_verify_state_capture(&mut self, on: bool) {
         self.model.set_verify_state_capture(on);
     }
@@ -2889,6 +2914,76 @@ impl Qwen35TextModel {
     /// order, each [b, seq, hidden] on device.
     pub fn take_device_captures(&mut self) -> Vec<Tensor> {
         std::mem::take(&mut self.device_captures)
+    }
+
+    /// Peek GDN verify captures for gate/delta magnitude histograms without taking them.
+    pub fn gdn_verify_gate_stats(&self) -> Result<Vec<GdnGateLayerStats>> {
+        let mut out = Vec::new();
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            let TokenMixer::Linear(gdn) = &layer.mixer else {
+                continue;
+            };
+            let Some(cap) = gdn.verify_captured.as_ref() else {
+                continue;
+            };
+            // delta: typically [1, heads, l, dv]; gcs: [1, heads, l]
+            let d = cap.delta.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let g = cap.gcs.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            if d.is_empty() || g.is_empty() {
+                continue;
+            }
+            let mut d_abs: Vec<f32> = d.iter().map(|x| x.abs()).collect();
+            d_abs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = d_abs.len();
+            let p = |q: f32| d_abs[((n as f32 - 1.0) * q) as usize];
+            let delta_abs_mean = d_abs.iter().sum::<f32>() / n as f32;
+            // slot = head×pos mean over dv
+            let dims = cap.delta.dims();
+            // expect 4D [b,h,l,dv] or 3D — be defensive
+            let (heads, seq, dv) = match dims.len() {
+                4 => (dims[1], dims[2], dims[3]),
+                3 => (dims[0], dims[1], dims[2]),
+                _ => (1, 1, n),
+            };
+            let slots = heads * seq;
+            let mut below_1e3 = 0usize;
+            let mut below_1e2 = 0usize;
+            let mut below_1e1 = 0usize;
+            if dv > 0 && slots * dv == n {
+                for s in 0..slots {
+                    let base = s * dv;
+                    let mut sum = 0.0f32;
+                    for k in 0..dv {
+                        sum += d[base + k].abs();
+                    }
+                    let m = sum / dv as f32;
+                    if m < 1e-3 {
+                        below_1e3 += 1;
+                    }
+                    if m < 1e-2 {
+                        below_1e2 += 1;
+                    }
+                    if m < 1e-1 {
+                        below_1e1 += 1;
+                    }
+                }
+            }
+            let gcs_abs_mean = g.iter().map(|x| x.abs()).sum::<f32>() / g.len() as f32;
+            out.push(GdnGateLayerStats {
+                layer_index,
+                heads,
+                seq,
+                delta_abs_mean,
+                delta_abs_p50: p(0.50),
+                delta_abs_p90: p(0.90),
+                delta_abs_p99: p(0.99),
+                frac_slots_below_1e3: below_1e3 as f32 / slots.max(1) as f32,
+                frac_slots_below_1e2: below_1e2 as f32 / slots.max(1) as f32,
+                frac_slots_below_1e1: below_1e1 as f32 / slots.max(1) as f32,
+                gcs_abs_mean,
+            });
+        }
+        Ok(out)
     }
 
     pub fn embeddings(&self) -> &Tensor {

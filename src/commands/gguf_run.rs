@@ -2088,10 +2088,13 @@ fn spec_decode(
     let dbg = std::env::var(lmbrrr::env_keys::SPEC_DEBUG).is_ok();
     let oracle_log = std::env::var(lmbrrr::env_keys::ORACLE_LOG).is_ok();
     let accept_probe = std::env::var(lmbrrr::env_keys::ACCEPT_PROBE).is_ok();
+    let gdn_hist = std::env::var(lmbrrr::env_keys::GDN_HIST).is_ok();
     // Per-round records for offline scheduler EV (confidence + exact accept mask).
     let mut oracle_rounds: Vec<serde_json::Value> = Vec::new();
     // Per-position accept-probe rows (checkpoint hidden RMS + labels).
     let mut accept_probe_rows: Vec<serde_json::Value> = Vec::new();
+    // Accumulated GDN gate/delta samples across verify rounds.
+    let mut gdn_hist_rounds: Vec<serde_json::Value> = Vec::new();
     // Full-attn-ish checkpoints on 64L / every-4th full attn (0-based 15,31,47,63).
     const PROBE_LAYERS: [usize; 4] = [15, 31, 47, 63];
 
@@ -2537,6 +2540,28 @@ fn spec_decode(
             }));
         }
         drop(logits); // free the [1, chunk, 248k] verify logits before any re-forward
+        // Sample GDN gate magnitudes before rollback consumes verify captures.
+        if gdn_hist {
+            if let Ok(stats) = model.gdn_verify_gate_stats() {
+                if !stats.is_empty() {
+                    let mean_delta = stats.iter().map(|s| s.delta_abs_mean).sum::<f32>()
+                        / stats.len() as f32;
+                    let mean_frac_1e2 = stats.iter().map(|s| s.frac_slots_below_1e2).sum::<f32>()
+                        / stats.len() as f32;
+                    let mean_frac_1e3 = stats.iter().map(|s| s.frac_slots_below_1e3).sum::<f32>()
+                        / stats.len() as f32;
+                    gdn_hist_rounds.push(serde_json::json!({
+                        "round": rounds,
+                        "accepted": accepted,
+                        "n_gdn_layers": stats.len(),
+                        "mean_delta_abs": mean_delta,
+                        "mean_frac_slots_below_1e2": mean_frac_1e2,
+                        "mean_frac_slots_below_1e3": mean_frac_1e3,
+                        "layers": stats,
+                    }));
+                }
+            }
+        }
         let caps = model.take_device_captures();
         // Split captures: drafter taps (original order) vs accept-probe checkpoints.
         let (ctx_feat, probe_by_layer) = if accept_probe {
@@ -2745,6 +2770,11 @@ fn spec_decode(
             "oracle_rounds": if oracle_log { serde_json::Value::Array(oracle_rounds) } else { serde_json::Value::Null },
             "accept_probe_rows": if accept_probe {
                 serde_json::Value::Array(accept_probe_rows)
+            } else {
+                serde_json::Value::Null
+            },
+            "gdn_hist_rounds": if gdn_hist {
+                serde_json::Value::Array(gdn_hist_rounds)
             } else {
                 serde_json::Value::Null
             },
