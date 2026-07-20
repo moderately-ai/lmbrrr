@@ -101,3 +101,14 @@ Suite 2026-07-19 (6 short class prompts × 2 reps, N=96, Q8_0 drafter):
 
 +5.3% vs fixed m1, −1.6% vs `--fast`, PPL better than `--fast` on every class. Hard adapt `1,2` (can go exact) **regresses** fact/summarize — do not use as default.
 Disable with `--no-adapt-margin`, `--exact`, `--fast`, or explicit `--accept-margin`.
+
+### Soft-default 6-class (2026-07-19, N=96, 3-rep med)
+
+| class | tps | accept/rd |
+|---|---:|---:|
+| prose | 19.95 | 3.36 |
+| code | 19.95 | 3.36 |
+| math | 16.78 | 2.65 |
+| factual | 20.91 | 3.67 |
+| chat | 21.97 | 3.85 |
+| reason | 19.91 | 3.32 |

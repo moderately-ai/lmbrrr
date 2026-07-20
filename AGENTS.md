@@ -121,3 +121,5 @@ decode to 5.9 tok/s (planar kernel vs the mv GEMV optimum).
 `tkt reconcile` reports ~8 tickets `in-progress` with no work branch (they predate the
 tkt/branch convention or are stale). **Treat `in-progress` status skeptically** and reconcile
 against the code/`git log` before assuming a ticket reflects reality.
+
+- 2026-07-19: soft-default 6-class med ~20 tps (math 16.8); recycle/int2b/LUT/chunk-assembly closed.

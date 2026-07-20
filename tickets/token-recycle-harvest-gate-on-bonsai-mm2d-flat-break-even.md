@@ -1,7 +1,7 @@
 ---
 id: token-recycle-harvest-gate-on-bonsai-mm2d-flat-break-even
 title: Token-recycle harvest gate on Bonsai (mm2d-flat break-even)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [verify-logit-token-recycling-draft-source, program-full-bonsai-acceleration-program-2026-07-19-canonical]

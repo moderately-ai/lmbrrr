@@ -1,7 +1,7 @@
 ---
 id: lut-ternary-matmul-metal
 title: LUT / T-MAC / Four-Russians ternary matmul on Metal (probe)
-status: todo
+status: done
 priority: p3
 dependencies: []
 related: [metal-ternary-matmul-kernel]

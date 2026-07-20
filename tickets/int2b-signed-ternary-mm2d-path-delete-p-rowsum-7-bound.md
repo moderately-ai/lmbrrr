@@ -1,7 +1,7 @@
 ---
 id: int2b-signed-ternary-mm2d-path-delete-p-rowsum-7-bound
 title: int2b signed ternary mm2d path (delete P-rowsum; ≤7% bound)
-status: todo
+status: done
 priority: p2
 dependencies: []
 related: [metal-ternary-matmul-kernel, program-full-bonsai-acceleration-program-2026-07-19-canonical]

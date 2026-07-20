@@ -1,7 +1,7 @@
 ---
 id: early-exit-checkpoint-verify-full-attn-layer-probes-before-sprinter
 title: Early-exit / checkpoint verify (full-attn layer probes) before SPRINTER
-status: todo
+status: done
 priority: p1
 dependencies: []
 related: [sprinter-approx-verify-audit, program-full-bonsai-acceleration-program-2026-07-19-canonical]

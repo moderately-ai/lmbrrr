@@ -312,3 +312,9 @@ New tickets created alongside this doc for gaps (see git).
 - **MLX kernel gap inverted:** lmbrrr Q2_0 GEMV 106 GB/s vs MLX qmv 62 GB/s on 17408×5120 m=1. e2e MLX lead is not the matmul. See mlx-vs-lmbrrr-kernel-gap-2026-07-19.md.
 - **Rollback emission:** default OP already ~2 ms/rd fused reconstruct; per-pos S emission KILL as chain lever.
 - **MTLBinaryArchive:** cold prefill tax ~15–20 ms vs 3s weight load; KILL for tok/s.
+
+- **Token-recycle Bonsai:** KILL −13–22% (ungated preempts; gated never fires). `--recycle` shipped OFF.
+- **int2b mm2d:** KILL by bound (fold ≤7% mm2d; e2e ceiling ~1–2%; not worth fork).
+- **On-device chunk assembly:** KILL (overhead bucket 4.9 ms/rd = 2.2%; assembly ≤1%).
+- **LUT/T-MAC Metal:** KILL regime (issue-bound; no data shuffle; GEMV already > MLX).
+- **Soft-default 6-class N=96 (3-rep med tps):** prose 19.95 / code 19.95 / math 16.78 / factual 20.91 / chat 21.97 / reason 19.91.
