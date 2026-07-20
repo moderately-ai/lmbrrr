@@ -13,43 +13,37 @@ tags: [epic, route-map, program]
 
 # PROGRAM EPIC: Full Bonsai acceleration (2026-07-19)
 
-**Canonical plan:** `docs/research/full-acceleration-program-2026-07-19.md`
+**Canonical plan + COLD-START HANDOFF:**
+`docs/research/full-acceleration-program-2026-07-19.md` (read the handoff section at the bottom).
 
-This ticket is the dispatch hub for the full program (P0–P10). The older
-`verify-spec-acceleration-routemap` keeps the measurement ledger / refutations;
-**ranked actionable and phase order live here + the doc.**
+**As of git `802cd1e` (2026-07-19 evening).**
+
+## Current OP (shipped)
+- Default `gguf spec`: soft adapt `0,1.5,1,3` + planar mm2d + Q8_0 → **~20 tok/s** prose
+- Escapes: `--no-adapt-margin` / `--exact` / `--fast` / `--grammar-json`
+- M3: **one GPU workload at a time** (see AGENTS.md)
+
+## Do not retry (this wave)
+tree, PLD, fused argmax, skip-low-conf, skip-after-reject, recycle, whole-layer GDN skip,
+int2b, LUT, chunk-assembly, per-pos GDN emission, MTLBinaryArchive, MLX qmv port,
+block7 width-7 GGUF deploy, layer-RMS early-exit, hard adapt `1,2` as default.
+
+## Next (ranked)
+1. P0.5 full quality battery (local)
+2. P4 class/entropy margin polish (local)
+3. P7.4 Weaver train (Modal) — ~+11% ceiling if τ holds
+4. P7.1 fidelity → P7.2 width-7 retrain (Modal; block7 artifact dead)
+5. P7.3 EAGLE-3 (Modal)
+6. P5 SPRINTER mid-forward head (not conf-skip)
+7. P10.1 fullk-from-original (user $)
+8. P8 tree deep only after rollback cheapening
+9. P9 product: multiturn / 16GB / latency
 
 ## Physics (do not invert)
+- `tok/s ≈ (accept+1)/round_wall`; verify ~84%, propose ~13% (backbone ~26 ms)
+- Hot path instruction-issue-bound; mm2d m≤8 settled
+- Conf AUC high ≠ skip-verify causal
 
-- Identity: tok/s ≈ (accept+1)/round_wall; verify ~84%, propose ~13%
-- Hot kernels **instruction-issue-bound** (not DRAM-bound)
-- mm2d verify @ m≤8 = M3-local ceiling (settled)
-- Live classes: raise accept, skip verify work, exact scraps, product surface
-
-## Phase order
-
-| Phase | Name | First tickets |
-|---|---|---|
-| P0 | Truth | board-hygiene-*, blessed-v3-standings-*, eval-quality-reference-battery |
-| P1 | Free flags | tree-pld-fused-argmax-*, gdn-gate-state-histogram-*, oracle-best-width-*, layer-hidden-accept-probe-* |
-| P2 | Exact scraps | m-1-bitplane-*, int2b-signed-*, mlx-vs-lmbrrr-* |
-| P3 | Control flow | bonsai-gguf-port-specscheduler-*, token-recycle-harvest-*, per-position-gdn-* |
-| P4 | Accept policy | class-entropy-adaptive-*, grammar-schema-* |
-| P5 | Approx verify | early-exit-checkpoint-*, sprinter-*, on-device-overnight-* |
-| P6 | Hybrid | selective-gdn-*, mid-layer-target-* |
-| P7 | Drafter | width-7-free-fidelity-*, eagle3-*, weaver-*, parked width-7 retrain |
-| P8 | Deep tree | tree-speculation-*, gdn-rollback-free-*, after P1 tree + |
-| P9 | Product | eval-multiturn-*, mtlbinaryarchive-*, eval-memory-envelope, eval-latency-surface |
-| P10 | Gated $ | mm2d-fullk-*, width-7 retrain, m5-*, mlx-format migration |
-
-## Exactness classes
-
-E = exact/byte-match · Q = quality-gated · P = product-mode flag
-
-## Kill rule
-
-Every child spike names a kill criterion in its body. No kill criterion → not ready.
-
-## Do-not-retry
-
-See program doc §Do-not-retry. Do not re-open closed(wontdo) kernel routes without new regime evidence.
+## Ledger
+Per-spike detail lives in **ticket comments** (append-only) and the program doc results log.
+Older epic `verify-spec-acceleration-routemap` = refutation archive; ranked-actionable there is STALE.

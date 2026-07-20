@@ -323,3 +323,83 @@ New tickets created alongside this doc for gaps (see git).
 
 - **Quality scrap N=64 exclusive:** soft ≈ exact PPL prose; factual exact accept-starved (10.8 tps) vs soft 20.9.
 - **--grammar-json** shipped (P); null standings lift on default thinky JSON prompts.
+
+---
+
+## COLD-START HANDOFF (as of 2026-07-19 evening, git `802cd1e`)
+
+**For any new agent:** read this section after AGENTS.md + rigor-protocol. Do not re-run closed kills. One M3 GPU job at a time.
+
+### Operating point (shipped)
+- Default: `gguf spec` = soft adapt **`0,1.5,1,3`** + planar mm2d + Q8_0 drafter
+- Escapes: `--no-adapt-margin` (fixed m1), `--exact`, `--fast`, `--grammar-json` (product)
+- Standings ballpark (M3 exclusive, quiet): **~20 tok/s** soft/fast prose; plain ~14.5; exact ~15.4
+- Round anatomy: verify ~83–84% (~183 ms), propose ~13% (~30 ms; **backbone ~26 ms**), rollback ~1–2 ms, overhead ~5 ms
+- Identity: `tok/s ≈ (accept+1)/round_wall`
+
+### Closed this wave (DO NOT RETRY without new regime evidence)
+| Item | Verdict | Where logged |
+|---|---|---|
+| tree TW=3 / PLD / fused argmax | REFUTED | program log + flag-battery-deep-analysis |
+| skip-low-conf / skip-after-reject | REFUTED (oracle non-causal) | bonsai-gguf-port-specscheduler comments |
+| token-recycle Bonsai | REFUTED −13–22% | token-recycle-harvest-* comments |
+| whole-layer GDN skip | REFUTED PPL 1→83 | selective-gdn-* + gdn-hist comments |
+| int2b / LUT / chunk-assembly / per-pos S emission / MTLBinaryArchive | KILL bounds | respective tickets |
+| MLX qmv port | KILL (we win isolated GEMV 106 vs 62 GB/s) | mlx-vs-lmbrrr-kernel-gap-2026-07-19.md |
+| block7 width-7 GGUF deploy | KILL 5.3 tps / acc 0.22 | width-7-free-fidelity + drafter-width7 comments |
+| layer-RMS early-exit | park (AUC~0.5) | accept-probe / early-exit tickets |
+| hard adapt `1,2` as default | REFUTED | adapt-margin-suite-2026-07-19.md |
+
+### Nuances a new agent will misread
+1. **Conf AUC:** early probe 0.79 (kill bar); multi-class harvest **0.89 PASS** — still does **not** revive `--skip-low-conf` (causal trajectory). Conf is for **accept policy**, not verify skip.
+2. **GDN 90% tiny δ:** promotes *research* only; identity layer skip destroys quality. Need exact in-kernel path.
+3. **Weaver:** propose backbone 26 ms → **~+11% ceiling if τ holds** — needs **train**, not a local stub.
+4. **Epic `verify-spec-acceleration-routemap` ranked-actionable is STALE** — this doc + hub ticket win.
+5. **`in-progress` ticket status is untrustworthy** historically; reconcile vs git/comments.
+
+### Ranked remaining work (do in this order unless user redirects)
+
+**Local / M3 exclusive (no Modal $):**
+1. **P0.5** Full quality battery (≥3 prompts/class × exact/m1/soft/fast PPL+KLD) — `eval-quality-reference-battery`
+2. **P4.1/P4.2** Class or entropy margin polish vs soft default — kill if mean ≤ fixed m1
+3. **P7.7** Exclusive overnight trajectory harvest (`evals/trajectory/`) when user asks idle M3 — feed SPRINTER
+4. **P9.1** Multi-turn tax measure; **P9.4/P9.5** memory + latency surface (product)
+
+**Modal / user-go (highest tok/s ceiling):**
+5. **P7.4 Weaver** adapter train — target hiddens, kill if propose cut <5 ms or τ loss
+6. **P7.1** Width-7 fidelity (unpacked vs Q2_0 taps) then **P7.2 retrain** — current block7 GGUF unusable
+7. **P7.3 EAGLE-3** — kill if τ ≤ width-4 DSpark
+8. **P10.1** fullk-from-**original** bf16 — explicit $ + PPL bar (~+10–12% if OK)
+
+**Hard / later:**
+9. **P5 SPRINTER** mid-forward accept head (not drafter conf; not layer RMS) + audit protocol
+10. **P6** exact-preserving selective GDN kernel
+11. **P8** deep tree only after rollback cheapening (naive tree dead)
+12. **P2.1** bitplane decode only as **Q** int4-act path
+
+### Key env / flags (Bonsai gguf)
+- `LMBRRR_ORACLE_LOG`, `LMBRRR_ACCEPT_PROBE`, `LMBRRR_GDN_HIST`, `LMBRRR_GDN_SKIP_LAYERS` (strip only), `LMBRRR_PROPOSE_TIMING`
+- `--recycle` / `--recycle-ungated` (OFF; measured kill)
+- `--grammar-json` (product)
+- `--tree`, `--pld`, `--skip-low-conf`, `--skip-after-reject` (OFF; measured kill)
+- Models on M3: `~/models/Ternary-Bonsai-27B/` — use `*-dspark-Q8_0.gguf`; **not** `*block7*` until retrain
+
+### Artifact index
+| Doc | Role |
+|---|---|
+| `AGENTS.md` | cold start + constraints + exclusivity |
+| `docs/research/full-acceleration-program-2026-07-19.md` | **this file** — program + results log + handoff |
+| `docs/research/rigor-protocol.md` | measurement law |
+| `docs/research/adapt-margin-suite-2026-07-19.md` | soft default gate |
+| `docs/research/flag-battery-deep-analysis-2026-07-19.md` | tree/PLD/skip anatomy |
+| `docs/research/mlx-vs-lmbrrr-kernel-gap-2026-07-19.md` | matmul gap inverted |
+| `docs/performance.md` | standings scraps |
+| `metal_notes.md` | Metal 4.1 + kernel case studies |
+| `evals/trajectory/{harvest.sh,train_probe.py}` | P5 data pipeline |
+| Ticket **comments** | append-only per-route ledger (source of kill detail) |
+
+### First command for a new agent on M3
+```bash
+ssh m3 'ps aux | grep -E "[l]mbrrr|[h]arvest" | grep -v grep || echo CLEAR; uptime'
+# then single exclusive job only
+```

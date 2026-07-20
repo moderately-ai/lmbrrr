@@ -23,6 +23,10 @@ tickets, `docs/research/`, and `metal_notes.md`.)
 6. **`metal_notes.md`** — the macOS-27 GPU capture/profile playbook, the Metal 4.1
    capability facts, and the settled kernel case studies (§14, §15).
 
+7. **COLD-START HANDOFF** (bottom of the program doc) — closed kills, ranked next work,
+   env flags, artifact index. **Required** if you did not run the 2026-07-19 campaign yourself.
+
+
 ## The goal (the campaign)
 
 > Continuously push the entire on-device Bonsai/Ternary-27B inference engine — end to end,
