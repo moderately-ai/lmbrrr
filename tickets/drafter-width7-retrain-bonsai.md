@@ -1,7 +1,7 @@
 ---
 id: drafter-width7-retrain-bonsai
 title: Width-7 Bonsai DSpark drafter retrain (fill the flat m=8 verify tile)
-status: parked
+status: closed
 priority: p2
 dependencies: []
 related: [ternary-bonsai-27b-support, ternary-decode-profile-optimize, dspark-cache-redesign-beyond-400k, program-full-bonsai-acceleration-program-2026-07-19-canonical]
@@ -9,6 +9,8 @@ scopes: [evals]
 shared_scopes: []
 paths: []
 tags: [route-map, acceptance, research]
+closed_reason: wontdo
+closed_note: Deliberate cost/benefit decision; retained as research history, not active work.
 ---
 Bucket A / A1. Retrain the Bonsai DSpark drafter at block_size 7 so verify m=8 rides the SAME flat mm2d tile as today's m=5.
 
